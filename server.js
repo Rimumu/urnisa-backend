@@ -21,6 +21,11 @@ if (!DISCORD_BOT_TOKEN) {
     // We don't exit process here on render to avoid crash loops, but logs will show error
 }
 
+// Root endpoint to check if server is running
+app.get('/', (req, res) => {
+    res.send('Urnisa Bot Server is Running!');
+});
+
 app.get('/api/owner', async (req, res) => {
     try {
         // Fetch the member from the guild to get server-specific data (Nickname, Server Avatar)
