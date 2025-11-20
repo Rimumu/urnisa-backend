@@ -98,6 +98,62 @@ app.get('/api/owner', async (req, res) => {
     }
 });
 
+// Endpoint to fetch channel messages
+app.get('/api/messages', async (req, res) => {
+    const { channelId } = req.query;
+
+    if (!channelId) {
+        return res.status(400).json({ error: 'Missing channelId parameter' });
+    }
+
+    if (!DISCORD_BOT_TOKEN) {
+        console.error("Attempted to fetch messages, but no token is configured.");
+        return res.status(500).json({ error: 'Server configuration error: Missing Bot Token' });
+    }
+
+    try {
+        // Fetch latest 20 messages from the channel
+        const response = await axios.get(
+            `https://discord.com/api/v10/channels/${channelId}/messages?limit=20`,
+            {
+                headers: {
+                    Authorization: `Bot ${DISCORD_BOT_TOKEN}`
+                }
+            }
+        );
+
+        // Map data to a simple format for frontend
+        const messages = response.data.map(msg => ({
+            id: msg.id,
+            content: msg.content,
+            timestamp: msg.timestamp,
+            author: {
+                id: msg.author.id,
+                username: msg.author.username,
+                avatar: msg.author.avatar,
+                discriminator: msg.author.discriminator
+            },
+            attachments: msg.attachments || []
+        }));
+
+        // Return messages reversed so they appear chronologically (oldest to newest) 
+        // if scrolling down, but Discord returns newest first.
+        // Typically chat widgets show newest at bottom.
+        res.json(messages);
+
+    } catch (error) {
+        if (error.response) {
+            console.error('❌ Discord API Error (Messages):', error.response.status, error.response.data);
+             if (error.response.status === 403) {
+                 console.error("⚠️ PERMISSION ERROR: The bot cannot view this channel. Please ensure the bot is added to the channel and has 'View Channel' and 'Read Message History' permissions.");
+            }
+        } else {
+            console.error('❌ Server Error (Messages):', error.message);
+        }
+        res.status(500).json({ error: 'Failed to fetch messages' });
+    }
+});
+
 app.listen(PORT, () => {
     console.log(`✅ Bot API Server running on port ${PORT}`);
 });
