@@ -11,14 +11,24 @@ const PORT = process.env.PORT || 3001;
 // Enable CORS so your frontend (localhost:5173 or production) can reach this server
 app.use(cors());
 
-const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
+// SANITIZATION: Sometimes users paste "Bot <token>" into the env var. 
+// We strip the "Bot " prefix and whitespace to ensure it's just the raw token.
+let DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN ? process.env.DISCORD_BOT_TOKEN.trim() : "";
+if (DISCORD_BOT_TOKEN.startsWith("Bot ")) {
+    DISCORD_BOT_TOKEN = DISCORD_BOT_TOKEN.substring(4).trim();
+}
+
 // Hardcoded IDs from your constants.ts
 const GUILD_ID = '1336782145833668729'; 
 const OWNER_ID = '433262414759198720'; 
 
+// LOGGING: Print startup info to help debug on Render
+console.log("--- SERVER STARTING ---");
 if (!DISCORD_BOT_TOKEN) {
-    console.error("❌ ERROR: Missing DISCORD_BOT_TOKEN in .env file");
-    // We don't exit process here on render to avoid crash loops, but logs will show error
+    console.error("❌ FATAL ERROR: DISCORD_BOT_TOKEN is missing in Environment Variables!");
+} else {
+    // Log the first 5 chars to verify the correct token is loaded without revealing the whole secret
+    console.log(`✅ Token loaded. Starts with: ${DISCORD_BOT_TOKEN.substring(0, 5)}...`);
 }
 
 // Root endpoint to check if server is running
@@ -27,6 +37,11 @@ app.get('/', (req, res) => {
 });
 
 app.get('/api/owner', async (req, res) => {
+    if (!DISCORD_BOT_TOKEN) {
+        console.error("Attempted to fetch owner data, but no token is configured.");
+        return res.status(500).json({ error: 'Server configuration error: Missing Bot Token' });
+    }
+
     try {
         // Fetch the member from the guild to get server-specific data (Nickname, Server Avatar)
         // This requires the bot to be in the server and have the SERVER MEMBERS intent enabled in Dev Portal.
@@ -72,9 +87,12 @@ app.get('/api/owner', async (req, res) => {
     } catch (error) {
         // Log detailed error for debugging on server logs
         if (error.response) {
-            console.error('Discord API Error:', error.response.status, error.response.data);
+            console.error('❌ Discord API Error:', error.response.status, error.response.data);
+            if (error.response.status === 401) {
+                 console.error("⚠️ ACTION REQUIRED: Your DISCORD_BOT_TOKEN is invalid. Please update it in Render Environment Variables.");
+            }
         } else {
-            console.error('Server Error:', error.message);
+            console.error('❌ Server Error:', error.message);
         }
         res.status(500).json({ error: 'Failed to fetch Discord data' });
     }
