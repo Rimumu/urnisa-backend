@@ -141,6 +141,11 @@ app.get('/api/messages', async (req, res) => {
             attachments: msg.attachments || [],
             sticker_items: msg.sticker_items || [], // Fetch stickers
             mentions: msg.mentions || [], // Fetch mentions to resolve names
+            reactions: msg.reactions ? msg.reactions.map(r => ({
+                emoji: r.emoji,
+                count: r.count,
+                me: r.me
+            })) : [],
             // Handle replies
             referenced_message: msg.referenced_message ? {
                 id: msg.referenced_message.id,
@@ -151,7 +156,8 @@ app.get('/api/messages', async (req, res) => {
                     avatar: msg.referenced_message.author.avatar,
                     discriminator: msg.referenced_message.author.discriminator
                 },
-                content: msg.referenced_message.content
+                content: msg.referenced_message.content,
+                mentions: msg.referenced_message.mentions || []
             } : null
         }));
 
