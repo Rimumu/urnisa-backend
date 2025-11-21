@@ -140,13 +140,25 @@ app.get('/api/messages', async (req, res) => {
             } : null,
             attachments: msg.attachments || [],
             sticker_items: msg.sticker_items || [], // Fetch stickers
-            mentions: msg.mentions || [] // Fetch mentions to resolve names
+            mentions: msg.mentions || [], // Fetch mentions to resolve names
+            // Handle replies
+            referenced_message: msg.referenced_message ? {
+                id: msg.referenced_message.id,
+                author: {
+                    id: msg.referenced_message.author.id,
+                    username: msg.referenced_message.author.username,
+                    global_name: msg.referenced_message.author.global_name,
+                    avatar: msg.referenced_message.author.avatar,
+                    discriminator: msg.referenced_message.author.discriminator
+                },
+                content: msg.referenced_message.content
+            } : null
         }));
 
         // Return messages reversed so they appear chronologically (oldest to newest) 
         // if scrolling down, but Discord returns newest first.
         // Typically chat widgets show newest at bottom.
-        res.json(messages);
+        res.json(messages.reverse());
 
     } catch (error) {
         if (error.response) {
