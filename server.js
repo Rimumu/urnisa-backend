@@ -130,9 +130,14 @@ app.get('/api/messages', async (req, res) => {
             author: {
                 id: msg.author.id,
                 username: msg.author.username,
+                global_name: msg.author.global_name, // Actual display name
                 avatar: msg.author.avatar,
                 discriminator: msg.author.discriminator
             },
+            member: msg.member ? {
+                nick: msg.member.nick, // Server nickname
+                avatar: msg.member.avatar // Server specific avatar
+            } : null,
             attachments: msg.attachments || [],
             sticker_items: msg.sticker_items || [], // Fetch stickers
             mentions: msg.mentions || [] // Fetch mentions to resolve names
