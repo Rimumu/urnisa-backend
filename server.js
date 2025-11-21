@@ -133,7 +133,9 @@ app.get('/api/messages', async (req, res) => {
                 avatar: msg.author.avatar,
                 discriminator: msg.author.discriminator
             },
-            attachments: msg.attachments || []
+            attachments: msg.attachments || [],
+            sticker_items: msg.sticker_items || [], // Fetch stickers
+            mentions: msg.mentions || [] // Fetch mentions to resolve names
         }));
 
         // Return messages reversed so they appear chronologically (oldest to newest) 
