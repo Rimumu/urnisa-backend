@@ -123,35 +123,41 @@ app.post('/api/schedule', async (req, res) => {
     }
 });
 
-// --- PROFILE CONTENT ENDPOINTS (About & Credits) ---
+// --- PROFILE CONTENT ENDPOINTS (About, Credits, Artworks) ---
 
 // Get all profile content
 app.get('/api/profile', async (req, res) => {
     try {
         const about = await Setting.findOne({ key: 'profile_about' });
         const credits = await Setting.findOne({ key: 'profile_credits' });
+        const artworks = await Setting.findOne({ key: 'profile_artworks' });
         
         res.json({
             about: about ? about.value : [],
-            credits: credits ? credits.value : []
+            credits: credits ? credits.value : [],
+            artworks: artworks ? artworks.value : []
         });
     } catch (error) {
         console.error("Database Error (Get Profile):", error);
-        res.json({ about: [], credits: [] });
+        res.json({ about: [], credits: [], artworks: [] });
     }
 });
 
-// Update profile content (Generic for both sections)
+// Update profile content
 app.post('/api/profile', async (req, res) => {
     const authHeader = req.headers.authorization;
-    const { type, data } = req.body; // type: 'about' | 'credits'
+    const { type, data } = req.body; // type: 'about' | 'credits' | 'artworks'
 
     if (!authHeader || authHeader !== ADMIN_PASSWORD) {
         return res.status(401).json({ error: 'Unauthorized' });
     }
     if (!type || !data) return res.status(400).json({ error: 'Missing type or data' });
 
-    const key = type === 'about' ? 'profile_about' : 'profile_credits';
+    let key;
+    if (type === 'about') key = 'profile_about';
+    else if (type === 'credits') key = 'profile_credits';
+    else if (type === 'artworks') key = 'profile_artworks';
+    else return res.status(400).json({ error: 'Invalid type' });
 
     try {
         await Setting.findOneAndUpdate(
