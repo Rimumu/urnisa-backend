@@ -8,8 +8,12 @@ const app = express();
 // Render will provide a PORT environment variable. Use it, or fallback to 3001 for local dev.
 const PORT = process.env.PORT || 3001;
 
-// Enable CORS so your frontend (localhost:5173 or production) can reach this server
-app.use(cors());
+// Enable CORS for all origins to ensure the frontend can always connect
+app.use(cors({
+    origin: '*', 
+    methods: ['GET', 'POST', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization']
+}));
 
 // SANITIZATION: Sometimes users paste "Bot <token>" into the env var. 
 // We strip the "Bot " prefix and whitespace to ensure it's just the raw token.
