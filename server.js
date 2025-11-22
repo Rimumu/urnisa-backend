@@ -23,21 +23,31 @@ app.use(cors({
 // --- MONGODB CONNECTION ---
 const MONGO_URI = process.env.MONGO_URI;
 
-if (MONGO_URI) {
-    mongoose.connect(MONGO_URI)
-    .then(() => console.log("✅ Connected to MongoDB"))
-    .catch(err => console.error("❌ MongoDB Connection Error:", err));
-} else {
-    console.warn("⚠️ MONGO_URI not found in environment variables. Data will not persist!");
-}
-
-// Define a simple schema for storing app settings (Key-Value pair)
+// Define Schema (must be defined before usage)
 const SettingSchema = new mongoose.Schema({
     key: { type: String, required: true, unique: true },
     value: { type: mongoose.Schema.Types.Mixed, required: true }
 });
-
 const Setting = mongoose.model('Setting', SettingSchema);
+
+if (MONGO_URI) {
+    // Fix for strictQuery deprecation warning
+    mongoose.set('strictQuery', false);
+
+    // Add listeners BEFORE connecting to debug issues in Render logs
+    mongoose.connection.on('connected', () => console.log("✅ MongoDB Connected successfully"));
+    mongoose.connection.on('error', (err) => console.error("❌ MongoDB Runtime Error:", err));
+    mongoose.connection.on('disconnected', () => console.warn("⚠️ MongoDB Disconnected"));
+
+    // Connect with options to fail fast if IP is blocked
+    mongoose.connect(MONGO_URI, {
+        serverSelectionTimeoutMS: 5000, // Fail after 5s if IP is blocked (instead of hanging)
+        socketTimeoutMS: 45000,
+    })
+    .catch(err => console.error("❌ Initial MongoDB Connection Failed (Check Atlas Network Access 0.0.0.0/0):", err));
+} else {
+    console.warn("⚠️ MONGO_URI not found in environment variables. Data will not persist!");
+}
 
 // SANITIZATION: Sometimes users paste "Bot <token>" into the env var. 
 // We strip the "Bot " prefix and whitespace to ensure it's just the raw token.
@@ -70,18 +80,17 @@ app.get('/', (req, res) => {
 // Get current schedule URL
 app.get('/api/schedule', async (req, res) => {
     try {
-        // Try to find the setting in the DB
-        const setting = await Setting.findOne({ key: 'schedule_url' });
-        
-        if (setting && setting.value) {
-            res.json({ url: setting.value });
-        } else {
-            // If not in DB, return default
-            res.json({ url: DEFAULT_SCHEDULE_URL });
+        // Only try to query DB if connected
+        if (mongoose.connection.readyState === 1) {
+            const setting = await Setting.findOne({ key: 'schedule_url' });
+            if (setting && setting.value) {
+                return res.json({ url: setting.value });
+            }
         }
+        // If not in DB or DB down, return default
+        res.json({ url: DEFAULT_SCHEDULE_URL });
     } catch (error) {
         console.error("Database Error (Get Schedule):", error);
-        // Fallback to default on error so the site doesn't break
         res.json({ url: DEFAULT_SCHEDULE_URL });
     }
 });
@@ -99,6 +108,14 @@ app.post('/api/schedule', async (req, res) => {
         return res.status(400).json({ error: 'Missing URL' });
     }
 
+    // Check DB connection state before trying to write
+    // 0: disconnected, 1: connected, 2: connecting, 3: disconnecting
+    if (mongoose.connection.readyState !== 1) {
+        return res.status(503).json({ 
+            error: 'Database not connected. Please check Render logs. You likely need to whitelist IP 0.0.0.0/0 in MongoDB Atlas.' 
+        });
+    }
+
     try {
         // Upsert: Update if exists, Insert if it doesn't
         await Setting.findOneAndUpdate(
@@ -111,7 +128,7 @@ app.post('/api/schedule', async (req, res) => {
         res.json({ success: true, url: url });
     } catch (error) {
         console.error("Database Error (Update Schedule):", error);
-        res.status(500).json({ error: 'Failed to update database.' });
+        res.status(500).json({ error: 'Failed to update database: ' + error.message });
     }
 });
 
