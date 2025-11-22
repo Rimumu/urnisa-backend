@@ -75,6 +75,17 @@ app.get('/', (req, res) => {
     res.send('Urnisa Bot Server is Running!');
 });
 
+// --- AUTH ENDPOINT ---
+app.post('/api/verify', (req, res) => {
+    const { password } = req.body;
+    // Check against the server-side environment variable
+    if (password && password === ADMIN_PASSWORD) {
+        res.json({ success: true });
+    } else {
+        res.status(401).json({ error: 'Invalid password' });
+    }
+});
+
 // --- SCHEDULE ENDPOINTS (DB BACKED) ---
 
 // Get current schedule URL
