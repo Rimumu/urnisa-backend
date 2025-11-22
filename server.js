@@ -49,20 +49,16 @@ if (MONGO_URI) {
     console.warn("⚠️ MONGO_URI not found in environment variables. Data will not persist!");
 }
 
-// SANITIZATION: Sometimes users paste "Bot <token>" into the env var. 
-// We strip the "Bot " prefix and whitespace to ensure it's just the raw token.
+// SANITIZATION: sometimes users paste "Bot <token>" into the env var.
 let DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN ? process.env.DISCORD_BOT_TOKEN.trim() : "";
 if (DISCORD_BOT_TOKEN.startsWith("Bot ")) {
     DISCORD_BOT_TOKEN = DISCORD_BOT_TOKEN.substring(4).trim();
 }
 
-// Hardcoded IDs
 const GUILD_ID = '1336782145833668729'; 
 const OWNER_ID = '433262414759198720'; 
-// Default fallback URL if DB is empty or fails
 const DEFAULT_SCHEDULE_URL = 'https://cdn.discordapp.com/attachments/1338254150479118347/1439859590152978443/3_am_17.png?ex=6921fbfd&is=6920aa7d&hm=926ad591d323ccc29cd9f7dc2e256de99d8f5dcc292aa3a883f565455844c977&';
 
-// LOGGING: Print startup info to help debug on Render
 console.log("--- SERVER STARTING ---");
 if (!DISCORD_BOT_TOKEN) {
     console.error("❌ FATAL ERROR: DISCORD_BOT_TOKEN is missing in Environment Variables!");
@@ -70,7 +66,7 @@ if (!DISCORD_BOT_TOKEN) {
     console.log(`✅ Discord Token loaded. Starts with: ${DISCORD_BOT_TOKEN.substring(0, 5)}...`);
 }
 
-// Root endpoint to check if server is running
+// Root endpoint
 app.get('/', (req, res) => {
     res.send('Urnisa Bot Server is Running!');
 });
@@ -78,7 +74,6 @@ app.get('/', (req, res) => {
 // --- AUTH ENDPOINT ---
 app.post('/api/verify', (req, res) => {
     const { password } = req.body;
-    // Check against the server-side environment variable
     if (password && password === ADMIN_PASSWORD) {
         res.json({ success: true });
     } else {
@@ -86,19 +81,15 @@ app.post('/api/verify', (req, res) => {
     }
 });
 
-// --- SCHEDULE ENDPOINTS (DB BACKED) ---
-
-// Get current schedule URL
+// --- SCHEDULE ENDPOINTS ---
 app.get('/api/schedule', async (req, res) => {
     try {
-        // Only try to query DB if connected
         if (mongoose.connection.readyState === 1) {
             const setting = await Setting.findOne({ key: 'schedule_url' });
             if (setting && setting.value) {
                 return res.json({ url: setting.value });
             }
         }
-        // If not in DB or DB down, return default
         res.json({ url: DEFAULT_SCHEDULE_URL });
     } catch (error) {
         console.error("Database Error (Get Schedule):", error);
@@ -106,7 +97,6 @@ app.get('/api/schedule', async (req, res) => {
     }
 });
 
-// Update schedule URL (Protected)
 app.post('/api/schedule', async (req, res) => {
     const authHeader = req.headers.authorization;
     const { url } = req.body;
@@ -114,27 +104,17 @@ app.post('/api/schedule', async (req, res) => {
     if (!authHeader || authHeader !== ADMIN_PASSWORD) {
         return res.status(401).json({ error: 'Unauthorized: Incorrect Password' });
     }
-
-    if (!url) {
-        return res.status(400).json({ error: 'Missing URL' });
-    }
-
-    // Check DB connection state before trying to write
-    // 0: disconnected, 1: connected, 2: connecting, 3: disconnecting
+    if (!url) return res.status(400).json({ error: 'Missing URL' });
     if (mongoose.connection.readyState !== 1) {
-        return res.status(503).json({ 
-            error: 'Database not connected. Please check Render logs. You likely need to whitelist IP 0.0.0.0/0 in MongoDB Atlas.' 
-        });
+        return res.status(503).json({ error: 'Database not connected. Please check Render logs.' });
     }
 
     try {
-        // Upsert: Update if exists, Insert if it doesn't
         await Setting.findOneAndUpdate(
             { key: 'schedule_url' },
             { value: url },
             { upsert: true, new: true }
         );
-        
         console.log(`📅 Schedule updated in DB to: ${url}`);
         res.json({ success: true, url: url });
     } catch (error) {
@@ -143,27 +123,62 @@ app.post('/api/schedule', async (req, res) => {
     }
 });
 
+// --- PROFILE CONTENT ENDPOINTS (About & Credits) ---
+
+// Get all profile content
+app.get('/api/profile', async (req, res) => {
+    try {
+        const about = await Setting.findOne({ key: 'profile_about' });
+        const credits = await Setting.findOne({ key: 'profile_credits' });
+        
+        res.json({
+            about: about ? about.value : [],
+            credits: credits ? credits.value : []
+        });
+    } catch (error) {
+        console.error("Database Error (Get Profile):", error);
+        res.json({ about: [], credits: [] });
+    }
+});
+
+// Update profile content (Generic for both sections)
+app.post('/api/profile', async (req, res) => {
+    const authHeader = req.headers.authorization;
+    const { type, data } = req.body; // type: 'about' | 'credits'
+
+    if (!authHeader || authHeader !== ADMIN_PASSWORD) {
+        return res.status(401).json({ error: 'Unauthorized' });
+    }
+    if (!type || !data) return res.status(400).json({ error: 'Missing type or data' });
+
+    const key = type === 'about' ? 'profile_about' : 'profile_credits';
+
+    try {
+        await Setting.findOneAndUpdate(
+            { key },
+            { value: data },
+            { upsert: true, new: true }
+        );
+        res.json({ success: true });
+    } catch (error) {
+        console.error(`Database Error (Update ${type}):`, error);
+        res.status(500).json({ error: 'Failed to update database' });
+    }
+});
+
 // --- DISCORD ENDPOINTS ---
 
 app.get('/api/owner', async (req, res) => {
-    if (!DISCORD_BOT_TOKEN) {
-        console.error("Attempted to fetch owner data, but no token is configured.");
-        return res.status(500).json({ error: 'Server configuration error: Missing Bot Token' });
-    }
+    if (!DISCORD_BOT_TOKEN) return res.status(500).json({ error: 'Missing Bot Token' });
 
     try {
         const response = await axios.get(
             `https://discord.com/api/v10/guilds/${GUILD_ID}/members/${OWNER_ID}`,
-            {
-                headers: {
-                    Authorization: `Bot ${DISCORD_BOT_TOKEN}`
-                }
-            }
+            { headers: { Authorization: `Bot ${DISCORD_BOT_TOKEN}` } }
         );
 
         const member = response.data;
         const user = member.user;
-
         let avatarUrl = null;
         if (member.avatar) {
             avatarUrl = `https://cdn.discordapp.com/guilds/${GUILD_ID}/users/${user.id}/avatars/${member.avatar}.png?size=256`;
@@ -174,7 +189,7 @@ app.get('/api/owner', async (req, res) => {
             avatarUrl = `https://cdn.discordapp.com/embed/avatars/${index}.png`;
         }
 
-        const ownerData = {
+        res.json({
             id: user.id,
             username: user.username,
             global_name: user.global_name,
@@ -182,40 +197,23 @@ app.get('/api/owner', async (req, res) => {
             nick: member.nick,
             avatar_url: avatarUrl,
             status: 'offline'
-        };
-
-        res.json(ownerData);
+        });
 
     } catch (error) {
-        if (error.response) {
-            console.error('❌ Discord API Error:', error.response.status, error.response.data);
-        } else {
-            console.error('❌ Server Error:', error.message);
-        }
+        console.error('❌ Discord API Error:', error.message);
         res.status(500).json({ error: 'Failed to fetch Discord data' });
     }
 });
 
-// Endpoint to fetch channel messages
 app.get('/api/messages', async (req, res) => {
     const { channelId } = req.query;
-
-    if (!channelId) {
-        return res.status(400).json({ error: 'Missing channelId parameter' });
-    }
-
-    if (!DISCORD_BOT_TOKEN) {
-        return res.status(500).json({ error: 'Server configuration error: Missing Bot Token' });
-    }
+    if (!channelId) return res.status(400).json({ error: 'Missing channelId' });
+    if (!DISCORD_BOT_TOKEN) return res.status(500).json({ error: 'Missing Bot Token' });
 
     try {
         const response = await axios.get(
             `https://discord.com/api/v10/channels/${channelId}/messages?limit=20`,
-            {
-                headers: {
-                    Authorization: `Bot ${DISCORD_BOT_TOKEN}`
-                }
-            }
+            { headers: { Authorization: `Bot ${DISCORD_BOT_TOKEN}` } }
         );
 
         const messages = response.data.map(msg => ({
@@ -229,18 +227,11 @@ app.get('/api/messages', async (req, res) => {
                 avatar: msg.author.avatar,
                 discriminator: msg.author.discriminator
             },
-            member: msg.member ? {
-                nick: msg.member.nick,
-                avatar: msg.member.avatar
-            } : null,
+            member: msg.member ? { nick: msg.member.nick, avatar: msg.member.avatar } : null,
             attachments: msg.attachments || [],
             sticker_items: msg.sticker_items || [],
             mentions: msg.mentions || [],
-            reactions: msg.reactions ? msg.reactions.map(r => ({
-                emoji: r.emoji,
-                count: r.count,
-                me: r.me
-            })) : [],
+            reactions: msg.reactions ? msg.reactions.map(r => ({ emoji: r.emoji, count: r.count, me: r.me })) : [],
             referenced_message: msg.referenced_message ? {
                 id: msg.referenced_message.id,
                 author: {
@@ -258,11 +249,7 @@ app.get('/api/messages', async (req, res) => {
         res.json(messages.reverse());
 
     } catch (error) {
-        if (error.response) {
-            console.error('❌ Discord API Error (Messages):', error.response.status);
-        } else {
-            console.error('❌ Server Error (Messages):', error.message);
-        }
+        console.error('❌ Discord API Error (Messages):', error.message);
         res.status(500).json({ error: 'Failed to fetch messages' });
     }
 });
