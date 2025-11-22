@@ -263,3 +263,24 @@ app.get('/api/messages', async (req, res) => {
 app.listen(PORT, () => {
     console.log(`✅ Bot API Server running on port ${PORT}`);
 });
+
+// --- SELF-PING / KEEP-ALIVE MECHANISM ---
+// This prevents Render's free tier from spinning down due to inactivity.
+// We send a request to the server's own public URL every 5 minutes.
+
+const KEEP_ALIVE_INTERVAL = 5 * 60 * 1000; // 5 minutes in milliseconds
+const RENDER_EXTERNAL_URL = 'https://urnisa-bot.onrender.com';
+
+function keepAlive() {
+    // Only ping if we are in production/Render environment
+    // We use the hardcoded URL because that's the public endpoint we need to hit.
+    console.log('⏰ Sending Keep-Alive ping...');
+    axios.get(RENDER_EXTERNAL_URL)
+        .then(() => console.log('✅ Keep-Alive ping successful.'))
+        .catch((err) => console.error(`⚠️ Keep-Alive ping failed: ${err.message}`));
+}
+
+// Start the keep-alive timer
+setInterval(keepAlive, KEEP_ALIVE_INTERVAL);
+// Run once immediately to ensure it works
+keepAlive();
