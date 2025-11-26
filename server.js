@@ -11,7 +11,7 @@ const PORT = process.env.PORT || 3001;
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "admin"; // Default fallback, please change in env
 
 // Middleware to parse JSON bodies. Increased limit for Base64 image uploads.
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({ limit: '50mb' }));
 
 // Enable CORS for all origins to ensure the frontend can always connect
 app.use(cors({
@@ -196,16 +196,19 @@ app.post('/api/upload', async (req, res) => {
         const formData = new FormData();
         formData.append('image', image);
 
+        // Add timeout to prevent hanging connections
         const response = await axios.post(`https://api.imgbb.com/1/upload?key=${IMGBB_API_KEY}`, formData, {
-            headers: { 'Content-Type': 'multipart/form-data' }
+            headers: { 'Content-Type': 'multipart/form-data' },
+            timeout: 30000 // 30 seconds timeout
         });
 
         res.json(response.data);
     } catch (error) {
-        console.error('❌ ImgBB Upload Error:', error.response?.data || error.message);
+        const errorMessage = error.response?.data?.error?.message || error.message;
+        console.error('❌ ImgBB Upload Error:', errorMessage);
         res.status(500).json({ 
             success: false, 
-            error: error.response?.data?.error || { message: 'Failed to upload to ImgBB' } 
+            error: { message: errorMessage || 'Failed to upload to ImgBB' } 
         });
     }
 });
