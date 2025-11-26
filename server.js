@@ -3,6 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
 const mongoose = require('mongoose');
+const crypto = require('crypto');
 require('dotenv').config();
 
 const app = express();
@@ -58,6 +59,11 @@ if (DISCORD_BOT_TOKEN.startsWith("Bot ")) {
 // Support both naming conventions for ImgBB Key
 const IMGBB_API_KEY = process.env.IMGBB_API_KEY || process.env.VITE_IMGBB_API_KEY;
 
+// Cloudinary Credentials
+const CLOUDINARY_CLOUD_NAME = process.env.CLOUDINARY_CLOUD_NAME;
+const CLOUDINARY_API_KEY = process.env.CLOUDINARY_API_KEY;
+const CLOUDINARY_API_SECRET = process.env.CLOUDINARY_API_SECRET;
+
 const GUILD_ID = '1336782145833668729'; 
 const OWNER_ID = '433262414759198720'; 
 const DEFAULT_SCHEDULE_URL = 'https://cdn.discordapp.com/attachments/1338254150479118347/1439859590152978443/3_am_17.png?ex=6921fbfd&is=6920aa7d&hm=926ad591d323ccc29cd9f7dc2e256de99d8f5dcc292aa3a883f565455844c977&';
@@ -69,10 +75,12 @@ if (!DISCORD_BOT_TOKEN) {
     console.log(`✅ Discord Token loaded. Starts with: ${DISCORD_BOT_TOKEN.substring(0, 5)}...`);
 }
 
-if (IMGBB_API_KEY) {
-    console.log("✅ ImgBB API Key loaded.");
+if (CLOUDINARY_CLOUD_NAME && CLOUDINARY_API_KEY && CLOUDINARY_API_SECRET) {
+    console.log("✅ Cloudinary Configured (Primary Image Host).");
+} else if (IMGBB_API_KEY) {
+    console.log("✅ ImgBB API Key loaded (Fallback Image Host).");
 } else {
-    console.warn("⚠️ ImgBB API Key missing. Image uploads will fail.");
+    console.warn("⚠️ No Image Hosting Configured. Image uploads will fail.");
 }
 
 // Root endpoint
@@ -185,32 +193,73 @@ app.post('/api/profile', async (req, res) => {
 app.post('/api/upload', async (req, res) => {
     const { image } = req.body; // Expecting base64 string (without data:image/... prefix preferably)
 
-    if (!IMGBB_API_KEY) {
-        return res.status(500).json({ success: false, error: { message: 'Server missing ImgBB API Key' } });
-    }
     if (!image) {
         return res.status(400).json({ success: false, error: { message: 'No image data provided' } });
     }
 
-    try {
-        const formData = new FormData();
-        formData.append('image', image);
+    // --- OPTION 1: CLOUDINARY (Preferred - No SSL Issues) ---
+    if (CLOUDINARY_CLOUD_NAME && CLOUDINARY_API_KEY && CLOUDINARY_API_SECRET) {
+        try {
+            // Create a timestamp
+            const timestamp = Math.round((new Date()).getTime() / 1000);
+            
+            // Generate Signature
+            const paramsToSign = `timestamp=${timestamp}${CLOUDINARY_API_SECRET}`;
+            const signature = crypto.createHash('sha1').update(paramsToSign).digest('hex');
 
-        // Add timeout to prevent hanging connections
-        const response = await axios.post(`https://api.imgbb.com/1/upload?key=${IMGBB_API_KEY}`, formData, {
-            headers: { 'Content-Type': 'multipart/form-data' },
-            timeout: 30000 // 30 seconds timeout
-        });
+            // Form Data for Cloudinary
+            const formData = new FormData();
+            formData.append('file', `data:image/jpeg;base64,${image}`);
+            formData.append('api_key', CLOUDINARY_API_KEY);
+            formData.append('timestamp', timestamp);
+            formData.append('signature', signature);
 
-        res.json(response.data);
-    } catch (error) {
-        const errorMessage = error.response?.data?.error?.message || error.message;
-        console.error('❌ ImgBB Upload Error:', errorMessage);
-        res.status(500).json({ 
-            success: false, 
-            error: { message: errorMessage || 'Failed to upload to ImgBB' } 
-        });
+            const response = await axios.post(
+                `https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/image/upload`,
+                formData,
+                { headers: { 'Content-Type': 'multipart/form-data' }, timeout: 30000 }
+            );
+
+            // Return in a format compatible with frontend
+            // Cloudinary returns 'secure_url'
+            return res.json({
+                success: true,
+                data: { url: response.data.secure_url } 
+            });
+
+        } catch (error) {
+            console.error('❌ Cloudinary Upload Error:', error.response?.data || error.message);
+            // Fallthrough to ImgBB if Cloudinary fails? No, better to error out to debug.
+            return res.status(500).json({ 
+                success: false, 
+                error: { message: 'Cloudinary upload failed' } 
+            });
+        }
     }
+
+    // --- OPTION 2: IMGBB (Fallback - Has SSL issues on some networks) ---
+    if (IMGBB_API_KEY) {
+        try {
+            const formData = new FormData();
+            formData.append('image', image);
+
+            const response = await axios.post(`https://api.imgbb.com/1/upload?key=${IMGBB_API_KEY}`, formData, {
+                headers: { 'Content-Type': 'multipart/form-data' },
+                timeout: 30000
+            });
+
+            return res.json(response.data);
+        } catch (error) {
+            const errorMessage = error.response?.data?.error?.message || error.message;
+            console.error('❌ ImgBB Upload Error:', errorMessage);
+            return res.status(500).json({ 
+                success: false, 
+                error: { message: errorMessage || 'Failed to upload to ImgBB' } 
+            });
+        }
+    }
+
+    return res.status(500).json({ success: false, error: { message: 'Server missing Image Hosting Configuration (Cloudinary or ImgBB)' } });
 });
 
 // --- DISCORD ENDPOINTS ---
@@ -307,14 +356,10 @@ app.listen(PORT, () => {
 
 // --- SELF-PING / KEEP-ALIVE MECHANISM ---
 // This prevents Render's free tier from spinning down due to inactivity.
-// We send a request to the server's own public URL every 5 minutes.
-
 const KEEP_ALIVE_INTERVAL = 5 * 60 * 1000; // 5 minutes in milliseconds
 const RENDER_EXTERNAL_URL = 'https://urnisa-bot.onrender.com';
 
 function keepAlive() {
-    // Only ping if we are in production/Render environment
-    // We use the hardcoded URL because that's the public endpoint we need to hit.
     console.log('⏰ Sending Keep-Alive ping...');
     axios.get(RENDER_EXTERNAL_URL)
         .then(() => console.log('✅ Keep-Alive ping successful.'))
