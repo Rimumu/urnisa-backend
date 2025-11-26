@@ -10,8 +10,8 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "admin"; // Default fallback, please change in env
 
-// Middleware to parse JSON bodies
-app.use(express.json());
+// Middleware to parse JSON bodies. Increased limit for Base64 image uploads.
+app.use(express.json({ limit: '10mb' }));
 
 // Enable CORS for all origins to ensure the frontend can always connect
 app.use(cors({
@@ -55,6 +55,9 @@ if (DISCORD_BOT_TOKEN.startsWith("Bot ")) {
     DISCORD_BOT_TOKEN = DISCORD_BOT_TOKEN.substring(4).trim();
 }
 
+// Support both naming conventions for ImgBB Key
+const IMGBB_API_KEY = process.env.IMGBB_API_KEY || process.env.VITE_IMGBB_API_KEY;
+
 const GUILD_ID = '1336782145833668729'; 
 const OWNER_ID = '433262414759198720'; 
 const DEFAULT_SCHEDULE_URL = 'https://cdn.discordapp.com/attachments/1338254150479118347/1439859590152978443/3_am_17.png?ex=6921fbfd&is=6920aa7d&hm=926ad591d323ccc29cd9f7dc2e256de99d8f5dcc292aa3a883f565455844c977&';
@@ -64,6 +67,12 @@ if (!DISCORD_BOT_TOKEN) {
     console.error("❌ FATAL ERROR: DISCORD_BOT_TOKEN is missing in Environment Variables!");
 } else {
     console.log(`✅ Discord Token loaded. Starts with: ${DISCORD_BOT_TOKEN.substring(0, 5)}...`);
+}
+
+if (IMGBB_API_KEY) {
+    console.log("✅ ImgBB API Key loaded.");
+} else {
+    console.warn("⚠️ ImgBB API Key missing. Image uploads will fail.");
 }
 
 // Root endpoint
@@ -169,6 +178,35 @@ app.post('/api/profile', async (req, res) => {
     } catch (error) {
         console.error(`Database Error (Update ${type}):`, error);
         res.status(500).json({ error: 'Failed to update database' });
+    }
+});
+
+// --- IMAGE UPLOAD PROXY ---
+app.post('/api/upload', async (req, res) => {
+    const { image } = req.body; // Expecting base64 string (without data:image/... prefix preferably)
+
+    if (!IMGBB_API_KEY) {
+        return res.status(500).json({ success: false, error: { message: 'Server missing ImgBB API Key' } });
+    }
+    if (!image) {
+        return res.status(400).json({ success: false, error: { message: 'No image data provided' } });
+    }
+
+    try {
+        const formData = new FormData();
+        formData.append('image', image);
+
+        const response = await axios.post(`https://api.imgbb.com/1/upload?key=${IMGBB_API_KEY}`, formData, {
+            headers: { 'Content-Type': 'multipart/form-data' }
+        });
+
+        res.json(response.data);
+    } catch (error) {
+        console.error('❌ ImgBB Upload Error:', error.response?.data || error.message);
+        res.status(500).json({ 
+            success: false, 
+            error: error.response?.data?.error || { message: 'Failed to upload to ImgBB' } 
+        });
     }
 });
 
