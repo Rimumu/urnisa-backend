@@ -392,27 +392,39 @@ app.get('/api/messages', async (req, res) => {
     }
 });
 
-app.listen(PORT, () => {
+// --- SERVER START & KEEP-ALIVE ---
+
+// Start listening
+const server = app.listen(PORT, () => {
     console.log(`✅ Bot API Server running on port ${PORT}`);
     console.log(`   - /api/schedule: ACTIVE`);
     console.log(`   - /api/profile: ACTIVE`);
     console.log(`   - /api/goals: ACTIVE`);
     console.log(`   - /api/upload: ACTIVE`);
+
+    // Start self-ping only after server is ready
+    startKeepAlive();
 });
 
 // --- SELF-PING / KEEP-ALIVE MECHANISM ---
 // This prevents Render's free tier from spinning down due to inactivity.
-const KEEP_ALIVE_INTERVAL = 5 * 60 * 1000; // 5 minutes in milliseconds
+const KEEP_ALIVE_INTERVAL = 5 * 60 * 1000; // 5 minutes
 const RENDER_EXTERNAL_URL = 'https://urnisa-bot.onrender.com';
 
-function keepAlive() {
-    console.log('⏰ Sending Keep-Alive ping...');
-    axios.get(RENDER_EXTERNAL_URL)
-        .then(() => console.log('✅ Keep-Alive ping successful.'))
-        .catch((err) => console.error(`⚠️ Keep-Alive ping failed: ${err.message}`));
+function startKeepAlive() {
+    console.log('⏰ Starting Keep-Alive timer...');
+    setInterval(() => {
+        console.log('⏰ Sending Keep-Alive ping...');
+        axios.get(RENDER_EXTERNAL_URL)
+            .then(() => console.log('✅ Keep-Alive ping successful.'))
+            .catch((err) => console.error(`⚠️ Keep-Alive ping failed: ${err.message}`));
+    }, KEEP_ALIVE_INTERVAL);
 }
 
-// Start the keep-alive timer
-setInterval(keepAlive, KEEP_ALIVE_INTERVAL);
-// Run once immediately to ensure it works
-keepAlive();
+// Global error handlers to prevent crash loops
+process.on('uncaughtException', (err) => {
+    console.error('❌ Uncaught Exception:', err);
+});
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('❌ Unhandled Rejection:', reason);
+});
