@@ -230,6 +230,45 @@ app.post('/api/goals', async (req, res) => {
     }
 });
 
+// --- SPIN WHEEL ENDPOINTS ---
+
+app.get('/api/wheel', async (req, res) => {
+    try {
+        if (mongoose.connection.readyState === 1) {
+            const wheel = await Setting.findOne({ key: 'wheel_items' });
+            if (wheel && wheel.value) {
+                return res.json({ items: wheel.value });
+            }
+        }
+        res.json({ items: null });
+    } catch (error) {
+        console.error("Database Error (Get Wheel):", error);
+        res.json({ items: null });
+    }
+});
+
+app.post('/api/wheel', async (req, res) => {
+    const authHeader = req.headers.authorization;
+    const { items } = req.body;
+
+    if (!authHeader || authHeader !== ADMIN_PASSWORD) {
+        return res.status(401).json({ error: 'Unauthorized' });
+    }
+    if (!items || !Array.isArray(items)) return res.status(400).json({ error: 'Missing or invalid items data' });
+
+    try {
+        await Setting.findOneAndUpdate(
+            { key: 'wheel_items' },
+            { value: items },
+            { upsert: true, new: true }
+        );
+        res.json({ success: true });
+    } catch (error) {
+        console.error("Database Error (Update Wheel):", error);
+        res.status(500).json({ error: 'Failed to update database' });
+    }
+});
+
 
 // --- IMAGE UPLOAD PROXY ---
 app.post('/api/upload', async (req, res) => {
@@ -400,6 +439,7 @@ const server = app.listen(PORT, () => {
     console.log(`   - /api/schedule: ACTIVE`);
     console.log(`   - /api/profile: ACTIVE`);
     console.log(`   - /api/goals: ACTIVE`);
+    console.log(`   - /api/wheel: ACTIVE`);
     console.log(`   - /api/upload: ACTIVE`);
 
     // Start self-ping only after server is ready
