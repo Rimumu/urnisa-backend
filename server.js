@@ -189,6 +189,47 @@ app.post('/api/profile', async (req, res) => {
     }
 });
 
+// --- NISATHON GOALS ENDPOINTS ---
+
+app.get('/api/goals', async (req, res) => {
+    try {
+        if (mongoose.connection.readyState === 1) {
+            const goals = await Setting.findOne({ key: 'nisathon_goals' });
+            if (goals && goals.value) {
+                return res.json({ goals: goals.value });
+            }
+        }
+        // Return null or empty list to let frontend use defaults
+        res.json({ goals: null });
+    } catch (error) {
+        console.error("Database Error (Get Goals):", error);
+        res.json({ goals: null });
+    }
+});
+
+app.post('/api/goals', async (req, res) => {
+    const authHeader = req.headers.authorization;
+    const { goals } = req.body;
+
+    if (!authHeader || authHeader !== ADMIN_PASSWORD) {
+        return res.status(401).json({ error: 'Unauthorized' });
+    }
+    if (!goals) return res.status(400).json({ error: 'Missing goals data' });
+
+    try {
+        await Setting.findOneAndUpdate(
+            { key: 'nisathon_goals' },
+            { value: goals },
+            { upsert: true, new: true }
+        );
+        res.json({ success: true });
+    } catch (error) {
+        console.error("Database Error (Update Goals):", error);
+        res.status(500).json({ error: 'Failed to update database' });
+    }
+});
+
+
 // --- IMAGE UPLOAD PROXY ---
 app.post('/api/upload', async (req, res) => {
     const { image } = req.body; // Expecting base64 string (without data:image/... prefix preferably)
