@@ -217,6 +217,7 @@ app.post('/api/goals', async (req, res) => {
     if (!goals) return res.status(400).json({ error: 'Missing goals data' });
 
     try {
+        console.log(`🎯 Updating Nisathon Goals (${goals.length} items)`);
         await Setting.findOneAndUpdate(
             { key: 'nisathon_goals' },
             { value: goals },
@@ -393,6 +394,10 @@ app.get('/api/messages', async (req, res) => {
 
 app.listen(PORT, () => {
     console.log(`✅ Bot API Server running on port ${PORT}`);
+    console.log(`   - /api/schedule: ACTIVE`);
+    console.log(`   - /api/profile: ACTIVE`);
+    console.log(`   - /api/goals: ACTIVE`);
+    console.log(`   - /api/upload: ACTIVE`);
 });
 
 // --- SELF-PING / KEEP-ALIVE MECHANISM ---
