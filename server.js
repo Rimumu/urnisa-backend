@@ -63,6 +63,12 @@ const CLOUDINARY_API_SECRET = process.env.CLOUDINARY_API_SECRET;
 const SE_CHANNEL_ID = process.env.STREAMELEMENTS_CHANNEL_ID;
 const SE_JWT = process.env.STREAMELEMENTS_JWT;
 
+if (SE_CHANNEL_ID) {
+    console.log(`✅ StreamElements Configured. Channel ID: ${SE_CHANNEL_ID.substring(0, 5)}...`);
+} else {
+    console.warn("⚠️ STREAMELEMENTS_CHANNEL_ID is missing.");
+}
+
 const DEFAULT_SCHEDULE_URL = 'https://cdn.discordapp.com/attachments/1338254150479118347/1439859590152978443/3_am_17.png?ex=6921fbfd&is=6920aa7d&hm=926ad591d323ccc29cd9f7dc2e256de99d8f5dcc292aa3a883f565455844c977&';
 
 console.log("--- GENERAL BACKEND STARTING ---");
@@ -88,7 +94,9 @@ const updateNisathonStats = async () => {
         }
 
         const lastCheck = stats.lastActivityTime;
-        const response = await axios.get(`https://api.streamelements.com/kappa/v2/sessions/${SE_CHANNEL_ID}/activities`, {
+        
+        // CORRECTED ENDPOINT: /activities/{channelId}
+        const response = await axios.get(`https://api.streamelements.com/kappa/v2/activities/${SE_CHANNEL_ID}`, {
             headers: { Authorization: `Bearer ${SE_JWT}` },
             params: { after: lastCheck, limit: 20 }
         });
@@ -101,6 +109,7 @@ const updateNisathonStats = async () => {
         let newDonationAmount = 0;
         let earnedNisaballs = 0;
 
+        // Sort by date ascending (oldest first) so we process in order
         const sortedActivities = activities.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
         let newestDate = lastCheck;
 
@@ -127,6 +136,7 @@ const updateNisathonStats = async () => {
         const now = new Date().getTime();
         let currentEndTime = new Date(stats.timerEndTime).getTime();
 
+        // If timer expired, start fresh from now
         if (currentEndTime < now) {
             currentEndTime = now;
         }
@@ -144,7 +154,11 @@ const updateNisathonStats = async () => {
         console.log(`🔄 Synced SE Data: +${earnedNisaballs.toFixed(1)} NB. Timer extended by ${minutesToAdd.toFixed(1)}m`);
 
     } catch (error) {
-        console.error("StreamElements Sync Error:", error.message);
+        if (error.response && error.response.status === 404) {
+            console.error(`❌ StreamElements 404 Error. Check if Channel ID '${SE_CHANNEL_ID}' is correct (Must be Account ID, not Username)`);
+        } else {
+            console.error("StreamElements Sync Error:", error.message);
+        }
     }
 };
 
