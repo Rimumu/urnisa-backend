@@ -1,7 +1,7 @@
 {
-  "name": "urnisa-bot-proxy",
+  "name": "urnisa-back-proxy",
   "version": "1.0.0",
-  "description": "Proxy server for Urnisa Discord Widget",
+  "description": "Proxy server for Urnisa Backend",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
