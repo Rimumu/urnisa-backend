@@ -300,7 +300,21 @@ const server = app.listen(PORT, () => {
     startKeepAlive();
 });
 
+// --- CROSS-PING KEEP ALIVE ---
+// We ping both ourselves AND the Discord Bot service.
+// The Discord Bot service will also ping us.
+// This ensures mutually beneficial traffic to prevent Render Free Tier sleep.
 const SELF_URL = 'https://urnisa-backend.onrender.com';
+const BOT_URL = 'https://urnisa-bot.onrender.com';
+
 function startKeepAlive() {
-    setInterval(() => { axios.get(SELF_URL).catch(() => {}); }, 5 * 60 * 1000);
+    setInterval(() => {
+        // Ping Myself (Keep current container active if possible)
+        axios.get(SELF_URL).catch(() => {});
+        
+        // Ping Bot Service (Wake it up / Keep it up)
+        axios.get(BOT_URL).catch(() => {});
+        
+        console.log("⏰ Keep-Alive Ping sent to Backend & Bot");
+    }, 5 * 60 * 1000); // Every 5 minutes
 }
