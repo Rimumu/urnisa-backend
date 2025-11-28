@@ -7,14 +7,12 @@ const crypto = require('crypto');
 require('dotenv').config();
 
 const app = express();
-// Render will provide a PORT environment variable. Use it, or fallback to 3001 for local dev.
+// Render will provide a PORT environment variable.
 const PORT = process.env.PORT || 3001;
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "admin"; // Default fallback, please change in env
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "admin"; 
 
-// Middleware to parse JSON bodies. Increased limit for Base64 image uploads.
+// Middleware
 app.use(express.json({ limit: '50mb' }));
-
-// Enable CORS for all origins to ensure the frontend can always connect
 app.use(cors({
     origin: '*', 
     methods: ['GET', 'POST', 'OPTIONS'],
@@ -24,7 +22,7 @@ app.use(cors({
 // --- MONGODB CONNECTION ---
 const MONGO_URI = process.env.MONGO_URI;
 
-// Define Schemas
+// Schemas
 const SettingSchema = new mongoose.Schema({
     key: { type: String, required: true, unique: true },
     value: { type: mongoose.Schema.Types.Mixed, required: true }
@@ -36,56 +34,42 @@ const NisathonStatsSchema = new mongoose.Schema({
     currentSubs: { type: Number, default: 0 },
     currentBits: { type: Number, default: 0 },
     currentDonations: { type: Number, default: 0 },
-    totalNisaballs: { type: Number, default: 0 }, // Tracked with decimals
+    totalNisaballs: { type: Number, default: 0 }, 
     timerEndTime: { type: Date, default: Date.now },
-    lastActivityTime: { type: String, default: new Date().toISOString() }, // ISO string for SE API pagination
+    lastActivityTime: { type: String, default: new Date().toISOString() },
     isPaused: { type: Boolean, default: false }
 });
 const NisathonStats = mongoose.model('NisathonStats', NisathonStatsSchema);
 
 if (MONGO_URI) {
     mongoose.set('strictQuery', false);
-    mongoose.connection.on('connected', () => console.log("✅ MongoDB Connected successfully"));
-    mongoose.connection.on('error', (err) => console.error("❌ MongoDB Runtime Error:", err));
-    mongoose.connection.on('disconnected', () => console.warn("⚠️ MongoDB Disconnected"));
-
     mongoose.connect(MONGO_URI, {
         serverSelectionTimeoutMS: 5000, 
         socketTimeoutMS: 45000,
-    }).catch(err => console.error("❌ Initial MongoDB Connection Failed:", err));
+    })
+    .then(() => console.log("✅ MongoDB Connected successfully"))
+    .catch(err => console.error("❌ MongoDB Connection Failed:", err));
 } else {
     console.warn("⚠️ MONGO_URI not found. Data will not persist!");
 }
 
-// Env Vars
-let DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN ? process.env.DISCORD_BOT_TOKEN.trim() : "";
-if (DISCORD_BOT_TOKEN.startsWith("Bot ")) DISCORD_BOT_TOKEN = DISCORD_BOT_TOKEN.substring(4).trim();
-
+// Env Vars for Uploads
 const IMGBB_API_KEY = process.env.IMGBB_API_KEY || process.env.VITE_IMGBB_API_KEY;
 const CLOUDINARY_CLOUD_NAME = process.env.CLOUDINARY_CLOUD_NAME;
 const CLOUDINARY_API_KEY = process.env.CLOUDINARY_API_KEY;
 const CLOUDINARY_API_SECRET = process.env.CLOUDINARY_API_SECRET;
 
 // StreamElements Config
-const SE_CHANNEL_ID = process.env.STREAMELEMENTS_CHANNEL_ID; // Your SE Account ID
-const SE_JWT = process.env.STREAMELEMENTS_JWT; // Your SE API Token
+const SE_CHANNEL_ID = process.env.STREAMELEMENTS_CHANNEL_ID;
+const SE_JWT = process.env.STREAMELEMENTS_JWT;
 
-const GUILD_ID = '1336782145833668729'; 
-const OWNER_ID = '433262414759198720'; 
 const DEFAULT_SCHEDULE_URL = 'https://cdn.discordapp.com/attachments/1338254150479118347/1439859590152978443/3_am_17.png?ex=6921fbfd&is=6920aa7d&hm=926ad591d323ccc29cd9f7dc2e256de99d8f5dcc292aa3a883f565455844c977&';
 
-console.log("--- SERVER STARTING ---");
-if (SE_CHANNEL_ID && SE_JWT) {
-    console.log("✅ StreamElements Integration Configured.");
-} else {
-    console.warn("⚠️ StreamElements credentials missing. Nisathon stats will not update automatically.");
-}
+console.log("--- GENERAL BACKEND STARTING ---");
 
-// --- UTILS ---
 const roundOneDecimal = (num) => Math.round(num * 10) / 10;
 
-// Root
-app.get('/', (req, res) => res.send('Urnisa Bot Server is Running!'));
+app.get('/', (req, res) => res.send('Urnisa General Backend is Running!'));
 
 // --- AUTH ---
 app.post('/api/verify', (req, res) => {
@@ -100,80 +84,55 @@ const updateNisathonStats = async () => {
     try {
         let stats = await NisathonStats.findOne({ key: 'main' });
         if (!stats) {
-            stats = await NisathonStats.create({ key: 'main', timerEndTime: new Date(Date.now() + 3 * 60 * 60 * 1000) }); // Default start +3h
+            stats = await NisathonStats.create({ key: 'main', timerEndTime: new Date(Date.now() + 3 * 60 * 60 * 1000) });
         }
 
         const lastCheck = stats.lastActivityTime;
-        // Fetch activities *after* the last check
         const response = await axios.get(`https://api.streamelements.com/kappa/v2/sessions/${SE_CHANNEL_ID}/activities`, {
             headers: { Authorization: `Bearer ${SE_JWT}` },
-            params: {
-                after: lastCheck,
-                limit: 20 // Process batches
-            }
+            params: { after: lastCheck, limit: 20 }
         });
 
         const activities = response.data;
-        if (activities.length === 0) return; // No new events
+        if (activities.length === 0) return; 
 
         let newSubs = 0;
         let newBits = 0;
         let newDonationAmount = 0;
         let earnedNisaballs = 0;
 
-        // Process oldest to newest
         const sortedActivities = activities.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
         let newestDate = lastCheck;
 
         for (const act of sortedActivities) {
             newestDate = act.createdAt;
-            
-            // 1. SUBSCRIPTIONS
-            // 2 Subs = 1 NB -> 1 Sub = 0.5 NB
             if (act.type === 'subscriber') {
-                const amount = 1; // Basic sub counts as 1. Gift subs usually appear as separate events or with amount.
-                // Note: SE 'subscriber' event amount is usually months, not count of gifts. Gift is separate type?
-                // Actually SE unifies 'subscriber' for both. gifts have 'isGift'.
-                // For simplicity, we count each event as 1 sub unless 'amount' implies bulk (rare in SE activity feed structure).
                 newSubs += 1;
                 earnedNisaballs += 0.5;
             }
-            
-            // 2. BITS (Cheer)
-            // 500 Bits = 1 NB -> 100 Bits = 0.2 NB -> 1 Bit = 0.002 NB
             if (act.type === 'cheer') {
                 const bits = act.data.amount;
                 newBits += bits;
                 earnedNisaballs += (bits * 0.002);
             }
-
-            // 3. DONATIONS (Tip)
-            // $5 = 1 NB -> $1 = 0.2 NB
             if (act.type === 'tip') {
-                // Assuming currency is USD or pre-converted by SE. 
-                // In a real app, might need currency conversion if SE doesn't normalize.
                 const tip = act.data.amount;
                 newDonationAmount += tip;
                 earnedNisaballs += (tip * 0.2);
             }
         }
 
-        // Timer Logic
-        // 1 NB = 10 Minutes
         const minutesToAdd = earnedNisaballs * 10;
         const msToAdd = minutesToAdd * 60 * 1000;
-
         const now = new Date().getTime();
         let currentEndTime = new Date(stats.timerEndTime).getTime();
 
-        // If timer expired, start from now. If running, extend it.
         if (currentEndTime < now) {
             currentEndTime = now;
         }
         
         const newEndTime = new Date(currentEndTime + msToAdd);
 
-        // Update DB
         stats.currentSubs += newSubs;
         stats.currentBits += newBits;
         stats.currentDonations += newDonationAmount;
@@ -189,28 +148,21 @@ const updateNisathonStats = async () => {
     }
 };
 
-// Polling Loop (Every 60s)
 setInterval(updateNisathonStats, 60000);
 
-
 // --- NISATHON API ---
-
 app.get('/api/nisathon/stats', async (req, res) => {
     try {
         if (mongoose.connection.readyState !== 1) {
-            // Fallback for offline DB
             return res.json({ 
                 currentSubs: 0, currentBits: 0, currentDonations: 0, 
                 totalNisaballs: 0, timerEndTime: new Date().toISOString() 
             });
         }
-
         let stats = await NisathonStats.findOne({ key: 'main' });
         if (!stats) {
-            // Initialize if missing
             stats = await NisathonStats.create({ key: 'main', timerEndTime: new Date(Date.now() + 3 * 60 * 60 * 1000) });
         }
-
         res.json({
             currentSubs: stats.currentSubs,
             currentBits: stats.currentBits,
@@ -219,41 +171,27 @@ app.get('/api/nisathon/stats', async (req, res) => {
             timerEndTime: stats.timerEndTime,
             isPaused: stats.isPaused
         });
-    } catch (error) {
-        console.error(error);
-        res.status(500).json({ error: 'Failed to fetch stats' });
-    }
+    } catch (error) { res.status(500).json({ error: 'Failed to fetch stats' }); }
 });
 
-// Manual Timer Adjustment (Admin)
 app.post('/api/nisathon/timer', async (req, res) => {
     const authHeader = req.headers.authorization;
-    const { minutes } = req.body; // +/- minutes
-
+    const { minutes } = req.body;
     if (!authHeader || authHeader !== ADMIN_PASSWORD) return res.status(401).json({ error: 'Unauthorized' });
-
     try {
         const stats = await NisathonStats.findOne({ key: 'main' });
         if (stats) {
             const currentEnd = new Date(stats.timerEndTime).getTime();
             const now = Date.now();
-            // Base off max(now, end) to ensure we add to a running timer or start a new one
             const baseTime = currentEnd > now ? currentEnd : now;
             stats.timerEndTime = new Date(baseTime + (minutes * 60 * 1000));
             await stats.save();
             res.json({ success: true, newEndTime: stats.timerEndTime });
-        } else {
-            res.status(404).json({ error: 'Stats not found' });
-        }
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
+        } else { res.status(404).json({ error: 'Stats not found' }); }
+    } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
-
-// --- OTHER ENDPOINTS (Schedule, Profile, etc.) ---
-// ... (Keeping existing endpoints)
-
+// --- CONTENT API (Schedule, Profile, etc.) ---
 app.get('/api/schedule', async (req, res) => {
     try {
         if (mongoose.connection.readyState === 1) {
@@ -342,16 +280,13 @@ app.post('/api/upload', async (req, res) => {
     return res.status(500).json({ success: false });
 });
 
-app.get('/api/owner', async (req, res) => { /* Keeping existing implementation */ res.json({ status: 'offline' }); });
-app.get('/api/messages', async (req, res) => { /* Keeping existing implementation */ res.json([]); });
-
-// Listen
+// Start Server
 const server = app.listen(PORT, () => {
-    console.log(`✅ Server running on ${PORT}`);
+    console.log(`✅ General Backend running on ${PORT}`);
     startKeepAlive();
 });
 
-const RENDER_EXTERNAL_URL = 'https://urnisa-bot.onrender.com';
+const SELF_URL = 'https://urnisa-backend.onrender.com';
 function startKeepAlive() {
-    setInterval(() => { axios.get(RENDER_EXTERNAL_URL).catch(() => {}); }, 5 * 60 * 1000);
+    setInterval(() => { axios.get(SELF_URL).catch(() => {}); }, 5 * 60 * 1000);
 }
