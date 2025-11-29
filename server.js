@@ -54,6 +54,23 @@ const NisathonEventSchema = new mongoose.Schema({
 });
 const NisathonEvent = mongoose.model('NisathonEvent', NisathonEventSchema);
 
+// --- WHEEL SCHEMAS ---
+const SpinQueueSchema = new mongoose.Schema({
+    user: { type: String, required: true },
+    sourceEventId: { type: String }, // Link to the donation event
+    nisaballs: Number, // How much they donated to earn this
+    createdAt: { type: Date, default: Date.now }
+});
+const SpinQueue = mongoose.model('SpinQueue', SpinQueueSchema);
+
+const SpinHistorySchema = new mongoose.Schema({
+    user: { type: String, required: true },
+    reward: { type: String, required: true },
+    timestamp: { type: Date, default: Date.now }
+});
+const SpinHistory = mongoose.model('SpinHistory', SpinHistorySchema);
+
+
 if (MONGO_URI) {
     mongoose.set('strictQuery', false);
     mongoose.connect(MONGO_URI, {
@@ -114,9 +131,6 @@ const processNisathonEvent = async (stats, type, user, amount, message, provider
         eventType = 'sub';
         stats.currentSubs += 1;
     } else if (type === 'gift') {
-        // usually passed as bulk amount, simplified here as single event logic or needs loop
-        // For SE sync, 'subscriber' events come individually even for gifts usually.
-        // If simulated:
         earnedNisaballs = 0.5 * amount;
         amountDisplay = `${amount} Gift Subs`;
         stats.currentSubs += amount;
@@ -149,8 +163,7 @@ const processNisathonEvent = async (stats, type, user, amount, message, provider
         stats.remainingTimeMs += (minutesToAdd * 60 * 1000);
     }
 
-    // Save Event History
-    await NisathonEvent.create({
+    const newEvent = await NisathonEvent.create({
         providerId: providerId || `sim-${Date.now()}-${Math.random()}`,
         user: user || 'Anonymous',
         type: eventType,
@@ -159,6 +172,22 @@ const processNisathonEvent = async (stats, type, user, amount, message, provider
         nisaballAmount: earnedNisaballs,
         createdAt: new Date()
     });
+
+    // --- SPIN QUEUE LOGIC ---
+    // If a single event yields >= 5 Nisaballs, add to queue
+    // Note: We use Math.floor because 5 NB = 1 Spin, 10 NB = 2 Spins? 
+    // Request asked for: "track the user who has donated 5 Nisaballs at once"
+    if (earnedNisaballs >= 5) {
+        const spinsEarned = Math.floor(earnedNisaballs / 5);
+        for (let i = 0; i < spinsEarned; i++) {
+            await SpinQueue.create({
+                user: user || 'Anonymous',
+                sourceEventId: newEvent._id,
+                nisaballs: earnedNisaballs
+            });
+        }
+        console.log(`🎡 Added ${spinsEarned} spins to queue for ${user}`);
+    }
 
     return earnedNisaballs;
 };
@@ -230,6 +259,39 @@ const updateNisathonStats = async () => {
 };
 
 setInterval(updateNisathonStats, 60000);
+
+// --- WHEEL API ---
+
+app.get('/api/wheel/queue', async (req, res) => {
+    try {
+        const queue = await SpinQueue.find().sort({ createdAt: 1 });
+        res.json(queue);
+    } catch (e) { res.json([]); }
+});
+
+app.get('/api/wheel/history', async (req, res) => {
+    try {
+        const history = await SpinHistory.find().sort({ timestamp: -1 });
+        res.json(history);
+    } catch (e) { res.json([]); }
+});
+
+app.post('/api/wheel/spin-result', async (req, res) => {
+    if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).json({ error: 'Unauthorized' });
+    const { user, reward, queueId } = req.body;
+    
+    try {
+        // Save history
+        await SpinHistory.create({ user, reward });
+        
+        // Remove from queue if valid queueId provided
+        if (queueId) {
+            await SpinQueue.findByIdAndDelete(queueId);
+        }
+        
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
 
 // --- NISATHON API ---
 
