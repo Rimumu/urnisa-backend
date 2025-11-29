@@ -38,6 +38,7 @@ const NisathonStatsSchema = new mongoose.Schema({
     timerEndTime: { type: Date, default: Date.now },
     remainingTimeMs: { type: Number, default: 0 }, // Used when paused
     isPaused: { type: Boolean, default: false },
+    activeEvent: { type: String, default: null }, // e.g., 'DOUBLE_TIMER'
     lastActivityTime: { type: String, default: new Date().toISOString() }
 });
 const NisathonStats = mongoose.model('NisathonStats', NisathonStatsSchema);
@@ -150,8 +151,11 @@ const processNisathonEvent = async (stats, type, user, amount, message, provider
     stats.totalNisaballs = roundOneDecimal(stats.totalNisaballs + earnedNisaballs);
 
     // Update Timer
+    // CHECK FOR DOUBLE TIMER EVENT
+    const timeMultiplier = stats.activeEvent === 'DOUBLE_TIMER' ? 2 : 1;
+    
     if (!stats.isPaused) {
-        const minutesToAdd = earnedNisaballs * 10;
+        const minutesToAdd = earnedNisaballs * 10 * timeMultiplier;
         const msToAdd = minutesToAdd * 60 * 1000;
         const now = new Date().getTime();
         let currentEndTime = new Date(stats.timerEndTime).getTime();
@@ -159,7 +163,7 @@ const processNisathonEvent = async (stats, type, user, amount, message, provider
         stats.timerEndTime = new Date(currentEndTime + msToAdd);
     } else {
         // If paused, just add to the potential remaining buffer
-        const minutesToAdd = earnedNisaballs * 10;
+        const minutesToAdd = earnedNisaballs * 10 * timeMultiplier;
         stats.remainingTimeMs += (minutesToAdd * 60 * 1000);
     }
 
@@ -174,9 +178,6 @@ const processNisathonEvent = async (stats, type, user, amount, message, provider
     });
 
     // --- SPIN QUEUE LOGIC ---
-    // If a single event yields >= 5 Nisaballs, add to queue
-    // Note: We use Math.floor because 5 NB = 1 Spin, 10 NB = 2 Spins? 
-    // Request asked for: "track the user who has donated 5 Nisaballs at once"
     if (earnedNisaballs >= 5) {
         const spinsEarned = Math.floor(earnedNisaballs / 5);
         for (let i = 0; i < spinsEarned; i++) {
@@ -301,7 +302,7 @@ app.get('/api/nisathon/stats', async (req, res) => {
             return res.json({ 
                 currentSubs: 0, currentBits: 0, currentDonations: 0, 
                 totalNisaballs: 0, timerEndTime: new Date().toISOString(),
-                isPaused: false
+                isPaused: false, activeEvent: null
             });
         }
         let stats = await NisathonStats.findOne({ key: 'main' });
@@ -315,7 +316,8 @@ app.get('/api/nisathon/stats', async (req, res) => {
             totalNisaballs: stats.totalNisaballs,
             timerEndTime: stats.timerEndTime,
             isPaused: stats.isPaused,
-            remainingTimeMs: stats.remainingTimeMs
+            remainingTimeMs: stats.remainingTimeMs,
+            activeEvent: stats.activeEvent
         });
     } catch (error) { res.status(500).json({ error: 'Failed to fetch stats' }); }
 });
@@ -402,6 +404,19 @@ app.post('/api/nisathon/timer/pause', async (req, res) => {
             }
             await stats.save();
             res.json({ success: true, isPaused: stats.isPaused });
+        }
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/nisathon/event', async (req, res) => {
+    if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).json({ error: 'Unauthorized' });
+    const { activeEvent } = req.body; // 'DOUBLE_TIMER' or null
+    try {
+        const stats = await NisathonStats.findOne({ key: 'main' });
+        if (stats) {
+            stats.activeEvent = activeEvent;
+            await stats.save();
+            res.json({ success: true, activeEvent: stats.activeEvent });
         }
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
