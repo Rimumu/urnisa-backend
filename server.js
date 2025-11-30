@@ -115,7 +115,7 @@ app.post('/api/verify', (req, res) => {
 });
 
 // --- HELPER: Process Event ---
-const processNisathonEvent = async (stats, type, user, amount, message, providerId) => {
+const processNisathonEvent = async (stats, type, user, amount, message, providerId, tier = '1000') => {
     // Check duplication if providerId exists
     if (providerId) {
         const exists = await NisathonEvent.findOne({ providerId });
@@ -127,11 +127,26 @@ const processNisathonEvent = async (stats, type, user, amount, message, provider
     let eventType = type; // normalize types
 
     if (type === 'subscriber' || type === 'sub') {
-        earnedNisaballs = 0.5;
-        amountDisplay = "Subscription";
+        // TIER LOGIC
+        // Tier 1 (1000) / Prime = 0.5
+        // Tier 2 (2000) = 1.0
+        // Tier 3 (3000) = 2.0
+        if (tier === '3000') {
+            earnedNisaballs = 2.0;
+            amountDisplay = "Tier 3 Sub";
+        } else if (tier === '2000') {
+            earnedNisaballs = 1.0;
+            amountDisplay = "Tier 2 Sub";
+        } else {
+            earnedNisaballs = 0.5;
+            amountDisplay = tier === 'prime' ? "Prime Sub" : "Tier 1 Sub";
+        }
+        
         eventType = 'sub';
         stats.currentSubs += 1;
     } else if (type === 'gift') {
+        // Gift subs usually default to Tier 1 in mass, logic could be expanded if SE provides per-gift tier
+        // Assuming standard 0.5 per gift
         earnedNisaballs = 0.5 * amount;
         amountDisplay = `${amount} Gift Subs`;
         stats.currentSubs += amount;
@@ -225,13 +240,17 @@ const updateNisathonStats = async () => {
             // Map SE types to our types
             let type = act.type;
             let amount = 0;
+            let tier = '1000'; // Default to Tier 1
+            
             const user = act.data.username;
             const message = act.data.message || "";
             const providerId = act._id;
 
             if (type === 'subscriber') {
                 amount = 1;
-                // Handle gifts if distinguishable, SE usually sends separate events per sub
+                // Extract Tier info from StreamElements
+                // SE usually sends data.tier as "1000", "2000", "3000" or "prime"
+                if (act.data.tier) tier = act.data.tier;
             } else if (type === 'cheer') {
                 amount = act.data.amount;
             } else if (type === 'tip') {
@@ -240,7 +259,7 @@ const updateNisathonStats = async () => {
                 continue; // Skip followers, hosts, etc.
             }
 
-            const nbAdded = await processNisathonEvent(stats, type, user, amount, message, providerId);
+            const nbAdded = await processNisathonEvent(stats, type, user, amount, message, providerId, tier);
             if (nbAdded > 0 || type === 'subscriber') changesMade = true;
         }
 
@@ -424,12 +443,12 @@ app.post('/api/nisathon/event', async (req, res) => {
 // TEST EVENT INJECTION
 app.post('/api/nisathon/test-event', async (req, res) => {
     if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).json({ error: 'Unauthorized' });
-    const { type, user, amount } = req.body;
+    const { type, user, amount, tier } = req.body; // Added tier
     try {
         const stats = await NisathonStats.findOne({ key: 'main' });
         if (!stats) return res.status(404).json({ error: "Stats not init" });
 
-        await processNisathonEvent(stats, type, user, parseFloat(amount), "Test Event", null);
+        await processNisathonEvent(stats, type, user, parseFloat(amount), "Test Event", null, tier);
         await stats.save();
         res.json({ success: true });
     } catch (e) { res.status(500).json({ error: e.message }); }
