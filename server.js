@@ -90,7 +90,9 @@ const CLOUDINARY_API_KEY = process.env.CLOUDINARY_API_KEY;
 const CLOUDINARY_API_SECRET = process.env.CLOUDINARY_API_SECRET;
 
 // StreamElements Config
-const SE_CHANNEL_ID = process.env.STREAMELEMENTS_CHANNEL_ID;
+// We start with the Env Var, but we will overwrite this with the REAL ID from the JWT token
+// to prevent configuration errors.
+let ACTIVE_CHANNEL_ID = process.env.STREAMELEMENTS_CHANNEL_ID;
 const SE_JWT = process.env.STREAMELEMENTS_JWT;
 
 const DEFAULT_SCHEDULE_URL = 'https://cdn.discordapp.com/attachments/1338254150479118347/1439859590152978443/3_am_17.png?ex=6921fbfd&is=6920aa7d&hm=926ad591d323ccc29cd9f7dc2e256de99d8f5dcc292aa3a883f565455844c977&';
@@ -116,7 +118,6 @@ const processNisathonEvent = async (stats, type, user, amount, message, provider
         const existingEvent = await NisathonEvent.findOne({ providerId });
         if (existingEvent) {
             isNewEvent = false;
-            // Just updating ensures any missed metadata is captured, but we don't add points twice
         }
     }
 
@@ -226,52 +227,50 @@ const processNisathonEvent = async (stats, type, user, amount, message, provider
     return earnedNisaballs;
 };
 
-// --- STREAMELEMENTS VERIFICATION ---
-const verifyStreamElementsConnection = async () => {
+// --- STREAMELEMENTS AUTO-CONFIGURATION ---
+const autoConfigureStreamElements = async () => {
     if (!SE_JWT) {
         console.error("❌ ERROR: STREAMELEMENTS_JWT is missing in Environment Variables!");
-        return;
+        return false;
     }
     
     try {
-        console.log("🔍 Verifying StreamElements Connection...");
+        console.log("🔍 Auto-Configuring StreamElements...");
+        // This endpoint returns the user's profile info, including the critical Channel ID
         const response = await axios.get('https://api.streamelements.com/kappa/v2/channels/me', {
             headers: { Authorization: `Bearer ${SE_JWT}` },
-            timeout: 5000
+            timeout: 8000
         });
         
-        const myChannelId = response.data._id;
+        const actualChannelId = response.data._id;
         const myUsername = response.data.username;
         
-        console.log(`✅ StreamElements Auth Success! Logged in as: '${myUsername}'`);
+        // CRITICAL STEP: Overwrite the ID with the one we just fetched from the API
+        // This fixes cases where the user put the wrong ID or their Twitch ID in the env vars
+        ACTIVE_CHANNEL_ID = actualChannelId;
         
-        if (SE_CHANNEL_ID) {
-            if (SE_CHANNEL_ID === myChannelId) {
-                console.log("✅ Configured CHANNEL_ID matches actual ID.");
-            } else {
-                console.error("❌ MISMATCH: Your Configured CHANNEL_ID does not match your Token's ID!");
-                console.error(`   Configured: ${SE_CHANNEL_ID}`);
-                console.error(`   Actual:     ${myChannelId}`);
-                console.error("   --> Please update STREAMELEMENTS_CHANNEL_ID in Render to match the Actual ID.");
-            }
-        } else {
-            console.warn("⚠️ STREAMELEMENTS_CHANNEL_ID is missing. Please set it to:", myChannelId);
-        }
+        console.log(`✅ StreamElements Auth Success! Logged in as: '${myUsername}'`);
+        console.log(`✅ Auto-Configured Channel ID to: ${ACTIVE_CHANNEL_ID}`);
+        
+        return true;
         
     } catch (error) {
-        console.error("❌ StreamElements Connection Failed. Is the JWT Token correct?");
+        console.error("❌ StreamElements Auth Failed. Is your JWT Token correct?");
         if (error.response) {
             console.error(`   Status: ${error.response.status}`);
-            console.error(`   Data: ${JSON.stringify(error.response.data)}`);
         } else {
             console.error(`   Error: ${error.message}`);
         }
+        return false;
     }
 };
 
 // --- NISATHON SYNC LOGIC ---
 const updateNisathonStats = async (forceLookbackHours = 0) => {
-    if (!SE_CHANNEL_ID || !SE_JWT || mongoose.connection.readyState !== 1) return;
+    if (!ACTIVE_CHANNEL_ID || !SE_JWT || mongoose.connection.readyState !== 1) {
+        console.log("⏳ Waiting for DB/StreamElements config...");
+        return;
+    }
 
     try {
         let stats = await NisathonStats.findOne({ key: 'main' });
@@ -294,9 +293,10 @@ const updateNisathonStats = async (forceLookbackHours = 0) => {
             requestParams.after = lastCheck;
         }
 
-        // console.log(`🔄 Fetching SE activities with params:`, requestParams);
+        const url = `https://api.streamelements.com/kappa/v2/activities/${ACTIVE_CHANNEL_ID}`;
+        // console.log(`🔄 Fetching from: ${url}`);
         
-        const response = await axios.get(`https://api.streamelements.com/kappa/v2/activities/${SE_CHANNEL_ID}`, {
+        const response = await axios.get(url, {
             headers: { Authorization: `Bearer ${SE_JWT}` },
             params: requestParams,
             timeout: 10000 // 10s Timeout prevents hanging
@@ -311,7 +311,6 @@ const updateNisathonStats = async (forceLookbackHours = 0) => {
 
         console.log(`   -> Found ${activities.length} activities.`);
 
-        // Sort by date ascending (oldest first) so we process in order
         const sortedActivities = activities.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
         let newestDate = lastCheck;
         let changesMade = false;
@@ -319,11 +318,6 @@ const updateNisathonStats = async (forceLookbackHours = 0) => {
         for (const act of sortedActivities) {
             newestDate = act.createdAt;
             
-            // VERBOSE LOGGING: specifically for subscribers
-            if (['subscriber', 'sub', 'resub', 'subscription'].includes(act.type)) {
-                console.log(`🔎 INSPECTING SUB: User=${act.data.username}, Type=${act.type}, Tier=${act.data.tier}`);
-            }
-
             let type = act.type;
             let amount = 0;
             let tier = '1000';
@@ -335,6 +329,8 @@ const updateNisathonStats = async (forceLookbackHours = 0) => {
             if (type === 'subscriber' || type === 'resub' || type === 'subscription') {
                 amount = 1;
                 if (act.data.tier) tier = act.data.tier;
+                // Log subs for confirmation
+                console.log(`🔍 Processing SUB: User=${user}, Tier=${tier}`);
             } 
             else if (type === 'gift') {
                 amount = act.data.amount || 1;
@@ -349,15 +345,15 @@ const updateNisathonStats = async (forceLookbackHours = 0) => {
                 continue; 
             }
 
-            // Process event
-            await processNisathonEvent(stats, type, user, amount, message, providerId, tier);
+            const nbAdded = await processNisathonEvent(stats, type, user, amount, message, providerId, tier);
             changesMade = true;
         }
 
         if (changesMade) {
-            // If we did a blind fetch (startup), we still want to update the cursor to now/latest
-            // so next time we only get newer stuff.
-            stats.lastActivityTime = newestDate;
+            // Only advance cursor if we weren't in a "Force Lookback" mode
+            if (forceLookbackHours === 0) {
+                stats.lastActivityTime = newestDate;
+            }
             await stats.save();
             console.log(`✅ Sync Complete.`);
         }
@@ -373,13 +369,14 @@ const updateNisathonStats = async (forceLookbackHours = 0) => {
 const server = app.listen(PORT, async () => {
     console.log(`✅ General Backend running on ${PORT}`);
     
-    // Verify connection on startup
-    await verifyStreamElementsConnection();
+    // 1. Auto-Detect Correct ID
+    const isConfigured = await autoConfigureStreamElements();
     
-    // --- STARTUP BACKFILL ---
-    // Run immediately with force flag (1)
-    console.log("🚀 Running Startup Backfill...");
-    await updateNisathonStats(1);
+    // 2. If valid, Run Startup Backfill
+    if (isConfigured) {
+        console.log("🚀 Running Startup Backfill...");
+        await updateNisathonStats(1); // Force latest 100 check
+    }
     
     // Start Loops
     setInterval(() => updateNisathonStats(0), 30000); // 30s Poll (Normal incremental sync)
