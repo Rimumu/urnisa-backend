@@ -113,8 +113,7 @@ const processNisathonEvent = async (stats, type, user, amount, message, provider
     if (providerId) {
         const exists = await NisathonEvent.findOne({ providerId });
         if (exists) {
-            // Uncomment to see skipped events in logs
-            // console.log(`⚠️ Skipping duplicate event: ${providerId} (${user})`);
+            // Already processed this event
             return 0;
         }
     }
@@ -255,7 +254,6 @@ const verifyStreamElementsConnection = async () => {
 };
 
 // --- NISATHON SYNC LOGIC ---
-// Added 'forceLookback' param to manually rewind the sync cursor
 const updateNisathonStats = async (forceLookbackHours = 0) => {
     if (!SE_CHANNEL_ID || !SE_JWT || mongoose.connection.readyState !== 1) return;
 
@@ -267,26 +265,23 @@ const updateNisathonStats = async (forceLookbackHours = 0) => {
 
         let lastCheck = stats.lastActivityTime;
 
-        // If forceLookback is requested (e.g. startup or manual sync), override lastCheck
+        // Force lookback on startup or manual sync
         if (forceLookbackHours > 0) {
             const lookbackTime = new Date(Date.now() - forceLookbackHours * 60 * 60 * 1000).toISOString();
             console.log(`🔙 Forcing sync from: ${lookbackTime} (${forceLookbackHours}h ago)`);
             lastCheck = lookbackTime;
         }
 
-        console.log(`🔄 Checking SE activities after: ${lastCheck}`);
-        
         const response = await axios.get(`https://api.streamelements.com/kappa/v2/activities/${SE_CHANNEL_ID}`, {
             headers: { Authorization: `Bearer ${SE_JWT}` },
             params: { 
                 after: lastCheck, 
-                limit: 100 // Increased limit to catch up on missed events
+                limit: 500 // Max limit to catch everything
             }
         });
 
         const activities = response.data;
         if (activities.length === 0) {
-            console.log("   -> No new activities found.");
             return; 
         }
 
@@ -299,11 +294,8 @@ const updateNisathonStats = async (forceLookbackHours = 0) => {
         for (const act of sortedActivities) {
             newestDate = act.createdAt;
             
-            // VERBOSE LOGGING FOR DEBUGGING
-            // This will help us identify exactly what your 'real sub' data looks like
-            if (act.type.includes('sub')) {
-                console.log(`🔍 SUB EVENT DETAILS:`, JSON.stringify(act.data));
-            }
+            // VERBOSE LOGGING: This helps debug why events might be skipped
+            console.log(`🔎 INSPECTING: ${act.type} by ${act.data.username} at ${act.createdAt} [Tier: ${act.data.tier || 'N/A'}]`);
 
             let type = act.type;
             let amount = 0;
@@ -327,6 +319,8 @@ const updateNisathonStats = async (forceLookbackHours = 0) => {
                 amount = act.data.amount;
             } 
             else {
+                // Log unknown types for debugging
+                // console.log("Skipping unknown type:", type);
                 continue; 
             }
 
@@ -337,7 +331,7 @@ const updateNisathonStats = async (forceLookbackHours = 0) => {
         if (changesMade) {
             stats.lastActivityTime = newestDate;
             await stats.save();
-            console.log(`✅ Sync Complete. Updated cursor to ${newestDate}`);
+            console.log(`✅ Sync Complete. Cursor updated to ${newestDate}`);
         }
 
     } catch (error) {
@@ -355,9 +349,9 @@ const server = app.listen(PORT, async () => {
     await verifyStreamElementsConnection();
     
     // --- STARTUP BACKFILL ---
-    // Scan last 6 hours immediately on boot to catch missed events
-    console.log("🚀 Running Startup Backfill (Last 6 Hours)...");
-    await updateNisathonStats(6);
+    // Scan last 48 hours immediately on boot to catch missed events
+    console.log("🚀 Running Startup Backfill (Last 48 Hours)...");
+    await updateNisathonStats(48);
     
     // Start Loops
     setInterval(() => updateNisathonStats(0), 30000); // 30s Poll (Normal incremental sync)
