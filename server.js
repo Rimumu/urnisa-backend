@@ -1,4 +1,3 @@
-
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
@@ -39,7 +38,7 @@ const NisathonStatsSchema = new mongoose.Schema({
     remainingTimeMs: { type: Number, default: 0 }, // Used when paused
     isPaused: { type: Boolean, default: false },
     activeEvent: { type: String, default: null }, // e.g., 'DOUBLE_TIMER'
-    lastActivityTime: { type: String, default: new Date().toISOString() }
+    lastActivityTime: { type: String, default: new Date(Date.now() - 1000 * 60 * 60).toISOString() } // Default to 1 hour ago
 });
 const NisathonStats = mongoose.model('NisathonStats', NisathonStatsSchema);
 
@@ -119,44 +118,58 @@ const processNisathonEvent = async (stats, type, user, amount, message, provider
     // Check duplication if providerId exists
     if (providerId) {
         const exists = await NisathonEvent.findOne({ providerId });
-        if (exists) return 0;
+        if (exists) {
+            console.log(`⚠️ Skipping duplicate event: ${providerId}`);
+            return 0;
+        }
     }
 
     let earnedNisaballs = 0;
     let amountDisplay = "";
     let eventType = type; // normalize types
 
-    if (type === 'subscriber' || type === 'sub') {
+    console.log(`Processing Event: Type=${type}, User=${user}, Amount=${amount}, Tier=${tier}`);
+
+    if (type === 'subscriber' || type === 'sub' || type === 'resub') {
         // TIER LOGIC
         // Tier 1 (1000) / Prime = 0.5
         // Tier 2 (2000) = 1.0
         // Tier 3 (3000) = 2.0
-        if (tier === '3000') {
-            earnedNisaballs = 2.0;
-            amountDisplay = "Tier 3 Sub";
-        } else if (tier === '2000') {
-            earnedNisaballs = 1.0;
-            amountDisplay = "Tier 2 Sub";
-        } else {
-            earnedNisaballs = 0.5;
-            amountDisplay = tier === 'prime' ? "Prime Sub" : "Tier 1 Sub";
+        
+        let tierLabel = "Tier 1";
+        let tierVal = 0.5;
+
+        // Convert tier to string to be safe
+        const tierStr = String(tier).toLowerCase();
+
+        if (tierStr === '3000' || tierStr === 'tier 3') {
+            tierVal = 2.0;
+            tierLabel = "Tier 3";
+        } else if (tierStr === '2000' || tierStr === 'tier 2') {
+            tierVal = 1.0;
+            tierLabel = "Tier 2";
+        } else if (tierStr === 'prime') {
+            tierVal = 0.5;
+            tierLabel = "Prime";
         }
+
+        earnedNisaballs = tierVal;
+        amountDisplay = `${tierLabel} Sub`;
         
         eventType = 'sub';
         stats.currentSubs += 1;
     } else if (type === 'gift') {
-        // Gift subs usually default to Tier 1 in mass, logic could be expanded if SE provides per-gift tier
-        // Assuming standard 0.5 per gift
+        // Gift subs default to 0.5 per gift (Tier 1 equivalent usually)
         earnedNisaballs = 0.5 * amount;
         amountDisplay = `${amount} Gift Subs`;
         stats.currentSubs += amount;
     } else if (type === 'cheer' || type === 'bits') {
-        earnedNisaballs = amount * 0.002;
+        earnedNisaballs = amount * 0.002; // 500 bits = 1 NB
         amountDisplay = `${amount} Bits`;
         eventType = 'bits';
         stats.currentBits += amount;
     } else if (type === 'tip' || type === 'donation') {
-        earnedNisaballs = amount * 0.2;
+        earnedNisaballs = amount * 0.2; // $5 = 1 NB
         amountDisplay = `$${amount.toFixed(2)}`;
         eventType = 'donation';
         stats.currentDonations += amount;
@@ -174,10 +187,11 @@ const processNisathonEvent = async (stats, type, user, amount, message, provider
         const msToAdd = minutesToAdd * 60 * 1000;
         const now = new Date().getTime();
         let currentEndTime = new Date(stats.timerEndTime).getTime();
+        // If timer expired, start from now
         if (currentEndTime < now) currentEndTime = now;
         stats.timerEndTime = new Date(currentEndTime + msToAdd);
     } else {
-        // If paused, just add to the potential remaining buffer
+        // If paused, add to the buffer
         const minutesToAdd = earnedNisaballs * 10 * timeMultiplier;
         stats.remainingTimeMs += (minutesToAdd * 60 * 1000);
     }
@@ -191,6 +205,8 @@ const processNisathonEvent = async (stats, type, user, amount, message, provider
         nisaballAmount: earnedNisaballs,
         createdAt: new Date()
     });
+
+    console.log(`✅ Event Processed: +${earnedNisaballs} NB (x${timeMultiplier} time)`);
 
     // --- SPIN QUEUE LOGIC ---
     if (earnedNisaballs >= 5) {
@@ -220,16 +236,19 @@ const updateNisathonStats = async () => {
 
         const lastCheck = stats.lastActivityTime;
         
-        // CORRECTED ENDPOINT: /activities/{channelId}
+        // Fetch recent activities
         const response = await axios.get(`https://api.streamelements.com/kappa/v2/activities/${SE_CHANNEL_ID}`, {
             headers: { Authorization: `Bearer ${SE_JWT}` },
-            params: { after: lastCheck, limit: 20 }
+            params: { 
+                after: lastCheck, 
+                limit: 50 // Increased limit to catch bursts
+            }
         });
 
         const activities = response.data;
         if (activities.length === 0) return; 
 
-        // Sort by date ascending (oldest first) so we process in order
+        // Sort by date ascending (oldest first)
         const sortedActivities = activities.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
         let newestDate = lastCheck;
         let changesMade = false;
@@ -237,48 +256,65 @@ const updateNisathonStats = async () => {
         for (const act of sortedActivities) {
             newestDate = act.createdAt;
             
-            // Map SE types to our types
+            // Log payload for debugging
+            console.log(`📥 SE Activity [${act.type}]:`, JSON.stringify(act));
+
             let type = act.type;
             let amount = 0;
-            let tier = '1000'; // Default to Tier 1
+            let tier = '1000'; // Default Tier 1
             
             const user = act.data.username;
             const message = act.data.message || "";
             const providerId = act._id;
 
-            if (type === 'subscriber') {
+            // HANDLE SUBS & RESUBS
+            if (type === 'subscriber' || type === 'resub') {
                 amount = 1;
-                // Extract Tier info from StreamElements
-                // SE usually sends data.tier as "1000", "2000", "3000" or "prime"
+                // Parse Tier
                 if (act.data.tier) tier = act.data.tier;
-            } else if (type === 'cheer') {
+            } 
+            // HANDLE GIFTS
+            else if (type === 'gift') {
+                // Not supported by standard API logic usually, but handled here just in case SE sends it
+                // Usually comes as 'subscriber' with gifted: true in some APIs, but SE has 'gift' type sometimes
+                amount = act.data.amount || 1;
+            }
+            // HANDLE BITS
+            else if (type === 'cheer') {
                 amount = act.data.amount;
-            } else if (type === 'tip') {
+            } 
+            // HANDLE TIPS
+            else if (type === 'tip') {
                 amount = act.data.amount;
-            } else {
-                continue; // Skip followers, hosts, etc.
+            } 
+            else {
+                continue; // Skip followers, raids, etc.
             }
 
             const nbAdded = await processNisathonEvent(stats, type, user, amount, message, providerId, tier);
-            if (nbAdded > 0 || type === 'subscriber') changesMade = true;
+            // Always mark changesMade = true to update the timestamp, even if nbAdded=0 (duplicate),
+            // but effectively processNisathonEvent handles duplicates internally.
+            // We only want to update the DB if we actually processed something or moved time forward.
+            changesMade = true;
         }
 
         if (changesMade) {
             stats.lastActivityTime = newestDate;
             await stats.save();
-            console.log(`🔄 Synced SE Data.`);
+            console.log(`🔄 Synced up to ${newestDate}`);
         }
 
     } catch (error) {
         if (error.response && error.response.status === 404) {
-            console.error(`❌ StreamElements 404 Error. Check if Channel ID '${SE_CHANNEL_ID}' is correct (Must be Account ID, not Username)`);
+            console.error(`❌ StreamElements 404. Check Channel ID '${SE_CHANNEL_ID}'.`);
         } else {
             console.error("StreamElements Sync Error:", error.message);
         }
     }
 };
 
-setInterval(updateNisathonStats, 60000);
+// Run Sync every 30 seconds
+setInterval(updateNisathonStats, 30000);
 
 // --- WHEEL API ---
 
@@ -301,14 +337,10 @@ app.post('/api/wheel/spin-result', async (req, res) => {
     const { user, reward, queueId } = req.body;
     
     try {
-        // Save history
         await SpinHistory.create({ user, reward });
-        
-        // Remove from queue if valid queueId provided
         if (queueId) {
             await SpinQueue.findByIdAndDelete(queueId);
         }
-        
         res.json({ success: true });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -349,7 +381,6 @@ app.get('/api/nisathon/leaderboard', async (req, res) => {
             { $limit: 10 },
             { $project: { user: "$_id", totalNisaballs: { $round: ["$totalNisaballs", 1] }, _id: 0 } }
         ]);
-        // Add rank
         const ranked = leaderboard.map((item, index) => ({ rank: index + 1, ...item }));
         res.json(ranked);
     } catch (e) { res.json([]); }
@@ -429,7 +460,7 @@ app.post('/api/nisathon/timer/pause', async (req, res) => {
 
 app.post('/api/nisathon/event', async (req, res) => {
     if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).json({ error: 'Unauthorized' });
-    const { activeEvent } = req.body; // 'DOUBLE_TIMER' or null
+    const { activeEvent } = req.body; 
     try {
         const stats = await NisathonStats.findOne({ key: 'main' });
         if (stats) {
@@ -443,7 +474,7 @@ app.post('/api/nisathon/event', async (req, res) => {
 // TEST EVENT INJECTION
 app.post('/api/nisathon/test-event', async (req, res) => {
     if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).json({ error: 'Unauthorized' });
-    const { type, user, amount, tier } = req.body; // Added tier
+    const { type, user, amount, tier } = req.body; 
     try {
         const stats = await NisathonStats.findOne({ key: 'main' });
         if (!stats) return res.status(404).json({ error: "Stats not init" });
@@ -455,7 +486,7 @@ app.post('/api/nisathon/test-event', async (req, res) => {
 });
 
 
-// --- CONTENT API (Schedule, Profile, etc.) ---
+// --- CONTENT API ---
 app.get('/api/schedule', async (req, res) => {
     try {
         if (mongoose.connection.readyState === 1) {
