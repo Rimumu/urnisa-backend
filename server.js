@@ -1,3 +1,4 @@
+
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
@@ -38,7 +39,7 @@ const NisathonStatsSchema = new mongoose.Schema({
     remainingTimeMs: { type: Number, default: 0 }, // Used when paused
     isPaused: { type: Boolean, default: false },
     activeEvent: { type: String, default: null }, // e.g., 'DOUBLE_TIMER'
-    lastActivityTime: { type: String, default: new Date(Date.now() - 1000 * 60 * 60).toISOString() } // Default to 1 hour ago
+    lastActivityTime: { type: String, default: new Date(Date.now() - 1000 * 60 * 60 * 24).toISOString() } // Default to 24 hours ago to catch recent stuff
 });
 const NisathonStats = mongoose.model('NisathonStats', NisathonStatsSchema);
 
@@ -93,12 +94,6 @@ const CLOUDINARY_API_SECRET = process.env.CLOUDINARY_API_SECRET;
 const SE_CHANNEL_ID = process.env.STREAMELEMENTS_CHANNEL_ID;
 const SE_JWT = process.env.STREAMELEMENTS_JWT;
 
-if (SE_CHANNEL_ID) {
-    console.log(`✅ StreamElements Configured. Channel ID: ${SE_CHANNEL_ID.substring(0, 5)}...`);
-} else {
-    console.warn("⚠️ STREAMELEMENTS_CHANNEL_ID is missing.");
-}
-
 const DEFAULT_SCHEDULE_URL = 'https://cdn.discordapp.com/attachments/1338254150479118347/1439859590152978443/3_am_17.png?ex=6921fbfd&is=6920aa7d&hm=926ad591d323ccc29cd9f7dc2e256de99d8f5dcc292aa3a883f565455844c977&';
 
 console.log("--- GENERAL BACKEND STARTING ---");
@@ -119,7 +114,7 @@ const processNisathonEvent = async (stats, type, user, amount, message, provider
     if (providerId) {
         const exists = await NisathonEvent.findOne({ providerId });
         if (exists) {
-            console.log(`⚠️ Skipping duplicate event: ${providerId}`);
+            console.log(`⚠️ Skipping duplicate event: ${providerId} (${user})`);
             return 0;
         }
     }
@@ -132,14 +127,9 @@ const processNisathonEvent = async (stats, type, user, amount, message, provider
 
     if (type === 'subscriber' || type === 'sub' || type === 'resub') {
         // TIER LOGIC
-        // Tier 1 (1000) / Prime = 0.5
-        // Tier 2 (2000) = 1.0
-        // Tier 3 (3000) = 2.0
-        
         let tierLabel = "Tier 1";
         let tierVal = 0.5;
 
-        // Convert tier to string to be safe
         const tierStr = String(tier).toLowerCase();
 
         if (tierStr === '3000' || tierStr === 'tier 3') {
@@ -159,7 +149,6 @@ const processNisathonEvent = async (stats, type, user, amount, message, provider
         eventType = 'sub';
         stats.currentSubs += 1;
     } else if (type === 'gift') {
-        // Gift subs default to 0.5 per gift (Tier 1 equivalent usually)
         earnedNisaballs = 0.5 * amount;
         amountDisplay = `${amount} Gift Subs`;
         stats.currentSubs += amount;
@@ -179,7 +168,6 @@ const processNisathonEvent = async (stats, type, user, amount, message, provider
     stats.totalNisaballs = roundOneDecimal(stats.totalNisaballs + earnedNisaballs);
 
     // Update Timer
-    // CHECK FOR DOUBLE TIMER EVENT
     const timeMultiplier = stats.activeEvent === 'DOUBLE_TIMER' ? 2 : 1;
     
     if (!stats.isPaused) {
@@ -187,11 +175,9 @@ const processNisathonEvent = async (stats, type, user, amount, message, provider
         const msToAdd = minutesToAdd * 60 * 1000;
         const now = new Date().getTime();
         let currentEndTime = new Date(stats.timerEndTime).getTime();
-        // If timer expired, start from now
         if (currentEndTime < now) currentEndTime = now;
         stats.timerEndTime = new Date(currentEndTime + msToAdd);
     } else {
-        // If paused, add to the buffer
         const minutesToAdd = earnedNisaballs * 10 * timeMultiplier;
         stats.remainingTimeMs += (minutesToAdd * 60 * 1000);
     }
@@ -206,7 +192,7 @@ const processNisathonEvent = async (stats, type, user, amount, message, provider
         createdAt: new Date()
     });
 
-    console.log(`✅ Event Processed: +${earnedNisaballs} NB (x${timeMultiplier} time)`);
+    console.log(`✅ Event Processed: +${earnedNisaballs} NB (x${timeMultiplier} time) for ${user}`);
 
     // --- SPIN QUEUE LOGIC ---
     if (earnedNisaballs >= 5) {
@@ -224,6 +210,49 @@ const processNisathonEvent = async (stats, type, user, amount, message, provider
     return earnedNisaballs;
 };
 
+// --- STREAMELEMENTS VERIFICATION ---
+const verifyStreamElementsConnection = async () => {
+    if (!SE_JWT) {
+        console.error("❌ ERROR: STREAMELEMENTS_JWT is missing in Environment Variables!");
+        return;
+    }
+    
+    try {
+        console.log("🔍 Verifying StreamElements Connection...");
+        const response = await axios.get('https://api.streamelements.com/kappa/v2/channels/me', {
+            headers: { Authorization: `Bearer ${SE_JWT}` }
+        });
+        
+        const myChannelId = response.data._id;
+        const myUsername = response.data.username;
+        
+        console.log(`✅ StreamElements Auth Success! Logged in as: '${myUsername}'`);
+        console.log(`ℹ️  Your Actual Channel ID: ${myChannelId}`);
+        
+        if (SE_CHANNEL_ID) {
+            if (SE_CHANNEL_ID === myChannelId) {
+                console.log("✅ Configured CHANNEL_ID matches actual ID.");
+            } else {
+                console.error("❌ MISMATCH: Your Configured CHANNEL_ID does not match your Token's ID!");
+                console.error(`   Configured: ${SE_CHANNEL_ID}`);
+                console.error(`   Actual:     ${myChannelId}`);
+                console.error("   --> Please update STREAMELEMENTS_CHANNEL_ID in Render to match the Actual ID.");
+            }
+        } else {
+            console.warn("⚠️ STREAMELEMENTS_CHANNEL_ID is missing. Please set it to:", myChannelId);
+        }
+        
+    } catch (error) {
+        console.error("❌ StreamElements Connection Failed. Is the JWT Token correct?");
+        if (error.response) {
+            console.error(`   Status: ${error.response.status}`);
+            console.error(`   Data: ${JSON.stringify(error.response.data)}`);
+        } else {
+            console.error(`   Error: ${error.message}`);
+        }
+    }
+};
+
 // --- NISATHON SYNC LOGIC ---
 const updateNisathonStats = async () => {
     if (!SE_CHANNEL_ID || !SE_JWT || mongoose.connection.readyState !== 1) return;
@@ -236,19 +265,18 @@ const updateNisathonStats = async () => {
 
         const lastCheck = stats.lastActivityTime;
         
-        // Fetch recent activities
         const response = await axios.get(`https://api.streamelements.com/kappa/v2/activities/${SE_CHANNEL_ID}`, {
             headers: { Authorization: `Bearer ${SE_JWT}` },
             params: { 
                 after: lastCheck, 
-                limit: 50 // Increased limit to catch bursts
+                limit: 25 // Fetch enough history
             }
         });
 
         const activities = response.data;
         if (activities.length === 0) return; 
 
-        // Sort by date ascending (oldest first)
+        // Sort by date ascending
         const sortedActivities = activities.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
         let newestDate = lastCheck;
         let changesMade = false;
@@ -256,45 +284,37 @@ const updateNisathonStats = async () => {
         for (const act of sortedActivities) {
             newestDate = act.createdAt;
             
-            // Log payload for debugging
-            console.log(`📥 SE Activity [${act.type}]:`, JSON.stringify(act));
+            // Log raw activity for debug visibility
+            console.log(`📥 Raw SE Activity: Type=${act.type}, User=${act.data.username}`);
 
             let type = act.type;
             let amount = 0;
-            let tier = '1000'; // Default Tier 1
+            let tier = '1000';
             
             const user = act.data.username;
             const message = act.data.message || "";
             const providerId = act._id;
 
-            // HANDLE SUBS & RESUBS
             if (type === 'subscriber' || type === 'resub') {
                 amount = 1;
-                // Parse Tier
+                // Try to find tier in data
                 if (act.data.tier) tier = act.data.tier;
             } 
-            // HANDLE GIFTS
             else if (type === 'gift') {
-                // Not supported by standard API logic usually, but handled here just in case SE sends it
-                // Usually comes as 'subscriber' with gifted: true in some APIs, but SE has 'gift' type sometimes
                 amount = act.data.amount || 1;
             }
-            // HANDLE BITS
             else if (type === 'cheer') {
                 amount = act.data.amount;
             } 
-            // HANDLE TIPS
             else if (type === 'tip') {
                 amount = act.data.amount;
             } 
             else {
-                continue; // Skip followers, raids, etc.
+                continue; 
             }
 
             const nbAdded = await processNisathonEvent(stats, type, user, amount, message, providerId, tier);
-            // Always mark changesMade = true to update the timestamp, even if nbAdded=0 (duplicate),
-            // but effectively processNisathonEvent handles duplicates internally.
-            // We only want to update the DB if we actually processed something or moved time forward.
+            // We update changesMade to save the newestDate cursor even if it was a duplicate event
             changesMade = true;
         }
 
@@ -305,16 +325,24 @@ const updateNisathonStats = async () => {
         }
 
     } catch (error) {
-        if (error.response && error.response.status === 404) {
-            console.error(`❌ StreamElements 404. Check Channel ID '${SE_CHANNEL_ID}'.`);
-        } else {
-            console.error("StreamElements Sync Error:", error.message);
+        // Suppress simple timeouts or network blips, log logic errors
+        if (error.response && error.response.status !== 502) {
+             console.error("StreamElements Sync Error:", error.message);
         }
     }
 };
 
-// Run Sync every 30 seconds
-setInterval(updateNisathonStats, 30000);
+// Start Server
+const server = app.listen(PORT, async () => {
+    console.log(`✅ General Backend running on ${PORT}`);
+    
+    // Verify connection on startup
+    await verifyStreamElementsConnection();
+    
+    // Start Loops
+    setInterval(updateNisathonStats, 30000); // 30s Poll
+    startKeepAlive();
+});
 
 // --- WHEEL API ---
 
@@ -573,12 +601,6 @@ app.post('/api/upload', async (req, res) => {
         } catch (e) { return res.status(500).json({ success: false }); }
     }
     return res.status(500).json({ success: false });
-});
-
-// Start Server
-const server = app.listen(PORT, () => {
-    console.log(`✅ General Backend running on ${PORT}`);
-    startKeepAlive();
 });
 
 // --- CROSS-PING KEEP ALIVE ---
