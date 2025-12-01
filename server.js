@@ -11,6 +11,7 @@ const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "admin";
 const MONGO_URI = process.env.MONGO_URI;
 
 // Sanitize JWT: Remove 'Bearer ' prefix if present, remove quotes, trim whitespace
+// This fixes the "No authorization token found" error if the env var is malformed
 let SE_JWT = process.env.STREAMELEMENTS_JWT || "";
 SE_JWT = SE_JWT.replace(/Bearer\s+/i, "").replace(/["']/g, "").trim();
 
@@ -52,7 +53,7 @@ const NisathonStats = mongoose.model('NisathonStats', NisathonStatsSchema);
 const NisathonEventSchema = new mongoose.Schema({
     providerId: { type: String, unique: true },
     user: { type: String, required: true },
-    type: { type: String, required: true }, // sub, gift, bits, donation
+    type: { type: String, required: true }, 
     amountDisplay: { type: String, required: true },
     message: String,
     nisaballAmount: { type: Number, default: 0 },
@@ -79,8 +80,6 @@ const SpinHistory = mongoose.model('SpinHistory', SpinHistorySchema);
 const roundOneDecimal = (num) => Math.round(num * 10) / 10;
 
 // --- CORE EVENT PROCESSOR ---
-// This handles the "Hybrid" logic: It takes raw data from ANY provider (SE or Twitch)
-// and updates the centralized stats and timer.
 const processNisathonEvent = async (stats, type, user, amount, message, providerId, tier = '1000') => {
     let isNewEvent = true;
 
@@ -95,7 +94,6 @@ const processNisathonEvent = async (stats, type, user, amount, message, provider
     let eventType = type; 
 
     // --- RULESET ---
-    // Subs
     if (['subscriber', 'sub', 'resub', 'subscription'].includes(type)) {
         let tVal = 0.5;
         let tLbl = "Tier 1";
@@ -109,20 +107,17 @@ const processNisathonEvent = async (stats, type, user, amount, message, provider
         eventType = 'sub';
         if (isNewEvent) stats.currentSubs += 1;
     } 
-    // Gifts
     else if (type === 'gift') {
         earnedNisaballs = 0.5 * amount;
         amountDisplay = `${amount} Gift Subs`;
         if (isNewEvent) stats.currentSubs += amount;
     } 
-    // Bits
     else if (['cheer', 'bits'].includes(type)) {
         earnedNisaballs = amount * 0.002;
         amountDisplay = `${amount} Bits`;
         eventType = 'bits';
         if (isNewEvent) stats.currentBits += amount;
     } 
-    // Donations
     else if (['tip', 'donation'].includes(type)) {
         earnedNisaballs = amount * 0.2;
         amountDisplay = `$${amount.toFixed(2)}`;
@@ -139,7 +134,6 @@ const processNisathonEvent = async (stats, type, user, amount, message, provider
         if (!stats.isPaused) {
             const now = Date.now();
             const curEnd = new Date(stats.timerEndTime).getTime();
-            // If timer expired, start from now. Else extend.
             stats.timerEndTime = new Date(Math.max(now, curEnd) + msAdd);
         } else {
             stats.remainingTimeMs += msAdd;
@@ -164,7 +158,6 @@ const processNisathonEvent = async (stats, type, user, amount, message, provider
         { upsert: true, new: true }
     );
 
-    // --- WHEEL QUEUE ---
     if (isNewEvent && earnedNisaballs >= 5) {
         const spins = Math.floor(earnedNisaballs / 5);
         console.log(`🎡 Queueing ${spins} spins for ${user}`);
@@ -179,7 +172,7 @@ const processNisathonEvent = async (stats, type, user, amount, message, provider
     return earnedNisaballs;
 };
 
-// --- PROVIDER 1: STREAMELEMENTS ---
+// --- PROVIDER: STREAMELEMENTS ---
 const syncStreamElements = async (stats, forceBackfill = false) => {
     if (!SE_JWT || !SE_CHANNEL_ID) {
         console.log("❌ Skipped SE Sync: Missing Config");
@@ -188,7 +181,6 @@ const syncStreamElements = async (stats, forceBackfill = false) => {
 
     try {
         const limit = forceBackfill ? 100 : 50;
-        // IMPORTANT: Clean Authorization Header
         const config = {
             headers: { 'Authorization': `Bearer ${SE_JWT}` },
             params: { limit },
@@ -205,7 +197,6 @@ const syncStreamElements = async (stats, forceBackfill = false) => {
             return false;
         }
 
-        // Process Oldest to Newest
         activities.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
         
         let changesMade = false;
@@ -213,6 +204,11 @@ const syncStreamElements = async (stats, forceBackfill = false) => {
 
         for (const act of activities) {
             newestDate = act.createdAt;
+
+            // DEBUG LOG FOR TARGET USER
+            if (act.data.username?.toLowerCase() === 'greatrimu') {
+                console.log(`👀 TARGET FOUND: ${act.type} | ${act.data.username} | Tier: ${act.data.tier}`);
+            }
 
             let amount = 0;
             let tier = '1000';
@@ -253,17 +249,12 @@ const runSync = async (forceBackfill = false) => {
         let stats = await NisathonStats.findOne({ key: 'main' });
         if (!stats) stats = await NisathonStats.create({ key: 'main', timerEndTime: new Date(Date.now() + 3*3600000) });
 
-        // Hybrid: Call all providers
         const seChanged = await syncStreamElements(stats, forceBackfill);
         
-        // If we had a Twitch provider function, we would call it here:
-        // const twitchChanged = await syncTwitch(stats);
-
         if (seChanged || forceBackfill) {
             await stats.save();
             if (seChanged) console.log("✅ Stats Updated.");
         }
-
     } catch (e) {
         console.error("Sync Loop Error:", e);
     }
@@ -273,16 +264,38 @@ const runSync = async (forceBackfill = false) => {
 app.get('/', (req, res) => res.send('Backend Online'));
 app.post('/api/verify', (req, res) => res.json(req.body.password === ADMIN_PASSWORD ? {success:true} : {error:'Invalid'}));
 
-// DEBUG ROUTES
+// *** DEBUG ROUTES ***
+
+// 1. RAW LATEST (Check connection)
 app.get('/api/debug/se-latest', async (req, res) => {
     if (!SE_JWT || !SE_CHANNEL_ID) return res.json({ error: "Config Missing" });
     try {
         const { data } = await axios.get(`https://api.streamelements.com/kappa/v2/activities/${SE_CHANNEL_ID}`, {
             headers: { Authorization: `Bearer ${SE_JWT}` },
-            params: { limit: 10 }
+            params: { limit: 20 }
         });
-        res.json({ configId: SE_CHANNEL_ID, data: data });
+        res.json({ configId: SE_CHANNEL_ID, count: data.length, data });
     } catch (e) { res.json({ error: e.message, status: e.response?.status }); }
+});
+
+// 2. SPECIFIC USER (Check if you exist in feed)
+app.get('/api/debug/user/:username', async (req, res) => {
+    if (!SE_JWT || !SE_CHANNEL_ID) return res.json({ error: "Config Missing" });
+    try {
+        const { data } = await axios.get(`https://api.streamelements.com/kappa/v2/activities/${SE_CHANNEL_ID}`, {
+            headers: { Authorization: `Bearer ${SE_JWT}` },
+            params: { limit: 100 } // Check last 100 events
+        });
+        
+        const targetUser = req.params.username.toLowerCase();
+        const matches = data.filter(a => a.data.username && a.data.username.toLowerCase() === targetUser);
+        
+        res.json({ 
+            target: targetUser,
+            found: matches.length, 
+            matches 
+        });
+    } catch (e) { res.json({ error: e.message }); }
 });
 
 // NISATHON READ
@@ -318,7 +331,6 @@ app.get('/api/profile', async (req, res) => {
 app.get('/api/schedule', async (req, res) => res.json({ url: (await Setting.findOne({ key: 'schedule_url' }))?.value || DEFAULT_SCHEDULE_URL }));
 
 // --- PROTECTED ACTIONS ---
-// These require Authorization: <ADMIN_PASSWORD>
 const auth = (req, res, next) => {
     if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).json({ error: 'Unauthorized' });
     next();
@@ -427,12 +439,10 @@ if (MONGO_URI) {
                 console.log(`✅ Server on ${PORT}`);
                 console.log(`ℹ️ Channel ID: ${SE_CHANNEL_ID ? SE_CHANNEL_ID.substring(0,5)+'...' : 'MISSING'}`);
                 
-                // Start Sync Loop
                 console.log("🚀 Running Startup Backfill...");
                 await runSync(true);
                 setInterval(() => runSync(false), 30000);
                 
-                // Keep Alive
                 setInterval(() => { axios.get('https://urnisa-backend.onrender.com').catch(()=>{}) }, 300000);
             });
         })
