@@ -44,10 +44,10 @@ const NisathonStats = mongoose.model('NisathonStats', NisathonStatsSchema);
 const NisathonEventSchema = new mongoose.Schema({
     providerId: { type: String, unique: true }, // StreamElements ID to prevent dupes
     user: { type: String, required: true },
-    type: { type: String, required: true }, // 'sub', 'gift', 'bits', 'donation'
-    amountDisplay: { type: String, required: true }, // "5 Subs", "$50", "100 Bits"
+    type: { type: String, required: true },
+    amountDisplay: { type: String, required: true },
     message: String,
-    nisaballAmount: { type: Number, default: 0 }, // How much NB this event added
+    nisaballAmount: { type: Number, default: 0 },
     createdAt: { type: Date, default: Date.now }
 });
 const NisathonEvent = mongoose.model('NisathonEvent', NisathonEventSchema);
@@ -67,6 +67,7 @@ const SpinHistorySchema = new mongoose.Schema({
 });
 const SpinHistory = mongoose.model('SpinHistory', SpinHistorySchema);
 
+
 // Env Vars for Uploads
 const IMGBB_API_KEY = process.env.IMGBB_API_KEY || process.env.VITE_IMGBB_API_KEY;
 const CLOUDINARY_CLOUD_NAME = process.env.CLOUDINARY_CLOUD_NAME;
@@ -79,7 +80,11 @@ const SE_JWT = process.env.STREAMELEMENTS_JWT;
 const DEFAULT_SCHEDULE_URL = 'https://cdn.discordapp.com/attachments/1338254150479118347/1439859590152978443/3_am_17.png?ex=6921fbfd&is=6920aa7d&hm=926ad591d323ccc29cd9f7dc2e256de99d8f5dcc292aa3a883f565455844c977&';
 let ACTIVE_CHANNEL_ID = ENV_CHANNEL_ID;
 
+console.log("--- GENERAL BACKEND STARTING ---");
+
 const roundOneDecimal = (num) => Math.round(num * 10) / 10;
+
+app.get('/', (req, res) => res.send('Urnisa General Backend is Running!'));
 
 // --- AUTH ---
 app.post('/api/verify', (req, res) => {
@@ -95,7 +100,7 @@ const processNisathonEvent = async (stats, type, user, amount, message, provider
     if (providerId) {
         const existingEvent = await NisathonEvent.findOne({ providerId });
         if (existingEvent) {
-            isNewEvent = false; // It exists, so we just update metadata, don't add to stats
+            isNewEvent = false;
         }
     }
 
@@ -168,6 +173,7 @@ const processNisathonEvent = async (stats, type, user, amount, message, provider
         createdAt: isNewEvent ? new Date() : undefined
     };
 
+    // Remove undefined keys
     Object.keys(eventData).forEach(key => eventData[key] === undefined && delete eventData[key]);
 
     const resultEvent = await NisathonEvent.findOneAndUpdate(
@@ -179,6 +185,7 @@ const processNisathonEvent = async (stats, type, user, amount, message, provider
     if (isNewEvent) {
         console.log(`✅ PROCESSED NEW: ${user} | ${eventType} | +${earnedNisaballs} NB`);
         
+        // Wheel Queue
         if (earnedNisaballs >= 5) {
             const spinsEarned = Math.floor(earnedNisaballs / 5);
             for (let i = 0; i < spinsEarned; i++) {
@@ -230,8 +237,8 @@ const diagnoseStreamElements = async () => {
 
 // --- NISATHON SYNC LOGIC ---
 const updateNisathonStats = async (forceBackfill = false) => {
-    // Ensure DB is ready before syncing
     if (!ACTIVE_CHANNEL_ID || !SE_JWT || mongoose.connection.readyState !== 1) {
+        // console.log("⏳ Waiting for DB/Config...");
         return;
     }
 
@@ -330,8 +337,23 @@ app.get('/api/debug/user/:username', async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ... (All other standard routes included implicitly - keeping concise for update) ...
-// [Standard Routes: verify, stats, leaderboard, recent, timer set/add/pause, event, test-event, reset, sync, content APIs...]
+// DEBUG SE LATEST ROUTE
+app.get('/api/debug/se-latest', async (req, res) => {
+    if (!SE_JWT || !ACTIVE_CHANNEL_ID) return res.json({ error: "Missing Config" });
+    try {
+        const response = await axios.get(`https://api.streamelements.com/kappa/v2/activities/${ACTIVE_CHANNEL_ID}`, {
+            headers: { Authorization: `Bearer ${SE_JWT}` },
+            params: { limit: 20 }
+        });
+        res.json({
+            config: { channelId: ACTIVE_CHANNEL_ID },
+            latest_events: response.data
+        });
+    } catch (e) {
+        res.json({ error: e.message, response: e.response?.data });
+    }
+});
+
 app.get('/api/nisathon/stats', async (req, res) => {
     try {
         if (mongoose.connection.readyState !== 1) return res.json({});
@@ -412,14 +434,11 @@ app.post('/api/nisathon/timer/pause', async (req, res) => {
 
 app.post('/api/nisathon/event', async (req, res) => {
     if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).json({ error: 'Unauthorized' });
-    const { activeEvent } = req.body; 
     try {
         const stats = await NisathonStats.findOne({ key: 'main' });
-        if (stats) {
-            stats.activeEvent = activeEvent;
-            await stats.save();
-            res.json({ success: true, activeEvent: stats.activeEvent });
-        }
+        stats.activeEvent = req.body.activeEvent;
+        await stats.save();
+        res.json({ success: true, activeEvent: stats.activeEvent });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -436,43 +455,65 @@ app.post('/api/nisathon/sync', async (req, res) => {
     res.json({ success: true });
 });
 
-app.get('/api/goals', async (req, res) => res.json({ goals: (await Setting.findOne({ key: 'nisathon_goals' }))?.value }));
-app.post('/api/goals', async (req, res) => {
-    if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).send();
-    await Setting.findOneAndUpdate({ key: 'nisathon_goals' }, { value: req.body.goals }, { upsert: true });
-    res.json({ success: true });
+// --- CONTENT API ---
+app.get('/api/schedule', async (req, res) => {
+    try {
+        if (mongoose.connection.readyState === 1) {
+            const setting = await Setting.findOne({ key: 'schedule_url' });
+            if (setting && setting.value) return res.json({ url: setting.value });
+        }
+        res.json({ url: DEFAULT_SCHEDULE_URL });
+    } catch (e) { res.json({ url: DEFAULT_SCHEDULE_URL }); }
 });
-app.get('/api/wheel', async (req, res) => res.json({ items: (await Setting.findOne({ key: 'wheel_items' }))?.value }));
-app.post('/api/wheel', async (req, res) => {
-    if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).send();
-    await Setting.findOneAndUpdate({ key: 'wheel_items' }, { value: req.body.items }, { upsert: true });
-    res.json({ success: true });
-});
-app.get('/api/wheel/queue', async (req, res) => res.json(await SpinQueue.find().sort({ createdAt: 1 })));
-app.get('/api/wheel/history', async (req, res) => res.json(await SpinHistory.find().sort({ timestamp: -1 })));
-app.post('/api/wheel/spin-result', async (req, res) => {
-    if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).send();
-    await SpinHistory.create({ user: req.body.user, reward: req.body.reward });
-    if (req.body.queueId) await SpinQueue.findByIdAndDelete(req.body.queueId);
-    res.json({ success: true });
-});
-app.get('/api/profile', async (req, res) => {
-    const a = await Setting.findOne({ key: 'profile_about' });
-    const c = await Setting.findOne({ key: 'profile_credits' });
-    const w = await Setting.findOne({ key: 'profile_artworks' });
-    res.json({ about: a?.value||[], credits: c?.value||[], artworks: w?.value||[] });
-});
-app.post('/api/profile', async (req, res) => {
-    if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).send();
-    await Setting.findOneAndUpdate({ key: `profile_${req.body.type}` }, { value: req.body.data }, { upsert: true });
-    res.json({ success: true });
-});
-app.get('/api/schedule', async (req, res) => res.json({ url: (await Setting.findOne({ key: 'schedule_url' }))?.value }));
+
 app.post('/api/schedule', async (req, res) => {
-    if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).send();
+    if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).json({ error: 'Unauthorized' });
     await Setting.findOneAndUpdate({ key: 'schedule_url' }, { value: req.body.url }, { upsert: true });
     res.json({ success: true });
 });
+
+app.get('/api/profile', async (req, res) => {
+    try {
+        const about = await Setting.findOne({ key: 'profile_about' });
+        const credits = await Setting.findOne({ key: 'profile_credits' });
+        const artworks = await Setting.findOne({ key: 'profile_artworks' });
+        res.json({ about: about?.value || [], credits: credits?.value || [], artworks: artworks?.value || [] });
+    } catch (e) { res.json({ about: [], credits: [], artworks: [] }); }
+});
+
+app.post('/api/profile', async (req, res) => {
+    if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).json({ error: 'Unauthorized' });
+    const key = `profile_${req.body.type}`;
+    await Setting.findOneAndUpdate({ key }, { value: req.body.data }, { upsert: true });
+    res.json({ success: true });
+});
+
+app.get('/api/goals', async (req, res) => {
+    try {
+        const goals = await Setting.findOne({ key: 'nisathon_goals' });
+        res.json({ goals: goals?.value || null });
+    } catch (e) { res.json({ goals: null }); }
+});
+
+app.post('/api/goals', async (req, res) => {
+    if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).json({ error: 'Unauthorized' });
+    await Setting.findOneAndUpdate({ key: 'nisathon_goals' }, { value: req.body.goals }, { upsert: true });
+    res.json({ success: true });
+});
+
+app.get('/api/wheel', async (req, res) => {
+    try {
+        const wheel = await Setting.findOne({ key: 'wheel_items' });
+        res.json({ items: wheel?.value || null });
+    } catch (e) { res.json({ items: null }); }
+});
+
+app.post('/api/wheel', async (req, res) => {
+    if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).json({ error: 'Unauthorized' });
+    await Setting.findOneAndUpdate({ key: 'wheel_items' }, { value: req.body.items }, { upsert: true });
+    res.json({ success: true });
+});
+
 app.post('/api/upload', async (req, res) => {
     const { image } = req.body;
     if (!image) return res.status(400).json({ success: false });
@@ -488,6 +529,14 @@ app.post('/api/upload', async (req, res) => {
             formData.append('signature', signature);
             const r = await axios.post(`https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/image/upload`, formData, { headers: { 'Content-Type': 'multipart/form-data' } });
             return res.json({ success: true, data: { url: r.data.secure_url } });
+        } catch (e) { return res.status(500).json({ success: false }); }
+    }
+    if (IMGBB_API_KEY) {
+        try {
+            const formData = new FormData();
+            formData.append('image', image);
+            const r = await axios.post(`https://api.imgbb.com/1/upload?key=${IMGBB_API_KEY}`, formData, { headers: { 'Content-Type': 'multipart/form-data' } });
+            return res.json(r.data);
         } catch (e) { return res.status(500).json({ success: false }); }
     }
     return res.status(500).json({ success: false });
@@ -513,8 +562,9 @@ if (MONGO_URI) {
             console.log("✅ MongoDB Ready");
             
             // ONLY START LISTENING AFTER DB CONNECTS
-            server.listen(PORT, async () => {
-                await verifyStreamElements(); // Check tokens/IDs
+            const serverInstance = app.listen(PORT, async () => {
+                console.log(`✅ General Backend running on ${PORT}`);
+                await diagnoseStreamElements(); // Check tokens/IDs
                 
                 console.log("🚀 Running Startup Backfill...");
                 await updateNisathonStats(true); // Run Sync Immediately
