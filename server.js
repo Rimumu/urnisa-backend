@@ -6,11 +6,9 @@ const crypto = require('crypto');
 require('dotenv').config();
 
 const app = express();
-// Render will provide a PORT environment variable.
 const PORT = process.env.PORT || 3001;
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "admin"; 
 
-// Middleware
 app.use(express.json({ limit: '50mb' }));
 app.use(cors({
     origin: '*', 
@@ -18,7 +16,6 @@ app.use(cors({
     allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
-// --- MONGODB CONNECTION ---
 const MONGO_URI = process.env.MONGO_URI;
 
 // Schemas
@@ -35,30 +32,29 @@ const NisathonStatsSchema = new mongoose.Schema({
     currentDonations: { type: Number, default: 0 },
     totalNisaballs: { type: Number, default: 0 }, 
     timerEndTime: { type: Date, default: Date.now },
-    remainingTimeMs: { type: Number, default: 0 }, // Used when paused
+    remainingTimeMs: { type: Number, default: 0 },
     isPaused: { type: Boolean, default: false },
-    activeEvent: { type: String, default: null }, // e.g., 'DOUBLE_TIMER'
-    lastActivityTime: { type: String, default: new Date(Date.now() - 1000 * 60 * 60 * 24).toISOString() } // Default to 24 hours ago
+    activeEvent: { type: String, default: null },
+    // We keep this but we won't rely on it for fetching anymore
+    lastActivityTime: { type: String, default: new Date().toISOString() } 
 });
 const NisathonStats = mongoose.model('NisathonStats', NisathonStatsSchema);
 
-// New Schema for individual events (History & Leaderboard)
 const NisathonEventSchema = new mongoose.Schema({
-    providerId: { type: String, unique: true }, // StreamElements ID to prevent dupes
+    providerId: { type: String, unique: true },
     user: { type: String, required: true },
-    type: { type: String, required: true }, // 'sub', 'gift', 'bits', 'donation'
-    amountDisplay: { type: String, required: true }, // "5 Subs", "$50", "100 Bits"
+    type: { type: String, required: true },
+    amountDisplay: { type: String, required: true },
     message: String,
-    nisaballAmount: { type: Number, default: 0 }, // How much NB this event added
+    nisaballAmount: { type: Number, default: 0 },
     createdAt: { type: Date, default: Date.now }
 });
 const NisathonEvent = mongoose.model('NisathonEvent', NisathonEventSchema);
 
-// --- WHEEL SCHEMAS ---
 const SpinQueueSchema = new mongoose.Schema({
     user: { type: String, required: true },
-    sourceEventId: { type: String }, // Link to the donation event
-    nisaballs: Number, // How much they donated to earn this
+    sourceEventId: { type: String },
+    nisaballs: Number,
     createdAt: { type: Date, default: Date.now }
 });
 const SpinQueue = mongoose.model('SpinQueue', SpinQueueSchema);
@@ -77,22 +73,19 @@ if (MONGO_URI) {
         serverSelectionTimeoutMS: 5000, 
         socketTimeoutMS: 45000,
     })
-    .then(() => console.log("✅ MongoDB Connected successfully"))
+    .then(() => console.log("✅ MongoDB Connected"))
     .catch(err => console.error("❌ MongoDB Connection Failed:", err));
 } else {
-    console.warn("⚠️ MONGO_URI not found. Data will not persist!");
+    console.warn("⚠️ MONGO_URI not found.");
 }
 
-// Env Vars for Uploads
 const IMGBB_API_KEY = process.env.IMGBB_API_KEY || process.env.VITE_IMGBB_API_KEY;
 const CLOUDINARY_CLOUD_NAME = process.env.CLOUDINARY_CLOUD_NAME;
 const CLOUDINARY_API_KEY = process.env.CLOUDINARY_API_KEY;
 const CLOUDINARY_API_SECRET = process.env.CLOUDINARY_API_SECRET;
 
-// StreamElements Config
-// We start with the Env Var, but we will overwrite this with the REAL ID from the JWT token
-// to prevent configuration errors.
-let ACTIVE_CHANNEL_ID = process.env.STREAMELEMENTS_CHANNEL_ID;
+// STRICTLY USE ENV VAR
+const SE_CHANNEL_ID = process.env.STREAMELEMENTS_CHANNEL_ID;
 const SE_JWT = process.env.STREAMELEMENTS_JWT;
 
 const DEFAULT_SCHEDULE_URL = 'https://cdn.discordapp.com/attachments/1338254150479118347/1439859590152978443/3_am_17.png?ex=6921fbfd&is=6920aa7d&hm=926ad591d323ccc29cd9f7dc2e256de99d8f5dcc292aa3a883f565455844c977&';
@@ -103,91 +96,80 @@ const roundOneDecimal = (num) => Math.round(num * 10) / 10;
 
 app.get('/', (req, res) => res.send('Urnisa General Backend is Running!'));
 
-// --- AUTH ---
 app.post('/api/verify', (req, res) => {
     const { password } = req.body;
     res.json(password === ADMIN_PASSWORD ? { success: true } : { error: 'Invalid password' });
 });
 
-// --- HELPER: Process Event ---
 const processNisathonEvent = async (stats, type, user, amount, message, providerId, tier = '1000') => {
-    let isNewEvent = true;
-
-    // Check duplication if providerId exists
+    // 1. DEDUPLICATION CHECK
+    // If we've seen this ID before, we skip all logic.
     if (providerId) {
         const existingEvent = await NisathonEvent.findOne({ providerId });
         if (existingEvent) {
-            isNewEvent = false;
+            // Uncomment if you want to see how many dupes we skip (spammy)
+            // console.log(`⏩ Skipping duplicate: ${providerId}`);
+            return 0;
         }
     }
 
     let earnedNisaballs = 0;
     let amountDisplay = "";
-    let eventType = type; // normalize types
+    let eventType = type; 
 
-    // Normalize Sub Types (StreamElements sends 'subscriber', 'subscription', 'resub')
+    // Normalize Types
     if (['subscriber', 'sub', 'resub', 'subscription'].includes(type)) {
-        // TIER LOGIC
         let tierLabel = "Tier 1";
         let tierVal = 0.5;
-
-        // Ensure tier is a string for comparison
         const tierStr = String(tier || '1000').toLowerCase();
 
-        if (tierStr === '3000' || tierStr.includes('3000') || tierStr === 'tier 3') {
-            tierVal = 2.0;
-            tierLabel = "Tier 3";
-        } else if (tierStr === '2000' || tierStr.includes('2000') || tierStr === 'tier 2') {
-            tierVal = 1.0;
-            tierLabel = "Tier 2";
-        } else if (tierStr === 'prime') {
-            tierVal = 0.5;
-            tierLabel = "Prime";
+        if (tierStr.includes('3000') || tierStr.includes('tier 3')) {
+            tierVal = 2.0; tierLabel = "Tier 3";
+        } else if (tierStr.includes('2000') || tierStr.includes('tier 2')) {
+            tierVal = 1.0; tierLabel = "Tier 2";
+        } else if (tierStr.includes('prime')) {
+            tierVal = 0.5; tierLabel = "Prime";
         }
 
         earnedNisaballs = tierVal;
         amountDisplay = `${tierLabel} Sub`;
-        
         eventType = 'sub';
-        
-        if (isNewEvent) stats.currentSubs += 1;
-    } else if (type === 'gift') {
+        stats.currentSubs += 1;
+    } 
+    else if (type === 'gift') {
         earnedNisaballs = 0.5 * amount;
         amountDisplay = `${amount} Gift Subs`;
-        if (isNewEvent) stats.currentSubs += amount;
-    } else if (type === 'cheer' || type === 'bits') {
-        earnedNisaballs = amount * 0.002; // 500 bits = 1 NB
+        stats.currentSubs += amount;
+    } 
+    else if (type === 'cheer' || type === 'bits') {
+        earnedNisaballs = amount * 0.002;
         amountDisplay = `${amount} Bits`;
         eventType = 'bits';
-        if (isNewEvent) stats.currentBits += amount;
-    } else if (type === 'tip' || type === 'donation') {
-        earnedNisaballs = amount * 0.2; // $5 = 1 NB
+        stats.currentBits += amount;
+    } 
+    else if (type === 'tip' || type === 'donation') {
+        earnedNisaballs = amount * 0.2;
         amountDisplay = `$${amount.toFixed(2)}`;
         eventType = 'donation';
-        if (isNewEvent) stats.currentDonations += amount;
+        stats.currentDonations += amount;
     }
 
-    // ONLY Update Totals & Timer if it is a NEW event
-    if (isNewEvent) {
-        stats.totalNisaballs = roundOneDecimal(stats.totalNisaballs + earnedNisaballs);
-
-        // Update Timer
-        const timeMultiplier = stats.activeEvent === 'DOUBLE_TIMER' ? 2 : 1;
-        
-        if (!stats.isPaused) {
-            const minutesToAdd = earnedNisaballs * 10 * timeMultiplier;
-            const msToAdd = minutesToAdd * 60 * 1000;
-            const now = new Date().getTime();
-            let currentEndTime = new Date(stats.timerEndTime).getTime();
-            if (currentEndTime < now) currentEndTime = now;
-            stats.timerEndTime = new Date(currentEndTime + msToAdd);
-        } else {
-            const minutesToAdd = earnedNisaballs * 10 * timeMultiplier;
-            stats.remainingTimeMs += (minutesToAdd * 60 * 1000);
-        }
+    // UPDATE STATS (Only reached if new event)
+    stats.totalNisaballs = roundOneDecimal(stats.totalNisaballs + earnedNisaballs);
+    const timeMultiplier = stats.activeEvent === 'DOUBLE_TIMER' ? 2 : 1;
+    
+    if (!stats.isPaused) {
+        const minutesToAdd = earnedNisaballs * 10 * timeMultiplier;
+        const msToAdd = minutesToAdd * 60 * 1000;
+        const now = new Date().getTime();
+        let currentEndTime = new Date(stats.timerEndTime).getTime();
+        if (currentEndTime < now) currentEndTime = now;
+        stats.timerEndTime = new Date(currentEndTime + msToAdd);
+    } else {
+        const minutesToAdd = earnedNisaballs * 10 * timeMultiplier;
+        stats.remainingTimeMs += (minutesToAdd * 60 * 1000);
     }
 
-    // Upsert the event (Create if new, Update if exists)
     const eventData = {
         providerId: providerId || `sim-${Date.now()}-${Math.random()}`,
         user: user || 'Anonymous',
@@ -195,82 +177,49 @@ const processNisathonEvent = async (stats, type, user, amount, message, provider
         amountDisplay,
         message,
         nisaballAmount: earnedNisaballs,
-        createdAt: isNewEvent ? new Date() : undefined // Keep original date if updating
+        createdAt: new Date()
     };
 
-    // Remove undefined keys
-    Object.keys(eventData).forEach(key => eventData[key] === undefined && delete eventData[key]);
+    const resultEvent = await NisathonEvent.create(eventData);
 
-    const resultEvent = await NisathonEvent.findOneAndUpdate(
-        { providerId: eventData.providerId },
-        eventData,
-        { upsert: true, new: true }
-    );
-
-    if (isNewEvent) {
-        console.log(`✅ Event Processed: +${earnedNisaballs} NB (x${stats.activeEvent === 'DOUBLE_TIMER' ? 2 : 1}) for ${user}`);
-        
-        // --- SPIN QUEUE LOGIC ---
-        if (earnedNisaballs >= 5) {
-            const spinsEarned = Math.floor(earnedNisaballs / 5);
-            for (let i = 0; i < spinsEarned; i++) {
-                await SpinQueue.create({
-                    user: user || 'Anonymous',
-                    sourceEventId: resultEvent._id,
-                    nisaballs: earnedNisaballs
-                });
-            }
-            console.log(`🎡 Added ${spinsEarned} spins to queue for ${user}`);
+    console.log(`✅ PROCESSED NEW EVENT: ${user} | ${eventType} | +${earnedNisaballs} NB`);
+    
+    if (earnedNisaballs >= 5) {
+        const spinsEarned = Math.floor(earnedNisaballs / 5);
+        for (let i = 0; i < spinsEarned; i++) {
+            await SpinQueue.create({
+                user: user || 'Anonymous',
+                sourceEventId: resultEvent._id,
+                nisaballs: earnedNisaballs
+            });
         }
     }
 
     return earnedNisaballs;
 };
 
-// --- STREAMELEMENTS AUTO-CONFIGURATION ---
-const autoConfigureStreamElements = async () => {
-    if (!SE_JWT) {
-        console.error("❌ ERROR: STREAMELEMENTS_JWT is missing in Environment Variables!");
-        return false;
+const verifyStreamElementsConnection = async () => {
+    if (!SE_JWT || !SE_CHANNEL_ID) {
+        console.error("❌ ERROR: Missing SE Config");
+        return;
     }
     
     try {
-        console.log("🔍 Auto-Configuring StreamElements...");
-        // This endpoint returns the user's profile info, including the critical Channel ID
-        const response = await axios.get('https://api.streamelements.com/kappa/v2/channels/me', {
+        console.log(`🔍 Checking SE Connection for Channel ID: ${SE_CHANNEL_ID}`);
+        // We just fetch the channel profile to ensure the ID is valid and token works
+        const response = await axios.get(`https://api.streamelements.com/kappa/v2/channels/${SE_CHANNEL_ID}`, {
             headers: { Authorization: `Bearer ${SE_JWT}` },
-            timeout: 8000
+            timeout: 5000
         });
         
-        const actualChannelId = response.data._id;
-        const myUsername = response.data.username;
-        
-        // CRITICAL STEP: Overwrite the ID with the one we just fetched from the API
-        // This fixes cases where the user put the wrong ID or their Twitch ID in the env vars
-        ACTIVE_CHANNEL_ID = actualChannelId;
-        
-        console.log(`✅ StreamElements Auth Success! Logged in as: '${myUsername}'`);
-        console.log(`✅ Auto-Configured Channel ID to: ${ACTIVE_CHANNEL_ID}`);
-        
-        return true;
-        
+        console.log(`✅ StreamElements Connected! Channel: '${response.data.username}'`);
     } catch (error) {
-        console.error("❌ StreamElements Auth Failed. Is your JWT Token correct?");
-        if (error.response) {
-            console.error(`   Status: ${error.response.status}`);
-        } else {
-            console.error(`   Error: ${error.message}`);
-        }
-        return false;
+        console.error("❌ SE Connection Failed:", error.message);
     }
 };
 
-// --- NISATHON SYNC LOGIC ---
-const updateNisathonStats = async (forceLookbackHours = 0) => {
-    if (!ACTIVE_CHANNEL_ID || !SE_JWT || mongoose.connection.readyState !== 1) {
-        console.log("⏳ Waiting for DB/StreamElements config...");
-        return;
-    }
+const updateNisathonStats = async () => {
+    if (!SE_CHANNEL_ID || !SE_JWT || mongoose.connection.readyState !== 1) return;
 
     try {
         let stats = await NisathonStats.findOne({ key: 'main' });
@@ -278,46 +227,34 @@ const updateNisathonStats = async (forceLookbackHours = 0) => {
             stats = await NisathonStats.create({ key: 'main', timerEndTime: new Date(Date.now() + 3 * 60 * 60 * 1000) });
         }
 
-        let lastCheck = stats.lastActivityTime;
-        let requestParams = { 
-            limit: 100 // Default limit
-        };
-
-        // If forceLookback is requested (e.g. startup or manual sync)
-        if (forceLookbackHours > 0) {
-            console.log(`⚠️ Startup Backfill: Ignoring date filter, fetching latest 100 events raw.`);
-            // NO 'after' param here. We just want the raw latest 100.
-            requestParams.limit = 100;
-        } else {
-            // Normal operation: Only newer than last check
-            requestParams.after = lastCheck;
-        }
-
-        const url = `https://api.streamelements.com/kappa/v2/activities/${ACTIVE_CHANNEL_ID}`;
-        // console.log(`🔄 Fetching from: ${url}`);
+        // --- FETCH LATEST 100 EVENTS (NO FILTER) ---
+        // We ignore 'after' parameter. We get everything SE gives us.
+        // We rely on processNisathonEvent to skip duplicates by providerId.
         
-        const response = await axios.get(url, {
+        const response = await axios.get(`https://api.streamelements.com/kappa/v2/activities/${SE_CHANNEL_ID}`, {
             headers: { Authorization: `Bearer ${SE_JWT}` },
-            params: requestParams,
-            timeout: 10000 // 10s Timeout prevents hanging
+            params: { 
+                limit: 100 // Fetch decent chunk
+            },
+            timeout: 10000
         });
 
         const activities = response.data;
-        
-        if (!activities || activities.length === 0) {
-            // console.log("   -> No new activities found.");
-            return; 
-        }
+        if (!activities || activities.length === 0) return;
 
-        console.log(`   -> Found ${activities.length} activities.`);
-
+        // Sort by date ascending (Oldest -> Newest) to process in order
         const sortedActivities = activities.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
-        let newestDate = lastCheck;
         let changesMade = false;
 
         for (const act of sortedActivities) {
-            newestDate = act.createdAt;
             
+            // LOGGING: Check specifically for the user "GreatRimu" to debug
+            if (act.data.username && act.data.username.toLowerCase() === 'greatrimu') {
+                // We log this just to prove we SEE it. 
+                // If it's already in DB, processNisathonEvent will skip it silently.
+                // console.log(`👀 Seen GreatRimu event: ${act.type} (${act._id})`);
+            }
+
             let type = act.type;
             let amount = 0;
             let tier = '1000';
@@ -329,8 +266,6 @@ const updateNisathonStats = async (forceLookbackHours = 0) => {
             if (type === 'subscriber' || type === 'resub' || type === 'subscription') {
                 amount = 1;
                 if (act.data.tier) tier = act.data.tier;
-                // Log subs for confirmation
-                console.log(`🔍 Processing SUB: User=${user}, Tier=${tier}`);
             } 
             else if (type === 'gift') {
                 amount = act.data.amount || 1;
@@ -346,45 +281,38 @@ const updateNisathonStats = async (forceLookbackHours = 0) => {
             }
 
             const nbAdded = await processNisathonEvent(stats, type, user, amount, message, providerId, tier);
-            changesMade = true;
+            if (nbAdded > 0) changesMade = true;
         }
 
         if (changesMade) {
-            // Only advance cursor if we weren't in a "Force Lookback" mode
-            if (forceLookbackHours === 0) {
-                stats.lastActivityTime = newestDate;
-            }
             await stats.save();
-            console.log(`✅ Sync Complete.`);
+            console.log(`✅ Saved new data from sync.`);
         }
 
     } catch (error) {
+        // Suppress 502 errors which are common with SE API intermittent issues
         if (error.response && error.response.status !== 502) {
-             console.error("StreamElements Sync Error:", error.message);
+             console.error("SE Sync Error:", error.message);
         }
     }
 };
 
-// Start Server
 const server = app.listen(PORT, async () => {
     console.log(`✅ General Backend running on ${PORT}`);
     
-    // 1. Auto-Detect Correct ID
-    const isConfigured = await autoConfigureStreamElements();
+    await verifyStreamElementsConnection();
     
-    // 2. If valid, Run Startup Backfill
-    if (isConfigured) {
-        console.log("🚀 Running Startup Backfill...");
-        await updateNisathonStats(1); // Force latest 100 check
-    }
+    // Initial Sync
+    console.log("🚀 Running Initial Sync...");
+    await updateNisathonStats();
     
-    // Start Loops
-    setInterval(() => updateNisathonStats(0), 30000); // 30s Poll (Normal incremental sync)
+    // Loop
+    setInterval(updateNisathonStats, 30000);
+    
     startKeepAlive();
 });
 
 // --- WHEEL API ---
-
 app.get('/api/wheel/queue', async (req, res) => {
     try {
         const queue = await SpinQueue.find().sort({ createdAt: 1 });
@@ -402,41 +330,20 @@ app.get('/api/wheel/history', async (req, res) => {
 app.post('/api/wheel/spin-result', async (req, res) => {
     if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).json({ error: 'Unauthorized' });
     const { user, reward, queueId } = req.body;
-    
     try {
         await SpinHistory.create({ user, reward });
-        if (queueId) {
-            await SpinQueue.findByIdAndDelete(queueId);
-        }
+        if (queueId) await SpinQueue.findByIdAndDelete(queueId);
         res.json({ success: true });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // --- NISATHON API ---
-
 app.get('/api/nisathon/stats', async (req, res) => {
     try {
-        if (mongoose.connection.readyState !== 1) {
-            return res.json({ 
-                currentSubs: 0, currentBits: 0, currentDonations: 0, 
-                totalNisaballs: 0, timerEndTime: new Date().toISOString(),
-                isPaused: false, activeEvent: null
-            });
-        }
+        if (mongoose.connection.readyState !== 1) return res.json({ currentSubs: 0, currentBits: 0, currentDonations: 0, totalNisaballs: 0, timerEndTime: new Date().toISOString(), isPaused: false, activeEvent: null });
         let stats = await NisathonStats.findOne({ key: 'main' });
-        if (!stats) {
-            stats = await NisathonStats.create({ key: 'main', timerEndTime: new Date(Date.now() + 3 * 60 * 60 * 1000) });
-        }
-        res.json({
-            currentSubs: stats.currentSubs,
-            currentBits: stats.currentBits,
-            currentDonations: stats.currentDonations,
-            totalNisaballs: stats.totalNisaballs,
-            timerEndTime: stats.timerEndTime,
-            isPaused: stats.isPaused,
-            remainingTimeMs: stats.remainingTimeMs,
-            activeEvent: stats.activeEvent
-        });
+        if (!stats) stats = await NisathonStats.create({ key: 'main' });
+        res.json(stats);
     } catch (error) { res.status(500).json({ error: 'Failed to fetch stats' }); }
 });
 
@@ -466,18 +373,12 @@ app.post('/api/nisathon/timer/set', async (req, res) => {
     const { hours, minutes, seconds } = req.body;
     try {
         const stats = await NisathonStats.findOne({ key: 'main' });
-        if (stats) {
-            const ms = (hours * 3600 + minutes * 60 + seconds) * 1000;
-            const now = Date.now();
-            
-            if (stats.isPaused) {
-                stats.remainingTimeMs = ms;
-            } else {
-                stats.timerEndTime = new Date(now + ms);
-            }
-            await stats.save();
-            res.json({ success: true });
-        }
+        const ms = (hours * 3600 + minutes * 60 + seconds) * 1000;
+        const now = Date.now();
+        if (stats.isPaused) stats.remainingTimeMs = ms;
+        else stats.timerEndTime = new Date(now + ms);
+        await stats.save();
+        res.json({ success: true });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -486,19 +387,16 @@ app.post('/api/nisathon/timer/add', async (req, res) => {
     const { minutes } = req.body;
     try {
         const stats = await NisathonStats.findOne({ key: 'main' });
-        if (stats) {
-            const msToAdd = minutes * 60 * 1000;
-            if (stats.isPaused) {
-                stats.remainingTimeMs += msToAdd;
-            } else {
-                const currentEnd = new Date(stats.timerEndTime).getTime();
-                const now = Date.now();
-                const base = currentEnd > now ? currentEnd : now;
-                stats.timerEndTime = new Date(base + msToAdd);
-            }
-            await stats.save();
-            res.json({ success: true });
+        const msToAdd = minutes * 60 * 1000;
+        if (stats.isPaused) stats.remainingTimeMs += msToAdd;
+        else {
+            const currentEnd = new Date(stats.timerEndTime).getTime();
+            const now = Date.now();
+            const base = currentEnd > now ? currentEnd : now;
+            stats.timerEndTime = new Date(base + msToAdd);
         }
+        await stats.save();
+        res.json({ success: true });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -506,22 +404,18 @@ app.post('/api/nisathon/timer/pause', async (req, res) => {
     if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).json({ error: 'Unauthorized' });
     try {
         const stats = await NisathonStats.findOne({ key: 'main' });
-        if (stats) {
-            const now = Date.now();
-            if (stats.isPaused) {
-                // RESUME
-                stats.isPaused = false;
-                stats.timerEndTime = new Date(now + stats.remainingTimeMs);
-                stats.remainingTimeMs = 0;
-            } else {
-                // PAUSE
-                const currentEnd = new Date(stats.timerEndTime).getTime();
-                stats.remainingTimeMs = Math.max(0, currentEnd - now);
-                stats.isPaused = true;
-            }
-            await stats.save();
-            res.json({ success: true, isPaused: stats.isPaused });
+        const now = Date.now();
+        if (stats.isPaused) {
+            stats.isPaused = false;
+            stats.timerEndTime = new Date(now + stats.remainingTimeMs);
+            stats.remainingTimeMs = 0;
+        } else {
+            const currentEnd = new Date(stats.timerEndTime).getTime();
+            stats.remainingTimeMs = Math.max(0, currentEnd - now);
+            stats.isPaused = true;
         }
+        await stats.save();
+        res.json({ success: true, isPaused: stats.isPaused });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -530,70 +424,46 @@ app.post('/api/nisathon/event', async (req, res) => {
     const { activeEvent } = req.body; 
     try {
         const stats = await NisathonStats.findOne({ key: 'main' });
-        if (stats) {
-            stats.activeEvent = activeEvent;
-            await stats.save();
-            res.json({ success: true, activeEvent: stats.activeEvent });
-        }
+        stats.activeEvent = activeEvent;
+        await stats.save();
+        res.json({ success: true, activeEvent: stats.activeEvent });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// TEST EVENT INJECTION
 app.post('/api/nisathon/test-event', async (req, res) => {
     if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).json({ error: 'Unauthorized' });
     const { type, user, amount, tier } = req.body; 
     try {
         const stats = await NisathonStats.findOne({ key: 'main' });
-        if (!stats) return res.status(404).json({ error: "Stats not init" });
-
         await processNisathonEvent(stats, type, user, parseFloat(amount), "Test Event", null, tier);
         await stats.save();
         res.json({ success: true });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// RESET ALL DATA
 app.post('/api/nisathon/reset', async (req, res) => {
     if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).json({ error: 'Unauthorized' });
     try {
-        // Clear all Events, Queue, History
         await NisathonEvent.deleteMany({});
         await SpinQueue.deleteMany({});
         await SpinHistory.deleteMany({});
-        
-        // Reset Stats
         await NisathonStats.findOneAndUpdate({ key: 'main' }, {
-            currentSubs: 0,
-            currentBits: 0,
-            currentDonations: 0,
-            totalNisaballs: 0,
-            timerEndTime: new Date(Date.now() + 3 * 60 * 60 * 1000), // Default 3 hours
-            remainingTimeMs: 0,
-            isPaused: false,
-            activeEvent: null,
-            // Reset Last Checked time to 24h ago so next sync pulls recent history
+            currentSubs: 0, currentBits: 0, currentDonations: 0, totalNisaballs: 0,
+            timerEndTime: new Date(Date.now() + 3 * 60 * 60 * 1000), remainingTimeMs: 0,
+            isPaused: false, activeEvent: null,
             lastActivityTime: new Date(Date.now() - 1000 * 60 * 60 * 24).toISOString()
         });
-
         res.json({ success: true });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// FORCE SYNC (LAST 24 HOURS)
 app.post('/api/nisathon/sync', async (req, res) => {
     if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).json({ error: 'Unauthorized' });
     try {
-        const stats = await NisathonStats.findOne({ key: 'main' });
-        if (stats) {
-            // Trigger manual sync looking back 24 hours
-            await updateNisathonStats(24);
-            res.json({ success: true });
-        } else {
-            res.status(404).json({ error: "Stats not found" });
-        }
+        await updateNisathonStats(24);
+        res.json({ success: true });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
-
 
 // --- CONTENT API ---
 app.get('/api/schedule', async (req, res) => {
@@ -607,9 +477,8 @@ app.get('/api/schedule', async (req, res) => {
 });
 
 app.post('/api/schedule', async (req, res) => {
-    const { url } = req.body;
     if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).json({ error: 'Unauthorized' });
-    await Setting.findOneAndUpdate({ key: 'schedule_url' }, { value: url }, { upsert: true });
+    await Setting.findOneAndUpdate({ key: 'schedule_url' }, { value: req.body.url }, { upsert: true });
     res.json({ success: true });
 });
 
@@ -623,10 +492,9 @@ app.get('/api/profile', async (req, res) => {
 });
 
 app.post('/api/profile', async (req, res) => {
-    const { type, data } = req.body;
     if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).json({ error: 'Unauthorized' });
-    const key = type === 'about' ? 'profile_about' : type === 'credits' ? 'profile_credits' : 'profile_artworks';
-    await Setting.findOneAndUpdate({ key }, { value: data }, { upsert: true });
+    const key = `profile_${req.body.type}`;
+    await Setting.findOneAndUpdate({ key }, { value: req.body.data }, { upsert: true });
     res.json({ success: true });
 });
 
