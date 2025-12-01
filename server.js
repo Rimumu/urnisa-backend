@@ -90,11 +90,8 @@ const CLOUDINARY_API_KEY = process.env.CLOUDINARY_API_KEY;
 const CLOUDINARY_API_SECRET = process.env.CLOUDINARY_API_SECRET;
 
 // StreamElements Config
-const ENV_CHANNEL_ID = process.env.STREAMELEMENTS_CHANNEL_ID;
+const SE_CHANNEL_ID = process.env.STREAMELEMENTS_CHANNEL_ID;
 const SE_JWT = process.env.STREAMELEMENTS_JWT;
-
-// This will hold the FINAL decided ID (either from Env or Auto-Detected)
-let ACTIVE_CHANNEL_ID = ENV_CHANNEL_ID; 
 
 const DEFAULT_SCHEDULE_URL = 'https://cdn.discordapp.com/attachments/1338254150479118347/1439859590152978443/3_am_17.png?ex=6921fbfd&is=6920aa7d&hm=926ad591d323ccc29cd9f7dc2e256de99d8f5dcc292aa3a883f565455844c977&';
 
@@ -153,7 +150,7 @@ const processNisathonEvent = async (stats, type, user, amount, message, provider
         amountDisplay = `${amount} Gift Subs`;
         if (isNewEvent) stats.currentSubs += amount;
     } else if (['cheer', 'bits'].includes(type)) {
-        earnedNisaballs = amount * 0.002;
+        earnedNisaballs = amount * 0.002; // 500 bits = 1 NB
         amountDisplay = `${amount} Bits`;
         eventType = 'bits';
         if (isNewEvent) stats.currentBits += amount;
@@ -218,67 +215,60 @@ const processNisathonEvent = async (stats, type, user, amount, message, provider
     return earnedNisaballs;
 };
 
-// --- STREAMELEMENTS INITIALIZATION ---
-const initializeStreamElements = async () => {
-    if (!SE_JWT) {
-        console.error("❌ ERROR: STREAMELEMENTS_JWT is missing in Environment Variables!");
+// --- STREAMELEMENTS DIAGNOSTIC ---
+const diagnoseStreamElements = async () => {
+    if (!SE_JWT || !SE_CHANNEL_ID) {
+        console.error("❌ ERROR: Missing Config. Check SE_JWT and STREAMELEMENTS_CHANNEL_ID");
         return;
     }
     
     try {
-        console.log("🔍 Checking StreamElements Identity...");
-        const response = await axios.get('https://api.streamelements.com/kappa/v2/channels/me', {
-            headers: { Authorization: `Bearer ${SE_JWT}` },
-            timeout: 8000
+        console.log("🔍 DIAGNOSING CONFIGURATION...");
+        
+        // 1. Who owns the token?
+        const meRes = await axios.get('https://api.streamelements.com/kappa/v2/channels/me', {
+            headers: { Authorization: `Bearer ${SE_JWT}` }
         });
-        
-        const tokenOwnerId = response.data._id;
-        const tokenOwnerName = response.data.username;
-        
-        console.log(`✅ Token belongs to: '${tokenOwnerName}' (ID: ${tokenOwnerId})`);
-        
-        if (ENV_CHANNEL_ID && ENV_CHANNEL_ID.length > 15) {
-            ACTIVE_CHANNEL_ID = ENV_CHANNEL_ID;
-            console.log(`ℹ️ Using Configured Channel ID: ${ACTIVE_CHANNEL_ID}`);
-            if (ACTIVE_CHANNEL_ID !== tokenOwnerId) {
-                console.log(`   (Tracking a channel different from Token Owner. This is OK for bots.)`);
+        console.log(`   - Token Owner: ${meRes.data.username} (ID: ${meRes.data._id})`);
+
+        // 2. Who does the Channel ID belong to?
+        // If this 404s, the ID is invalid.
+        try {
+            const chanRes = await axios.get(`https://api.streamelements.com/kappa/v2/channels/${SE_CHANNEL_ID}`, {
+                headers: { Authorization: `Bearer ${SE_JWT}` }
+            });
+            console.log(`   - Configured ID (${SE_CHANNEL_ID}) belongs to: ${chanRes.data.username}`);
+            
+            if (chanRes.data._id !== SE_CHANNEL_ID) {
+                 console.log(`   ⚠️ WARNING: ID mismatch? API returned ${chanRes.data._id}`);
             }
-        } else {
-            ACTIVE_CHANNEL_ID = tokenOwnerId;
-            console.log(`⚠️ Configured ID missing. Auto-corrected to Token ID: ${ACTIVE_CHANNEL_ID}`);
+            
+        } catch (e) {
+            console.error(`   ❌ ERROR: Configured Channel ID (${SE_CHANNEL_ID}) NOT FOUND or Invalid!`);
+            console.error(`      Ensure you are using the Account ID (24 chars), not the Twitch ID.`);
         }
-        
+
     } catch (error) {
-        console.error("❌ StreamElements Auth Failed:", error.message);
+        console.error("❌ SE Auth Failed:", error.message);
     }
 };
 
 // --- NISATHON SYNC LOGIC ---
 const updateNisathonStats = async (forceBackfill = false) => {
-    // ADDED: Explicit check for Channel ID
-    if (!ACTIVE_CHANNEL_ID || !SE_JWT) {
-        console.log("❌ Cannot Sync: Missing Channel ID or JWT.");
-        return;
-    }
+    if (!SE_CHANNEL_ID || !SE_JWT || mongoose.connection.readyState !== 1) return;
 
     try {
-        // ADDED: Wait for DB connection
-        if (mongoose.connection.readyState !== 1) {
-            console.log("⏳ DB not ready...");
-            return;
-        }
-
         let stats = await NisathonStats.findOne({ key: 'main' });
         if (!stats) {
             stats = await NisathonStats.create({ key: 'main', timerEndTime: new Date(Date.now() + 3 * 60 * 60 * 1000) });
         }
 
         let limit = forceBackfill ? 500 : 100;
-        const url = `https://api.streamelements.com/kappa/v2/activities/${ACTIVE_CHANNEL_ID}`;
+        const url = `https://api.streamelements.com/kappa/v2/activities/${SE_CHANNEL_ID}`;
         
-        // LOG: Explicitly show what URL we are hitting
-        // console.log(`📡 Fetching from: ${url} (Limit: ${limit})`);
-        
+        // Explicitly Log URL on Startup
+        if (forceBackfill) console.log(`📡 Fetching Activities from: ${url}`);
+
         const response = await axios.get(url, {
             headers: { Authorization: `Bearer ${SE_JWT}` },
             params: { limit: limit },
@@ -287,17 +277,13 @@ const updateNisathonStats = async (forceBackfill = false) => {
 
         const activities = response.data;
         
-        // LOG: Explicitly show if empty
         if (!activities || activities.length === 0) {
-            console.log(`❌ API returned 0 activities for Channel ID: ${ACTIVE_CHANNEL_ID}`);
+            console.log(`❌ API returned 0 activities. Check if channel has history.`);
             return; 
         }
 
-        if (forceBackfill) {
-             console.log(`📥 Backfill: Fetched ${activities.length} activities.`);
-        }
+        if (forceBackfill) console.log(`📥 Downloaded ${activities.length} activities.`);
 
-        // Process Oldest to Newest
         const sortedActivities = activities.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
         let newestDate = stats.lastActivityTime;
         let changesMade = false;
@@ -305,9 +291,9 @@ const updateNisathonStats = async (forceBackfill = false) => {
         for (const act of sortedActivities) {
             newestDate = act.createdAt;
             
-            // DEBUG: Search for GreatRimu
+            // DEBUG TARGET
             if (act.data.username && act.data.username.toLowerCase() === 'greatrimu') {
-                console.log(`👀 FOUND TARGET USER [GreatRimu]: ${act.type} | Tier: ${act.data.tier} | ID: ${act._id}`);
+                console.log(`👀 FOUND TARGET: ${act.type} | ID: ${act._id} | Tier: ${act.data.tier}`);
             }
 
             let type = act.type;
@@ -346,12 +332,8 @@ const updateNisathonStats = async (forceBackfill = false) => {
         }
 
     } catch (error) {
-        // LOG: Show all errors including 502
         console.error("❌ Sync Error:", error.message);
-        if (error.response) {
-            console.error("   Status:", error.response.status);
-            console.error("   Data:", JSON.stringify(error.response.data));
-        }
+        if (error.response) console.error("   Details:", JSON.stringify(error.response.data));
     }
 };
 
@@ -359,18 +341,15 @@ const updateNisathonStats = async (forceBackfill = false) => {
 const server = app.listen(PORT, async () => {
     console.log(`✅ General Backend running on ${PORT}`);
     
-    // 1. Identify ID
-    await initializeStreamElements();
+    // 1. Diagnose ID
+    await diagnoseStreamElements();
     
-    // 2. Backfill History
-    if (ACTIVE_CHANNEL_ID) {
-        console.log("🚀 Running Startup Backfill (Max 500)...");
-        await updateNisathonStats(true);
-        // 3. Loop
-        setInterval(() => updateNisathonStats(false), 30000);
-    } else {
-        console.error("❌ Cannot start Sync: No Channel ID.");
-    }
+    // 2. Backfill
+    console.log("🚀 Running Startup Backfill...");
+    await updateNisathonStats(true);
+    
+    // 3. Loop
+    setInterval(() => updateNisathonStats(false), 30000);
     
     startKeepAlive();
 });
@@ -542,7 +521,7 @@ app.post('/api/nisathon/sync', async (req, res) => {
         const stats = await NisathonStats.findOne({ key: 'main' });
         if (stats) {
             // Trigger manual sync looking back 24 hours
-            await updateNisathonStats(24);
+            await updateNisathonStats(true);
             res.json({ success: true });
         } else {
             res.status(404).json({ error: "Stats not found" });
