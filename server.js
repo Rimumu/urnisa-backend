@@ -1,4 +1,3 @@
-
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
@@ -269,22 +268,19 @@ const updateNisathonStats = async () => {
             headers: { Authorization: `Bearer ${SE_JWT}` },
             params: { 
                 after: lastCheck, 
-                limit: 25 // Fetch enough history
+                limit: 25 
             }
         });
 
         const activities = response.data;
         if (activities.length === 0) return; 
 
-        // Sort by date ascending
         const sortedActivities = activities.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
         let newestDate = lastCheck;
         let changesMade = false;
 
         for (const act of sortedActivities) {
             newestDate = act.createdAt;
-            
-            // Log raw activity for debug visibility
             console.log(`📥 Raw SE Activity: Type=${act.type}, User=${act.data.username}`);
 
             let type = act.type;
@@ -297,7 +293,6 @@ const updateNisathonStats = async () => {
 
             if (type === 'subscriber' || type === 'resub') {
                 amount = 1;
-                // Try to find tier in data
                 if (act.data.tier) tier = act.data.tier;
             } 
             else if (type === 'gift') {
@@ -314,7 +309,6 @@ const updateNisathonStats = async () => {
             }
 
             const nbAdded = await processNisathonEvent(stats, type, user, amount, message, providerId, tier);
-            // We update changesMade to save the newestDate cursor even if it was a duplicate event
             changesMade = true;
         }
 
@@ -325,7 +319,6 @@ const updateNisathonStats = async () => {
         }
 
     } catch (error) {
-        // Suppress simple timeouts or network blips, log logic errors
         if (error.response && error.response.status !== 502) {
              console.error("StreamElements Sync Error:", error.message);
         }
@@ -510,6 +503,52 @@ app.post('/api/nisathon/test-event', async (req, res) => {
         await processNisathonEvent(stats, type, user, parseFloat(amount), "Test Event", null, tier);
         await stats.save();
         res.json({ success: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// RESET ALL DATA
+app.post('/api/nisathon/reset', async (req, res) => {
+    if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).json({ error: 'Unauthorized' });
+    try {
+        // Clear all Events, Queue, History
+        await NisathonEvent.deleteMany({});
+        await SpinQueue.deleteMany({});
+        await SpinHistory.deleteMany({});
+        
+        // Reset Stats
+        await NisathonStats.findOneAndUpdate({ key: 'main' }, {
+            currentSubs: 0,
+            currentBits: 0,
+            currentDonations: 0,
+            totalNisaballs: 0,
+            timerEndTime: new Date(Date.now() + 3 * 60 * 60 * 1000), // Default 3 hours
+            remainingTimeMs: 0,
+            isPaused: false,
+            activeEvent: null,
+            // Reset Last Checked time to 24h ago so next sync pulls recent history
+            lastActivityTime: new Date(Date.now() - 1000 * 60 * 60 * 24).toISOString()
+        });
+
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// FORCE SYNC (LAST 24 HOURS)
+app.post('/api/nisathon/sync', async (req, res) => {
+    if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).json({ error: 'Unauthorized' });
+    try {
+        const stats = await NisathonStats.findOne({ key: 'main' });
+        if (stats) {
+            // Rewind the cursor to 24h ago
+            stats.lastActivityTime = new Date(Date.now() - 1000 * 60 * 60 * 24).toISOString();
+            await stats.save();
+            
+            // Trigger sync immediately
+            await updateNisathonStats();
+            res.json({ success: true });
+        } else {
+            res.status(404).json({ error: "Stats not found" });
+        }
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
