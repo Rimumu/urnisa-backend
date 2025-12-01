@@ -6,9 +6,11 @@ const crypto = require('crypto');
 require('dotenv').config();
 
 const app = express();
+// Render will provide a PORT environment variable.
 const PORT = process.env.PORT || 3001;
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "admin"; 
 
+// Middleware
 app.use(express.json({ limit: '50mb' }));
 app.use(cors({
     origin: '*', 
@@ -16,6 +18,7 @@ app.use(cors({
     allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
+// --- MONGODB CONNECTION ---
 const MONGO_URI = process.env.MONGO_URI;
 
 // Schemas
@@ -32,29 +35,31 @@ const NisathonStatsSchema = new mongoose.Schema({
     currentDonations: { type: Number, default: 0 },
     totalNisaballs: { type: Number, default: 0 }, 
     timerEndTime: { type: Date, default: Date.now },
-    remainingTimeMs: { type: Number, default: 0 },
+    remainingTimeMs: { type: Number, default: 0 }, // Used when paused
     isPaused: { type: Boolean, default: false },
-    activeEvent: { type: String, default: null },
-    // We keep this but we won't rely on it for fetching anymore
+    activeEvent: { type: String, default: null }, // e.g., 'DOUBLE_TIMER'
+    // This tracks the timestamp of the last processed event
     lastActivityTime: { type: String, default: new Date().toISOString() } 
 });
 const NisathonStats = mongoose.model('NisathonStats', NisathonStatsSchema);
 
+// New Schema for individual events (History & Leaderboard)
 const NisathonEventSchema = new mongoose.Schema({
-    providerId: { type: String, unique: true },
+    providerId: { type: String, unique: true }, // StreamElements ID to prevent dupes
     user: { type: String, required: true },
-    type: { type: String, required: true },
-    amountDisplay: { type: String, required: true },
+    type: { type: String, required: true }, // 'sub', 'gift', 'bits', 'donation'
+    amountDisplay: { type: String, required: true }, // "5 Subs", "$50", "100 Bits"
     message: String,
-    nisaballAmount: { type: Number, default: 0 },
+    nisaballAmount: { type: Number, default: 0 }, // How much NB this event added
     createdAt: { type: Date, default: Date.now }
 });
 const NisathonEvent = mongoose.model('NisathonEvent', NisathonEventSchema);
 
+// --- WHEEL SCHEMAS ---
 const SpinQueueSchema = new mongoose.Schema({
     user: { type: String, required: true },
-    sourceEventId: { type: String },
-    nisaballs: Number,
+    sourceEventId: { type: String }, // Link to the donation event
+    nisaballs: Number, // How much they donated to earn this
     createdAt: { type: Date, default: Date.now }
 });
 const SpinQueue = mongoose.model('SpinQueue', SpinQueueSchema);
@@ -73,18 +78,20 @@ if (MONGO_URI) {
         serverSelectionTimeoutMS: 5000, 
         socketTimeoutMS: 45000,
     })
-    .then(() => console.log("✅ MongoDB Connected"))
+    .then(() => console.log("✅ MongoDB Connected successfully"))
     .catch(err => console.error("❌ MongoDB Connection Failed:", err));
 } else {
-    console.warn("⚠️ MONGO_URI not found.");
+    console.warn("⚠️ MONGO_URI not found. Data will not persist!");
 }
 
+// Env Vars for Uploads
 const IMGBB_API_KEY = process.env.IMGBB_API_KEY || process.env.VITE_IMGBB_API_KEY;
 const CLOUDINARY_CLOUD_NAME = process.env.CLOUDINARY_CLOUD_NAME;
 const CLOUDINARY_API_KEY = process.env.CLOUDINARY_API_KEY;
 const CLOUDINARY_API_SECRET = process.env.CLOUDINARY_API_SECRET;
 
-// STRICTLY USE ENV VAR
+// StreamElements Config
+// We prioritize the Env Var STREAMELEMENTS_CHANNEL_ID if set.
 const SE_CHANNEL_ID = process.env.STREAMELEMENTS_CHANNEL_ID;
 const SE_JWT = process.env.STREAMELEMENTS_JWT;
 
@@ -96,80 +103,94 @@ const roundOneDecimal = (num) => Math.round(num * 10) / 10;
 
 app.get('/', (req, res) => res.send('Urnisa General Backend is Running!'));
 
+// --- AUTH ---
 app.post('/api/verify', (req, res) => {
     const { password } = req.body;
     res.json(password === ADMIN_PASSWORD ? { success: true } : { error: 'Invalid password' });
 });
 
+// --- HELPER: Process Event ---
 const processNisathonEvent = async (stats, type, user, amount, message, providerId, tier = '1000') => {
-    // 1. DEDUPLICATION CHECK
-    // If we've seen this ID before, we skip all logic.
+    let isNewEvent = true;
+
+    // Check duplication if providerId exists
     if (providerId) {
         const existingEvent = await NisathonEvent.findOne({ providerId });
         if (existingEvent) {
-            // Uncomment if you want to see how many dupes we skip (spammy)
-            // console.log(`⏩ Skipping duplicate: ${providerId}`);
-            return 0;
+            // If it exists, we will UPDATE it (Upsert), but we mark it as NOT new
+            // so we don't add stats/timer again.
+            isNewEvent = false;
         }
     }
 
     let earnedNisaballs = 0;
     let amountDisplay = "";
-    let eventType = type; 
+    let eventType = type; // normalize types
 
-    // Normalize Types
+    // Normalize Sub Types (StreamElements sends 'subscriber', 'subscription', 'resub')
     if (['subscriber', 'sub', 'resub', 'subscription'].includes(type)) {
+        // TIER LOGIC
         let tierLabel = "Tier 1";
         let tierVal = 0.5;
+
+        // Ensure tier is a string for comparison
         const tierStr = String(tier || '1000').toLowerCase();
 
-        if (tierStr.includes('3000') || tierStr.includes('tier 3')) {
-            tierVal = 2.0; tierLabel = "Tier 3";
-        } else if (tierStr.includes('2000') || tierStr.includes('tier 2')) {
-            tierVal = 1.0; tierLabel = "Tier 2";
+        // Check for various Tier formats (1000, 3000, "tier 3", "3")
+        if (tierStr.includes('3000') || tierStr.includes('tier 3') || tierStr === '3') {
+            tierVal = 2.0;
+            tierLabel = "Tier 3";
+        } else if (tierStr.includes('2000') || tierStr.includes('tier 2') || tierStr === '2') {
+            tierVal = 1.0;
+            tierLabel = "Tier 2";
         } else if (tierStr.includes('prime')) {
-            tierVal = 0.5; tierLabel = "Prime";
+            tierVal = 0.5;
+            tierLabel = "Prime";
         }
 
         earnedNisaballs = tierVal;
         amountDisplay = `${tierLabel} Sub`;
+        
         eventType = 'sub';
-        stats.currentSubs += 1;
-    } 
-    else if (type === 'gift') {
+        
+        if (isNewEvent) stats.currentSubs += 1;
+    } else if (type === 'gift') {
         earnedNisaballs = 0.5 * amount;
         amountDisplay = `${amount} Gift Subs`;
-        stats.currentSubs += amount;
-    } 
-    else if (type === 'cheer' || type === 'bits') {
-        earnedNisaballs = amount * 0.002;
+        if (isNewEvent) stats.currentSubs += amount;
+    } else if (['cheer', 'bits'].includes(type)) {
+        earnedNisaballs = amount * 0.002; // 500 bits = 1 NB
         amountDisplay = `${amount} Bits`;
         eventType = 'bits';
-        stats.currentBits += amount;
-    } 
-    else if (type === 'tip' || type === 'donation') {
-        earnedNisaballs = amount * 0.2;
+        if (isNewEvent) stats.currentBits += amount;
+    } else if (['tip', 'donation'].includes(type)) {
+        earnedNisaballs = amount * 0.2; // $5 = 1 NB
         amountDisplay = `$${amount.toFixed(2)}`;
         eventType = 'donation';
-        stats.currentDonations += amount;
+        if (isNewEvent) stats.currentDonations += amount;
     }
 
-    // UPDATE STATS (Only reached if new event)
-    stats.totalNisaballs = roundOneDecimal(stats.totalNisaballs + earnedNisaballs);
-    const timeMultiplier = stats.activeEvent === 'DOUBLE_TIMER' ? 2 : 1;
-    
-    if (!stats.isPaused) {
-        const minutesToAdd = earnedNisaballs * 10 * timeMultiplier;
-        const msToAdd = minutesToAdd * 60 * 1000;
-        const now = new Date().getTime();
-        let currentEndTime = new Date(stats.timerEndTime).getTime();
-        if (currentEndTime < now) currentEndTime = now;
-        stats.timerEndTime = new Date(currentEndTime + msToAdd);
-    } else {
-        const minutesToAdd = earnedNisaballs * 10 * timeMultiplier;
-        stats.remainingTimeMs += (minutesToAdd * 60 * 1000);
+    // ONLY Update Totals & Timer if it is a NEW event
+    if (isNewEvent) {
+        stats.totalNisaballs = roundOneDecimal(stats.totalNisaballs + earnedNisaballs);
+
+        // Update Timer
+        const timeMultiplier = stats.activeEvent === 'DOUBLE_TIMER' ? 2 : 1;
+        
+        if (!stats.isPaused) {
+            const minutesToAdd = earnedNisaballs * 10 * timeMultiplier;
+            const msToAdd = minutesToAdd * 60 * 1000;
+            const now = new Date().getTime();
+            let currentEndTime = new Date(stats.timerEndTime).getTime();
+            if (currentEndTime < now) currentEndTime = now;
+            stats.timerEndTime = new Date(currentEndTime + msToAdd);
+        } else {
+            const minutesToAdd = earnedNisaballs * 10 * timeMultiplier;
+            stats.remainingTimeMs += (minutesToAdd * 60 * 1000);
+        }
     }
 
+    // Prepare Event Data for Upsert
     const eventData = {
         providerId: providerId || `sim-${Date.now()}-${Math.random()}`,
         user: user || 'Anonymous',
@@ -177,48 +198,62 @@ const processNisathonEvent = async (stats, type, user, amount, message, provider
         amountDisplay,
         message,
         nisaballAmount: earnedNisaballs,
-        createdAt: new Date()
+        createdAt: isNewEvent ? new Date() : undefined // Keep original date if updating
     };
 
-    const resultEvent = await NisathonEvent.create(eventData);
+    // Remove undefined keys
+    Object.keys(eventData).forEach(key => eventData[key] === undefined && delete eventData[key]);
 
-    console.log(`✅ PROCESSED NEW EVENT: ${user} | ${eventType} | +${earnedNisaballs} NB`);
-    
-    if (earnedNisaballs >= 5) {
-        const spinsEarned = Math.floor(earnedNisaballs / 5);
-        for (let i = 0; i < spinsEarned; i++) {
-            await SpinQueue.create({
-                user: user || 'Anonymous',
-                sourceEventId: resultEvent._id,
-                nisaballs: earnedNisaballs
-            });
+    const resultEvent = await NisathonEvent.findOneAndUpdate(
+        { providerId: eventData.providerId },
+        eventData,
+        { upsert: true, new: true }
+    );
+
+    if (isNewEvent) {
+        console.log(`✅ PROCESSED: ${user} | ${eventType} | +${earnedNisaballs} NB`);
+        
+        // --- SPIN QUEUE LOGIC ---
+        if (earnedNisaballs >= 5) {
+            const spinsEarned = Math.floor(earnedNisaballs / 5);
+            for (let i = 0; i < spinsEarned; i++) {
+                await SpinQueue.create({
+                    user: user || 'Anonymous',
+                    sourceEventId: resultEvent._id,
+                    nisaballs: earnedNisaballs
+                });
+            }
+            console.log(`🎡 Added ${spinsEarned} spins to queue for ${user}`);
         }
     }
 
     return earnedNisaballs;
 };
 
+// --- STREAMELEMENTS VERIFICATION ---
 const verifyStreamElementsConnection = async () => {
     if (!SE_JWT || !SE_CHANNEL_ID) {
-        console.error("❌ ERROR: Missing SE Config");
+        console.error("❌ ERROR: Missing StreamElements Config (JWT or Channel ID)");
         return;
     }
     
     try {
-        console.log(`🔍 Checking SE Connection for Channel ID: ${SE_CHANNEL_ID}`);
+        console.log(`🔍 Connecting to StreamElements (Channel ID: ${SE_CHANNEL_ID})...`);
         // We just fetch the channel profile to ensure the ID is valid and token works
         const response = await axios.get(`https://api.streamelements.com/kappa/v2/channels/${SE_CHANNEL_ID}`, {
             headers: { Authorization: `Bearer ${SE_JWT}` },
-            timeout: 5000
+            timeout: 8000
         });
         
         console.log(`✅ StreamElements Connected! Channel: '${response.data.username}'`);
     } catch (error) {
         console.error("❌ SE Connection Failed:", error.message);
+        if (error.response) console.error("   Status:", error.response.status);
     }
 };
 
-const updateNisathonStats = async () => {
+// --- NISATHON SYNC LOGIC ---
+const updateNisathonStats = async (forceStartupMode = false) => {
     if (!SE_CHANNEL_ID || !SE_JWT || mongoose.connection.readyState !== 1) return;
 
     try {
@@ -227,32 +262,44 @@ const updateNisathonStats = async () => {
             stats = await NisathonStats.create({ key: 'main', timerEndTime: new Date(Date.now() + 3 * 60 * 60 * 1000) });
         }
 
-        // --- FETCH LATEST 100 EVENTS (NO FILTER) ---
-        // We ignore 'after' parameter. We get everything SE gives us.
-        // We rely on processNisathonEvent to skip duplicates by providerId.
+        let lastCheck = stats.lastActivityTime;
+        let requestParams = { 
+            limit: 100 // Default limit to fetch chunk
+        };
+
+        // On startup (or forced sync), we ignore 'after' to ensure we get the absolute latest data
+        if (forceStartupMode) {
+            console.log(`⚠️ Startup Sync: Fetching latest 100 events (No 'after' filter)`);
+            // No 'after' param.
+        } else {
+            requestParams.after = lastCheck;
+        }
         
         const response = await axios.get(`https://api.streamelements.com/kappa/v2/activities/${SE_CHANNEL_ID}`, {
             headers: { Authorization: `Bearer ${SE_JWT}` },
-            params: { 
-                limit: 100 // Fetch decent chunk
-            },
-            timeout: 10000
+            params: requestParams,
+            timeout: 15000
         });
 
         const activities = response.data;
-        if (!activities || activities.length === 0) return;
+        
+        if (!activities || activities.length === 0) {
+            return; 
+        }
 
-        // Sort by date ascending (Oldest -> Newest) to process in order
+        console.log(`   -> Found ${activities.length} activities.`);
+
+        // Sort by date ascending (Oldest -> Newest)
         const sortedActivities = activities.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+        let newestDate = lastCheck;
         let changesMade = false;
 
         for (const act of sortedActivities) {
+            newestDate = act.createdAt;
             
-            // LOGGING: Check specifically for the user "GreatRimu" to debug
+            // DEBUG: Look for specific user "GreatRimu"
             if (act.data.username && act.data.username.toLowerCase() === 'greatrimu') {
-                // We log this just to prove we SEE it. 
-                // If it's already in DB, processNisathonEvent will skip it silently.
-                // console.log(`👀 Seen GreatRimu event: ${act.type} (${act._id})`);
+                console.log(`👀 FOUND TARGET USER [GreatRimu]: ${act.type} | Tier: ${act.data.tier}`);
             }
 
             let type = act.type;
@@ -263,7 +310,7 @@ const updateNisathonStats = async () => {
             const message = act.data.message || "";
             const providerId = act._id;
 
-            if (type === 'subscriber' || type === 'resub' || type === 'subscription') {
+            if (['subscriber', 'sub', 'resub', 'subscription'].includes(type)) {
                 amount = 1;
                 if (act.data.tier) tier = act.data.tier;
             } 
@@ -282,32 +329,36 @@ const updateNisathonStats = async () => {
 
             const nbAdded = await processNisathonEvent(stats, type, user, amount, message, providerId, tier);
             if (nbAdded > 0) changesMade = true;
+            // Even if 0 NB added (duplicate), we still consider it 'processed' for cursor purposes
         }
 
-        if (changesMade) {
+        if (changesMade || forceStartupMode) {
+            // Update cursor to the newest event time seen
+            stats.lastActivityTime = newestDate;
             await stats.save();
-            console.log(`✅ Saved new data from sync.`);
+            console.log(`✅ Sync Complete. Cursor updated.`);
         }
 
     } catch (error) {
-        // Suppress 502 errors which are common with SE API intermittent issues
         if (error.response && error.response.status !== 502) {
-             console.error("SE Sync Error:", error.message);
+             console.error("StreamElements Sync Error:", error.message);
         }
     }
 };
 
+// Start Server
 const server = app.listen(PORT, async () => {
     console.log(`✅ General Backend running on ${PORT}`);
     
+    // 1. Check Config
     await verifyStreamElementsConnection();
     
-    // Initial Sync
-    console.log("🚀 Running Initial Sync...");
-    await updateNisathonStats();
+    // 2. Run Startup Sync (Force Latest 100)
+    console.log("🚀 Running Startup Sync...");
+    await updateNisathonStats(true);
     
-    // Loop
-    setInterval(updateNisathonStats, 30000);
+    // 3. Start Polling Loop
+    setInterval(() => updateNisathonStats(false), 30000); // 30s Poll
     
     startKeepAlive();
 });
@@ -342,8 +393,17 @@ app.get('/api/nisathon/stats', async (req, res) => {
     try {
         if (mongoose.connection.readyState !== 1) return res.json({ currentSubs: 0, currentBits: 0, currentDonations: 0, totalNisaballs: 0, timerEndTime: new Date().toISOString(), isPaused: false, activeEvent: null });
         let stats = await NisathonStats.findOne({ key: 'main' });
-        if (!stats) stats = await NisathonStats.create({ key: 'main' });
-        res.json(stats);
+        if (!stats) stats = await NisathonStats.create({ key: 'main', timerEndTime: new Date(Date.now() + 3 * 60 * 60 * 1000) });
+        res.json({
+            currentSubs: stats.currentSubs,
+            currentBits: stats.currentBits,
+            currentDonations: stats.currentDonations,
+            totalNisaballs: stats.totalNisaballs,
+            timerEndTime: stats.timerEndTime,
+            isPaused: stats.isPaused,
+            remainingTimeMs: stats.remainingTimeMs,
+            activeEvent: stats.activeEvent
+        });
     } catch (error) { res.status(500).json({ error: 'Failed to fetch stats' }); }
 });
 
@@ -406,10 +466,12 @@ app.post('/api/nisathon/timer/pause', async (req, res) => {
         const stats = await NisathonStats.findOne({ key: 'main' });
         const now = Date.now();
         if (stats.isPaused) {
+            // RESUME
             stats.isPaused = false;
             stats.timerEndTime = new Date(now + stats.remainingTimeMs);
             stats.remainingTimeMs = 0;
         } else {
+            // PAUSE
             const currentEnd = new Date(stats.timerEndTime).getTime();
             stats.remainingTimeMs = Math.max(0, currentEnd - now);
             stats.isPaused = true;
@@ -421,10 +483,9 @@ app.post('/api/nisathon/timer/pause', async (req, res) => {
 
 app.post('/api/nisathon/event', async (req, res) => {
     if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).json({ error: 'Unauthorized' });
-    const { activeEvent } = req.body; 
     try {
         const stats = await NisathonStats.findOne({ key: 'main' });
-        stats.activeEvent = activeEvent;
+        stats.activeEvent = req.body.activeEvent;
         await stats.save();
         res.json({ success: true, activeEvent: stats.activeEvent });
     } catch (e) { res.status(500).json({ error: e.message }); }
@@ -441,27 +502,42 @@ app.post('/api/nisathon/test-event', async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// RESET ALL DATA
 app.post('/api/nisathon/reset', async (req, res) => {
     if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).json({ error: 'Unauthorized' });
     try {
         await NisathonEvent.deleteMany({});
         await SpinQueue.deleteMany({});
         await SpinHistory.deleteMany({});
+        
         await NisathonStats.findOneAndUpdate({ key: 'main' }, {
-            currentSubs: 0, currentBits: 0, currentDonations: 0, totalNisaballs: 0,
-            timerEndTime: new Date(Date.now() + 3 * 60 * 60 * 1000), remainingTimeMs: 0,
-            isPaused: false, activeEvent: null,
+            currentSubs: 0,
+            currentBits: 0,
+            currentDonations: 0,
+            totalNisaballs: 0,
+            timerEndTime: new Date(Date.now() + 3 * 60 * 60 * 1000), // Default 3 hours
+            remainingTimeMs: 0,
+            isPaused: false,
+            activeEvent: null,
+            // Reset Last Checked time to 24h ago so next sync pulls recent history
             lastActivityTime: new Date(Date.now() - 1000 * 60 * 60 * 24).toISOString()
         });
+
         res.json({ success: true });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// FORCE SYNC (LAST 24 HOURS)
 app.post('/api/nisathon/sync', async (req, res) => {
     if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).json({ error: 'Unauthorized' });
     try {
-        await updateNisathonStats(24);
-        res.json({ success: true });
+        const stats = await NisathonStats.findOne({ key: 'main' });
+        if (stats) {
+            await updateNisathonStats(true); // Force fetch latest
+            res.json({ success: true });
+        } else {
+            res.status(404).json({ error: "Stats not found" });
+        }
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
