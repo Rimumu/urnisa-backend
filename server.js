@@ -18,7 +18,9 @@ const MONGO_URI = process.env.MONGO_URI;
 
 // --- CONFIG ---
 const SE_JWT = process.env.STREAMELEMENTS_JWT;
-let ACTIVE_CHANNEL_ID = process.env.STREAMELEMENTS_CHANNEL_ID;
+// We will overwrite this with the auto-resolved ID
+let ACTIVE_CHANNEL_ID = process.env.STREAMELEMENTS_CHANNEL_ID; 
+const TARGET_USERNAME = 'urnisa_'; // HARDCODED TARGET TO FIX CONFIG ISSUES
 
 const CLOUDINARY_CLOUD_NAME = process.env.CLOUDINARY_CLOUD_NAME;
 const CLOUDINARY_API_KEY = process.env.CLOUDINARY_API_KEY;
@@ -75,7 +77,6 @@ const roundOneDecimal = (num) => Math.round(num * 10) / 10;
 // --- HELPER: Process Event ---
 const processNisathonEvent = async (stats, type, user, amount, message, providerId, tier = '1000') => {
     let isNewEvent = true;
-
     if (providerId) {
         const existing = await NisathonEvent.findOne({ providerId });
         if (existing) isNewEvent = false; 
@@ -157,26 +158,26 @@ const processNisathonEvent = async (stats, type, user, amount, message, provider
     return earnedNisaballs;
 };
 
-// --- AUTH & SYNC ---
-const verifyStreamElements = async () => {
-    if (!SE_JWT) { console.error("❌ ERROR: No SE_JWT Configured"); return; }
+// --- RESOLVE CORRECT CHANNEL ID ---
+const resolveTargetChannelId = async () => {
     try {
-        console.log("🔍 Verifying StreamElements...");
-        const { data } = await axios.get('https://api.streamelements.com/kappa/v2/channels/me', {
-            headers: { Authorization: `Bearer ${SE_JWT}` }
-        });
-        console.log(`✅ Token Owner: ${data.username} (${data._id})`);
+        console.log(`🔍 Resolving Real ID for user: '${TARGET_USERNAME}'...`);
+        const response = await axios.get(`https://api.streamelements.com/kappa/v2/channels/alias/${TARGET_USERNAME}`);
         
-        if (ACTIVE_CHANNEL_ID) {
-            console.log(`ℹ️ Using Configured Channel ID: ${ACTIVE_CHANNEL_ID}`);
-            if (ACTIVE_CHANNEL_ID !== data._id) console.log("   (Tracking a different channel than token owner. OK for Bots.)");
-        } else {
-            ACTIVE_CHANNEL_ID = data._id;
-            console.log(`⚠️ No ID Configured. Defaulting to Token ID: ${ACTIVE_CHANNEL_ID}`);
+        if (response.data && response.data._id) {
+            const realId = response.data._id;
+            console.log(`✅ RESOLVED: ${TARGET_USERNAME} -> ${realId}`);
+            
+            if (ACTIVE_CHANNEL_ID !== realId) {
+                console.log(`⚠️ Your configured ID (${ACTIVE_CHANNEL_ID}) didn't match. Switching to Real ID.`);
+                ACTIVE_CHANNEL_ID = realId;
+            }
+            return true;
         }
     } catch (e) {
-        console.error("❌ SE Auth Failed:", e.message);
+        console.error("❌ Failed to resolve channel ID:", e.message);
     }
+    return false;
 };
 
 const updateNisathonStats = async (forceBackfill = false) => {
@@ -189,7 +190,7 @@ const updateNisathonStats = async (forceBackfill = false) => {
         const limit = forceBackfill ? 100 : 50; 
         const url = `https://api.streamelements.com/kappa/v2/activities/${ACTIVE_CHANNEL_ID}`;
         
-        if (forceBackfill) console.log(`📡 Backfilling 100 events from: ${url}`);
+        if (forceBackfill) console.log(`📡 Syncing from: ${url}`);
 
         const { data: activities } = await axios.get(url, {
             headers: { Authorization: `Bearer ${SE_JWT}` },
@@ -198,11 +199,11 @@ const updateNisathonStats = async (forceBackfill = false) => {
         });
 
         if (!activities || activities.length === 0) {
-            if (forceBackfill) console.log(`❌ API returned 0 activities for ID ${ACTIVE_CHANNEL_ID}`);
+            if (forceBackfill) console.log(`❌ 0 activities found for ID ${ACTIVE_CHANNEL_ID}`);
             return;
         }
 
-        if (forceBackfill) console.log(`📥 Received ${activities.length} items.`);
+        if (forceBackfill) console.log(`📥 Processing ${activities.length} events...`);
         
         activities.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
         let newestDate = stats.lastActivityTime;
@@ -212,7 +213,7 @@ const updateNisathonStats = async (forceBackfill = false) => {
             newestDate = act.createdAt;
             
             if (act.data.username?.toLowerCase() === 'greatrimu') {
-                console.log(`👀 TARGET FOUND: ${act.type} | ${act.data.username} | Tier: ${act.data.tier}`);
+                console.log(`👀 TARGET: ${act.type} | ${act.data.username} | Tier: ${act.data.tier}`);
             }
 
             let amount = 0;
@@ -237,7 +238,7 @@ const updateNisathonStats = async (forceBackfill = false) => {
         if (changesMade || forceBackfill) {
             if (!forceBackfill) stats.lastActivityTime = newestDate;
             await stats.save();
-            if (changesMade) console.log("✅ Database Updated.");
+            if (forceBackfill) console.log("✅ Startup Sync Complete.");
         }
     } catch (e) {
         console.error("Sync Error:", e.message);
@@ -247,7 +248,7 @@ const updateNisathonStats = async (forceBackfill = false) => {
 // --- ROUTES ---
 app.get('/', (req, res) => res.send('Backend Online'));
 
-// ** DEBUG ROUTE ADDED HERE **
+// DEBUG RAW
 app.get('/api/debug/raw', async (req, res) => {
     if (!ACTIVE_CHANNEL_ID || !SE_JWT) return res.json({ error: "Config Missing" });
     try {
@@ -255,12 +256,8 @@ app.get('/api/debug/raw', async (req, res) => {
             headers: { Authorization: `Bearer ${SE_JWT}` },
             params: { limit: 20 }
         });
-        res.json({
-            configId: ACTIVE_CHANNEL_ID,
-            count: data.length,
-            data: data
-        });
-    } catch (e) { res.json({ error: e.message, details: e.response?.data }); }
+        res.json({ configId: ACTIVE_CHANNEL_ID, count: data.length, data });
+    } catch (e) { res.json({ error: e.message }); }
 });
 
 app.post('/api/verify', (req, res) => res.json(req.body.password === ADMIN_PASSWORD ? {success:true} : {error:'Invalid'}));
@@ -271,7 +268,6 @@ app.get('/api/nisathon/stats', async (req, res) => {
     if (!stats) stats = await NisathonStats.create({ key: 'main' });
     res.json(stats);
 });
-
 app.get('/api/nisathon/leaderboard', async (req, res) => {
     const lb = await NisathonEvent.aggregate([
         { $group: { _id: "$user", total: { $sum: "$nisaballAmount" } } },
@@ -279,9 +275,9 @@ app.get('/api/nisathon/leaderboard', async (req, res) => {
     ]);
     res.json(lb.map((x, i) => ({ rank: i+1, user: x._id, totalNisaballs: roundOneDecimal(x.total) })));
 });
-
-app.get('/api/nisathon/recent', async (req, res) => res.json(await NisathonEvent.find().sort({ createdAt: -1 }).limit(10)));
-
+app.get('/api/nisathon/recent', async (req, res) => {
+    res.json(await NisathonEvent.find().sort({ createdAt: -1 }).limit(10));
+});
 app.post('/api/nisathon/test-event', async (req, res) => {
     if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).send();
     const stats = await NisathonStats.findOne({ key: 'main' });
@@ -289,8 +285,6 @@ app.post('/api/nisathon/test-event', async (req, res) => {
     await stats.save();
     res.json({ success: true });
 });
-
-// Timer & Event Controls
 app.post('/api/nisathon/timer/set', async (req, res) => {
     if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).send();
     const stats = await NisathonStats.findOne({ key: 'main' });
@@ -315,7 +309,7 @@ app.post('/api/nisathon/timer/pause', async (req, res) => {
     if (stats.isPaused) { stats.isPaused = false; stats.timerEndTime = new Date(now + stats.remainingTimeMs); stats.remainingTimeMs = 0; }
     else { stats.isPaused = true; stats.remainingTimeMs = Math.max(0, new Date(stats.timerEndTime).getTime() - now); }
     await stats.save();
-    res.json({ success: true, isPaused: stats.isPaused });
+    res.json({ success: true });
 });
 app.post('/api/nisathon/event', async (req, res) => {
     if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).send();
@@ -325,7 +319,7 @@ app.post('/api/nisathon/event', async (req, res) => {
 app.post('/api/nisathon/reset', async (req, res) => {
     if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).send();
     await NisathonEvent.deleteMany({}); await SpinQueue.deleteMany({}); await SpinHistory.deleteMany({});
-    await NisathonStats.findOneAndUpdate({ key: 'main' }, { currentSubs: 0, currentBits: 0, currentDonations: 0, totalNisaballs: 0, remainingTimeMs: 0, isPaused: false, activeEvent: null, lastActivityTime: new Date().toISOString() });
+    await NisathonStats.findOneAndUpdate({ key: 'main' }, { currentSubs: 0, currentBits: 0, currentDonations: 0, totalNisaballs: 0, remainingTimeMs: 0, isPaused: false, activeEvent: null });
     res.json({ success: true });
 });
 app.post('/api/nisathon/sync', async (req, res) => {
@@ -333,8 +327,6 @@ app.post('/api/nisathon/sync', async (req, res) => {
     await updateNisathonStats(true);
     res.json({ success: true });
 });
-
-// Content
 app.get('/api/goals', async (req, res) => res.json({ goals: (await Setting.findOne({ key: 'nisathon_goals' }))?.value }));
 app.post('/api/goals', async (req, res) => {
     if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).send();
@@ -375,47 +367,35 @@ app.post('/api/schedule', async (req, res) => {
 app.post('/api/upload', async (req, res) => {
     const { image } = req.body;
     if (!image) return res.status(400).send();
-    if (process.env.CLOUDINARY_CLOUD_NAME) {
+    if (CLOUDINARY_CLOUD_NAME) {
         try {
             const ts = Math.round(new Date().getTime()/1000);
-            const sig = crypto.createHash('sha1').update(`timestamp=${ts}${process.env.CLOUDINARY_API_SECRET}`).digest('hex');
-            const f = new FormData(); f.append('file', `data:image/jpeg;base64,${image}`); f.append('api_key', process.env.CLOUDINARY_API_KEY); f.append('timestamp', ts); f.append('signature', sig);
-            const r = await axios.post(`https://api.cloudinary.com/v1_1/${process.env.CLOUDINARY_CLOUD_NAME}/image/upload`, f);
+            const sig = crypto.createHash('sha1').update(`timestamp=${ts}${CLOUDINARY_API_SECRET}`).digest('hex');
+            const f = new FormData(); f.append('file', `data:image/jpeg;base64,${image}`); f.append('api_key', CLOUDINARY_API_KEY); f.append('timestamp', ts); f.append('signature', sig);
+            const r = await axios.post(`https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/image/upload`, f);
             return res.json({ success: true, data: { url: r.data.secure_url } });
         } catch (e) { return res.status(500).send(); }
     }
-    if (IMGBB_API_KEY) {
-        try {
-            const f = new FormData(); f.append('image', image);
-            const r = await axios.post(`https://api.imgbb.com/1/upload?key=${IMGBB_API_KEY}`, f);
-            return res.json(r.data);
-        } catch (e) { return res.status(500).send(); }
-    }
-    res.status(500).send();
+    return res.status(500).send();
 });
 
-// --- CROSS-PING ---
-function startKeepAlive() {
-    setInterval(() => {
-        axios.get('https://urnisa-backend.onrender.com').catch(()=>{});
-        axios.get('https://urnisa-bot.onrender.com').catch(()=>{});
-        console.log("⏰ Ping");
-    }, 300000);
+// --- BOOT SEQUENCE ---
+const initServer = async () => {
+    await resolveTargetChannelId(); // Fix ID first
+    console.log("🚀 Startup Backfill...");
+    await updateNisathonStats(true);
+    setInterval(() => updateNisathonStats(false), 30000);
+    setInterval(() => { axios.get('https://urnisa-backend.onrender.com').catch(()=>{}) }, 300000);
 }
 
-// --- BOOT SEQUENCE ---
 if (MONGO_URI) {
     mongoose.set('strictQuery', false);
     mongoose.connect(MONGO_URI)
         .then(async () => {
-            console.log("✅ MongoDB Connected");
-            app.listen(PORT, async () => {
+            console.log("✅ MongoDB Ready");
+            app.listen(PORT, () => {
                 console.log(`✅ Server on ${PORT}`);
-                await verifyStreamElements();
-                console.log("🚀 Startup Backfill...");
-                await updateNisathonStats(true);
-                setInterval(() => updateNisathonStats(false), 30000);
-                startKeepAlive();
+                initServer();
             });
         })
         .catch(err => console.error("❌ DB Fail:", err));
