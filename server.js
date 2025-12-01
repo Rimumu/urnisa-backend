@@ -38,7 +38,7 @@ const NisathonStatsSchema = new mongoose.Schema({
     remainingTimeMs: { type: Number, default: 0 }, // Used when paused
     isPaused: { type: Boolean, default: false },
     activeEvent: { type: String, default: null }, // e.g., 'DOUBLE_TIMER'
-    lastActivityTime: { type: String, default: new Date(Date.now() - 1000 * 60 * 60 * 24).toISOString() } // Default to 24 hours ago to catch recent stuff
+    lastActivityTime: { type: String, default: new Date(Date.now() - 1000 * 60 * 60 * 24).toISOString() } // Default to 24 hours ago
 });
 const NisathonStats = mongoose.model('NisathonStats', NisathonStatsSchema);
 
@@ -113,7 +113,8 @@ const processNisathonEvent = async (stats, type, user, amount, message, provider
     if (providerId) {
         const exists = await NisathonEvent.findOne({ providerId });
         if (exists) {
-            console.log(`⚠️ Skipping duplicate event: ${providerId} (${user})`);
+            // Uncomment to see skipped events in logs
+            // console.log(`⚠️ Skipping duplicate event: ${providerId} (${user})`);
             return 0;
         }
     }
@@ -124,17 +125,19 @@ const processNisathonEvent = async (stats, type, user, amount, message, provider
 
     console.log(`Processing Event: Type=${type}, User=${user}, Amount=${amount}, Tier=${tier}`);
 
-    if (type === 'subscriber' || type === 'sub' || type === 'resub') {
+    // Normalize Sub Types (StreamElements sends 'subscriber', 'subscription', 'resub')
+    if (['subscriber', 'sub', 'resub', 'subscription'].includes(type)) {
         // TIER LOGIC
         let tierLabel = "Tier 1";
         let tierVal = 0.5;
 
-        const tierStr = String(tier).toLowerCase();
+        // Ensure tier is a string for comparison
+        const tierStr = String(tier || '1000').toLowerCase();
 
-        if (tierStr === '3000' || tierStr === 'tier 3') {
+        if (tierStr === '3000' || tierStr.includes('3000') || tierStr === 'tier 3') {
             tierVal = 2.0;
             tierLabel = "Tier 3";
-        } else if (tierStr === '2000' || tierStr === 'tier 2') {
+        } else if (tierStr === '2000' || tierStr.includes('2000') || tierStr === 'tier 2') {
             tierVal = 1.0;
             tierLabel = "Tier 2";
         } else if (tierStr === 'prime') {
@@ -226,7 +229,6 @@ const verifyStreamElementsConnection = async () => {
         const myUsername = response.data.username;
         
         console.log(`✅ StreamElements Auth Success! Logged in as: '${myUsername}'`);
-        console.log(`ℹ️  Your Actual Channel ID: ${myChannelId}`);
         
         if (SE_CHANNEL_ID) {
             if (SE_CHANNEL_ID === myChannelId) {
@@ -253,7 +255,8 @@ const verifyStreamElementsConnection = async () => {
 };
 
 // --- NISATHON SYNC LOGIC ---
-const updateNisathonStats = async () => {
+// Added 'forceLookback' param to manually rewind the sync cursor
+const updateNisathonStats = async (forceLookbackHours = 0) => {
     if (!SE_CHANNEL_ID || !SE_JWT || mongoose.connection.readyState !== 1) return;
 
     try {
@@ -262,18 +265,32 @@ const updateNisathonStats = async () => {
             stats = await NisathonStats.create({ key: 'main', timerEndTime: new Date(Date.now() + 3 * 60 * 60 * 1000) });
         }
 
-        const lastCheck = stats.lastActivityTime;
+        let lastCheck = stats.lastActivityTime;
+
+        // If forceLookback is requested (e.g. startup or manual sync), override lastCheck
+        if (forceLookbackHours > 0) {
+            const lookbackTime = new Date(Date.now() - forceLookbackHours * 60 * 60 * 1000).toISOString();
+            console.log(`🔙 Forcing sync from: ${lookbackTime} (${forceLookbackHours}h ago)`);
+            lastCheck = lookbackTime;
+        }
+
+        console.log(`🔄 Checking SE activities after: ${lastCheck}`);
         
         const response = await axios.get(`https://api.streamelements.com/kappa/v2/activities/${SE_CHANNEL_ID}`, {
             headers: { Authorization: `Bearer ${SE_JWT}` },
             params: { 
                 after: lastCheck, 
-                limit: 25 
+                limit: 100 // Increased limit to catch up on missed events
             }
         });
 
         const activities = response.data;
-        if (activities.length === 0) return; 
+        if (activities.length === 0) {
+            console.log("   -> No new activities found.");
+            return; 
+        }
+
+        console.log(`   -> Found ${activities.length} activities.`);
 
         const sortedActivities = activities.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
         let newestDate = lastCheck;
@@ -281,7 +298,12 @@ const updateNisathonStats = async () => {
 
         for (const act of sortedActivities) {
             newestDate = act.createdAt;
-            console.log(`📥 Raw SE Activity: Type=${act.type}, User=${act.data.username}`);
+            
+            // VERBOSE LOGGING FOR DEBUGGING
+            // This will help us identify exactly what your 'real sub' data looks like
+            if (act.type.includes('sub')) {
+                console.log(`🔍 SUB EVENT DETAILS:`, JSON.stringify(act.data));
+            }
 
             let type = act.type;
             let amount = 0;
@@ -291,7 +313,7 @@ const updateNisathonStats = async () => {
             const message = act.data.message || "";
             const providerId = act._id;
 
-            if (type === 'subscriber' || type === 'resub') {
+            if (type === 'subscriber' || type === 'resub' || type === 'subscription') {
                 amount = 1;
                 if (act.data.tier) tier = act.data.tier;
             } 
@@ -315,7 +337,7 @@ const updateNisathonStats = async () => {
         if (changesMade) {
             stats.lastActivityTime = newestDate;
             await stats.save();
-            console.log(`🔄 Synced up to ${newestDate}`);
+            console.log(`✅ Sync Complete. Updated cursor to ${newestDate}`);
         }
 
     } catch (error) {
@@ -332,8 +354,13 @@ const server = app.listen(PORT, async () => {
     // Verify connection on startup
     await verifyStreamElementsConnection();
     
+    // --- STARTUP BACKFILL ---
+    // Scan last 6 hours immediately on boot to catch missed events
+    console.log("🚀 Running Startup Backfill (Last 6 Hours)...");
+    await updateNisathonStats(6);
+    
     // Start Loops
-    setInterval(updateNisathonStats, 30000); // 30s Poll
+    setInterval(() => updateNisathonStats(0), 30000); // 30s Poll (Normal incremental sync)
     startKeepAlive();
 });
 
@@ -539,12 +566,8 @@ app.post('/api/nisathon/sync', async (req, res) => {
     try {
         const stats = await NisathonStats.findOne({ key: 'main' });
         if (stats) {
-            // Rewind the cursor to 24h ago
-            stats.lastActivityTime = new Date(Date.now() - 1000 * 60 * 60 * 24).toISOString();
-            await stats.save();
-            
-            // Trigger sync immediately
-            await updateNisathonStats();
+            // Trigger manual sync looking back 24 hours
+            await updateNisathonStats(24);
             res.json({ success: true });
         } else {
             res.status(404).json({ error: "Stats not found" });
