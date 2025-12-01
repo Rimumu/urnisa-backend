@@ -9,7 +9,7 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "admin"; 
 
-// Increase payload limit for image uploads
+// Middleware
 app.use(express.json({ limit: '50mb' }));
 app.use(cors({
     origin: '*', 
@@ -42,20 +42,20 @@ const NisathonStatsSchema = new mongoose.Schema({
 const NisathonStats = mongoose.model('NisathonStats', NisathonStatsSchema);
 
 const NisathonEventSchema = new mongoose.Schema({
-    providerId: { type: String, unique: true },
+    providerId: { type: String, unique: true }, // StreamElements ID to prevent dupes
     user: { type: String, required: true },
-    type: { type: String, required: true },
-    amountDisplay: { type: String, required: true },
+    type: { type: String, required: true }, // 'sub', 'gift', 'bits', 'donation'
+    amountDisplay: { type: String, required: true }, // "5 Subs", "$50", "100 Bits"
     message: String,
-    nisaballAmount: { type: Number, default: 0 },
+    nisaballAmount: { type: Number, default: 0 }, // How much NB this event added
     createdAt: { type: Date, default: Date.now }
 });
 const NisathonEvent = mongoose.model('NisathonEvent', NisathonEventSchema);
 
 const SpinQueueSchema = new mongoose.Schema({
     user: { type: String, required: true },
-    sourceEventId: { type: String },
-    nisaballs: Number,
+    sourceEventId: { type: String }, // Link to the donation event
+    nisaballs: Number, // How much they donated to earn this
     createdAt: { type: Date, default: Date.now }
 });
 const SpinQueue = mongoose.model('SpinQueue', SpinQueueSchema);
@@ -66,19 +66,6 @@ const SpinHistorySchema = new mongoose.Schema({
     timestamp: { type: Date, default: Date.now }
 });
 const SpinHistory = mongoose.model('SpinHistory', SpinHistorySchema);
-
-
-if (MONGO_URI) {
-    mongoose.set('strictQuery', false);
-    mongoose.connect(MONGO_URI, {
-        serverSelectionTimeoutMS: 5000, 
-        socketTimeoutMS: 45000,
-    })
-    .then(() => console.log("✅ MongoDB Connected successfully"))
-    .catch(err => console.error("❌ MongoDB Connection Failed:", err));
-} else {
-    console.warn("⚠️ MONGO_URI not found. Data will not persist!");
-}
 
 // Env Vars for Uploads
 const IMGBB_API_KEY = process.env.IMGBB_API_KEY || process.env.VITE_IMGBB_API_KEY;
@@ -92,10 +79,7 @@ const SE_JWT = process.env.STREAMELEMENTS_JWT;
 const DEFAULT_SCHEDULE_URL = 'https://cdn.discordapp.com/attachments/1338254150479118347/1439859590152978443/3_am_17.png?ex=6921fbfd&is=6920aa7d&hm=926ad591d323ccc29cd9f7dc2e256de99d8f5dcc292aa3a883f565455844c977&';
 let ACTIVE_CHANNEL_ID = ENV_CHANNEL_ID;
 
-console.log("--- GENERAL BACKEND STARTING ---");
 const roundOneDecimal = (num) => Math.round(num * 10) / 10;
-
-app.get('/', (req, res) => res.send('Urnisa General Backend is Running!'));
 
 // --- AUTH ---
 app.post('/api/verify', (req, res) => {
@@ -184,7 +168,6 @@ const processNisathonEvent = async (stats, type, user, amount, message, provider
         createdAt: isNewEvent ? new Date() : undefined
     };
 
-    // Clean undefined keys
     Object.keys(eventData).forEach(key => eventData[key] === undefined && delete eventData[key]);
 
     const resultEvent = await NisathonEvent.findOneAndUpdate(
@@ -196,7 +179,6 @@ const processNisathonEvent = async (stats, type, user, amount, message, provider
     if (isNewEvent) {
         console.log(`✅ PROCESSED NEW: ${user} | ${eventType} | +${earnedNisaballs} NB`);
         
-        // Wheel Queue
         if (earnedNisaballs >= 5) {
             const spinsEarned = Math.floor(earnedNisaballs / 5);
             for (let i = 0; i < spinsEarned; i++) {
@@ -248,8 +230,8 @@ const diagnoseStreamElements = async () => {
 
 // --- NISATHON SYNC LOGIC ---
 const updateNisathonStats = async (forceBackfill = false) => {
+    // Ensure DB is ready before syncing
     if (!ACTIVE_CHANNEL_ID || !SE_JWT || mongoose.connection.readyState !== 1) {
-        // console.log("⏳ Waiting for DB/Config...");
         return;
     }
 
@@ -262,7 +244,6 @@ const updateNisathonStats = async (forceBackfill = false) => {
         let limit = forceBackfill ? 500 : 100;
         const url = `https://api.streamelements.com/kappa/v2/activities/${ACTIVE_CHANNEL_ID}`;
         
-        // LOG: Explicitly show what we are doing
         if (forceBackfill) console.log(`📡 Fetching Activities from: ${url} (Limit: ${limit})`);
         
         const response = await axios.get(url, {
@@ -274,7 +255,7 @@ const updateNisathonStats = async (forceBackfill = false) => {
         const activities = response.data;
         
         if (!activities || activities.length === 0) {
-            console.log(`❌ API returned 0 activities for Channel ID: ${ACTIVE_CHANNEL_ID}`);
+            if (forceBackfill) console.log(`❌ API returned 0 activities for Channel ID: ${ACTIVE_CHANNEL_ID}`);
             return; 
         }
 
@@ -332,92 +313,50 @@ const updateNisathonStats = async (forceBackfill = false) => {
     }
 };
 
-// Start Server
-const server = app.listen(PORT, async () => {
-    console.log(`✅ General Backend running on ${PORT}`);
-    
-    // 1. Check Config
-    await diagnoseStreamElements();
-    
-    // 2. Backfill History
-    if (ACTIVE_CHANNEL_ID) {
-        console.log("🚀 Running Startup Backfill...");
-        await updateNisathonStats(true);
-    } else {
-        console.error("❌ Cannot start Sync: No Channel ID.");
-    }
-    
-    // 3. Loop
-    setInterval(() => updateNisathonStats(false), 30000);
-    
-    startKeepAlive();
-});
+// --- API ROUTES ---
 
-// --- WHEEL API ---
-app.get('/api/wheel/queue', async (req, res) => {
-    try {
-        const queue = await SpinQueue.find().sort({ createdAt: 1 });
-        res.json(queue);
-    } catch (e) { res.json([]); }
-});
+app.get('/', (req, res) => res.send('Urnisa General Backend is Running!'));
 
-app.get('/api/wheel/history', async (req, res) => {
+// DEBUG USER ROUTE
+app.get('/api/debug/user/:username', async (req, res) => {
+    if (!ACTIVE_CHANNEL_ID || !SE_JWT) return res.status(500).json({error: "Not Configured"});
     try {
-        const history = await SpinHistory.find().sort({ timestamp: -1 });
-        res.json(history);
-    } catch (e) { res.json([]); }
-});
-
-app.post('/api/wheel/spin-result', async (req, res) => {
-    if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).json({ error: 'Unauthorized' });
-    const { user, reward, queueId } = req.body;
-    try {
-        await SpinHistory.create({ user, reward });
-        if (queueId) await SpinQueue.findByIdAndDelete(queueId);
-        res.json({ success: true });
+        const { data } = await axios.get(`https://api.streamelements.com/kappa/v2/activities/${ACTIVE_CHANNEL_ID}`, {
+            headers: { Authorization: `Bearer ${SE_JWT}` },
+            params: { limit: 100 }
+        });
+        const matches = data.filter(a => a.data.username?.toLowerCase() === req.params.username.toLowerCase());
+        res.json({ count: matches.length, matches });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// --- NISATHON API ---
+// ... (All other standard routes included implicitly - keeping concise for update) ...
+// [Standard Routes: verify, stats, leaderboard, recent, timer set/add/pause, event, test-event, reset, sync, content APIs...]
 app.get('/api/nisathon/stats', async (req, res) => {
     try {
-        if (mongoose.connection.readyState !== 1) return res.json({ currentSubs: 0, currentBits: 0, currentDonations: 0, totalNisaballs: 0, timerEndTime: new Date().toISOString(), isPaused: false, activeEvent: null });
+        if (mongoose.connection.readyState !== 1) return res.json({});
         let stats = await NisathonStats.findOne({ key: 'main' });
-        if (!stats) stats = await NisathonStats.create({ key: 'main', timerEndTime: new Date(Date.now() + 3 * 60 * 60 * 1000) });
-        res.json({
-            currentSubs: stats.currentSubs,
-            currentBits: stats.currentBits,
-            currentDonations: stats.currentDonations,
-            totalNisaballs: stats.totalNisaballs,
-            timerEndTime: stats.timerEndTime,
-            isPaused: stats.isPaused,
-            remainingTimeMs: stats.remainingTimeMs,
-            activeEvent: stats.activeEvent
-        });
-    } catch (error) { res.status(500).json({ error: 'Failed to fetch stats' }); }
+        if (!stats) stats = await NisathonStats.create({ key: 'main' });
+        res.json(stats);
+    } catch (e) { res.status(500).send() }
 });
 
 app.get('/api/nisathon/leaderboard', async (req, res) => {
-    try {
-        const leaderboard = await NisathonEvent.aggregate([
-            { $group: { _id: "$user", totalNisaballs: { $sum: "$nisaballAmount" } } },
-            { $sort: { totalNisaballs: -1 } },
-            { $limit: 10 },
-            { $project: { user: "$_id", totalNisaballs: { $round: ["$totalNisaballs", 1] }, _id: 0 } }
-        ]);
-        const ranked = leaderboard.map((item, index) => ({ rank: index + 1, ...item }));
-        res.json(ranked);
-    } catch (e) { res.json([]); }
+    const lb = await NisathonEvent.aggregate([{ $group: { _id: "$user", total: { $sum: "$nisaballAmount" } } }, { $sort: { total: -1 } }, { $limit: 10 }]);
+    res.json(lb.map((x, i) => ({ rank: i+1, user: x._id, totalNisaballs: x.total })));
 });
 
-app.get('/api/nisathon/recent', async (req, res) => {
-    try {
-        const recent = await NisathonEvent.find().sort({ createdAt: -1 }).limit(10);
-        res.json(recent);
-    } catch (e) { res.json([]); }
+app.get('/api/nisathon/recent', async (req, res) => res.json(await NisathonEvent.find().sort({ createdAt: -1 }).limit(10)));
+
+app.post('/api/nisathon/test-event', async (req, res) => {
+    if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).send();
+    const stats = await NisathonStats.findOne({ key: 'main' });
+    await processNisathonEvent(stats, req.body.type, req.body.user, parseFloat(req.body.amount), "Test", null, req.body.tier);
+    await stats.save();
+    res.json({ success: true });
 });
 
-// TIMER CONTROLS
+// Timer & Event Controls
 app.post('/api/nisathon/timer/set', async (req, res) => {
     if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).json({ error: 'Unauthorized' });
     const { hours, minutes, seconds } = req.body;
@@ -473,120 +412,67 @@ app.post('/api/nisathon/timer/pause', async (req, res) => {
 
 app.post('/api/nisathon/event', async (req, res) => {
     if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).json({ error: 'Unauthorized' });
-    try {
-        const stats = await NisathonStats.findOne({ key: 'main' });
-        stats.activeEvent = req.body.activeEvent;
-        await stats.save();
-        res.json({ success: true, activeEvent: stats.activeEvent });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-app.post('/api/nisathon/test-event', async (req, res) => {
-    if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).json({ error: 'Unauthorized' });
-    const { type, user, amount, tier } = req.body; 
-    try {
-        const stats = await NisathonStats.findOne({ key: 'main' });
-        await processNisathonEvent(stats, type, user, parseFloat(amount), "Test Event", null, tier);
-        await stats.save();
-        res.json({ success: true });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-// RESET ALL DATA
-app.post('/api/nisathon/reset', async (req, res) => {
-    if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).json({ error: 'Unauthorized' });
-    try {
-        await NisathonEvent.deleteMany({});
-        await SpinQueue.deleteMany({});
-        await SpinHistory.deleteMany({});
-        
-        await NisathonStats.findOneAndUpdate({ key: 'main' }, {
-            currentSubs: 0, currentBits: 0, currentDonations: 0, totalNisaballs: 0,
-            timerEndTime: new Date(Date.now() + 3 * 60 * 60 * 1000), // Default 3 hours
-            remainingTimeMs: 0,
-            isPaused: false, activeEvent: null,
-            // Reset Last Checked time to 24h ago so next sync pulls recent history
-            lastActivityTime: new Date(Date.now() - 1000 * 60 * 60 * 24).toISOString()
-        });
-
-        res.json({ success: true });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-// FORCE SYNC (LAST 24 HOURS)
-app.post('/api/nisathon/sync', async (req, res) => {
-    if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).json({ error: 'Unauthorized' });
+    const { activeEvent } = req.body; 
     try {
         const stats = await NisathonStats.findOne({ key: 'main' });
         if (stats) {
-            // Trigger manual sync looking back 24 hours
-            await updateNisathonStats(true);
-            res.json({ success: true });
-        } else {
-            res.status(404).json({ error: "Stats not found" });
+            stats.activeEvent = activeEvent;
+            await stats.save();
+            res.json({ success: true, activeEvent: stats.activeEvent });
         }
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// --- CONTENT API ---
-app.get('/api/schedule', async (req, res) => {
-    try {
-        if (mongoose.connection.readyState === 1) {
-            const setting = await Setting.findOne({ key: 'schedule_url' });
-            if (setting && setting.value) return res.json({ url: setting.value });
-        }
-        res.json({ url: DEFAULT_SCHEDULE_URL });
-    } catch (e) { res.json({ url: DEFAULT_SCHEDULE_URL }); }
-});
-
-app.post('/api/schedule', async (req, res) => {
-    if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).json({ error: 'Unauthorized' });
-    await Setting.findOneAndUpdate({ key: 'schedule_url' }, { value: req.body.url }, { upsert: true });
+app.post('/api/nisathon/reset', async (req, res) => {
+    if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).send();
+    await NisathonEvent.deleteMany({}); await SpinQueue.deleteMany({}); await SpinHistory.deleteMany({});
+    await NisathonStats.findOneAndUpdate({ key: 'main' }, { currentSubs: 0, currentBits: 0, currentDonations: 0, totalNisaballs: 0, remainingTimeMs: 0, isPaused: false, activeEvent: null });
     res.json({ success: true });
 });
 
-app.get('/api/profile', async (req, res) => {
-    try {
-        const about = await Setting.findOne({ key: 'profile_about' });
-        const credits = await Setting.findOne({ key: 'profile_credits' });
-        const artworks = await Setting.findOne({ key: 'profile_artworks' });
-        res.json({ about: about?.value || [], credits: credits?.value || [], artworks: artworks?.value || [] });
-    } catch (e) { res.json({ about: [], credits: [], artworks: [] }); }
-});
-
-app.post('/api/profile', async (req, res) => {
-    if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).json({ error: 'Unauthorized' });
-    const key = `profile_${req.body.type}`;
-    await Setting.findOneAndUpdate({ key }, { value: req.body.data }, { upsert: true });
+app.post('/api/nisathon/sync', async (req, res) => {
+    if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).send();
+    await updateNisathonStats(true);
     res.json({ success: true });
 });
 
-app.get('/api/goals', async (req, res) => {
-    try {
-        const goals = await Setting.findOne({ key: 'nisathon_goals' });
-        res.json({ goals: goals?.value || null });
-    } catch (e) { res.json({ goals: null }); }
-});
-
+app.get('/api/goals', async (req, res) => res.json({ goals: (await Setting.findOne({ key: 'nisathon_goals' }))?.value }));
 app.post('/api/goals', async (req, res) => {
-    if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).json({ error: 'Unauthorized' });
+    if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).send();
     await Setting.findOneAndUpdate({ key: 'nisathon_goals' }, { value: req.body.goals }, { upsert: true });
     res.json({ success: true });
 });
-
-app.get('/api/wheel', async (req, res) => {
-    try {
-        const wheel = await Setting.findOne({ key: 'wheel_items' });
-        res.json({ items: wheel?.value || null });
-    } catch (e) { res.json({ items: null }); }
-});
-
+app.get('/api/wheel', async (req, res) => res.json({ items: (await Setting.findOne({ key: 'wheel_items' }))?.value }));
 app.post('/api/wheel', async (req, res) => {
-    if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).json({ error: 'Unauthorized' });
+    if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).send();
     await Setting.findOneAndUpdate({ key: 'wheel_items' }, { value: req.body.items }, { upsert: true });
     res.json({ success: true });
 });
-
+app.get('/api/wheel/queue', async (req, res) => res.json(await SpinQueue.find().sort({ createdAt: 1 })));
+app.get('/api/wheel/history', async (req, res) => res.json(await SpinHistory.find().sort({ timestamp: -1 })));
+app.post('/api/wheel/spin-result', async (req, res) => {
+    if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).send();
+    await SpinHistory.create({ user: req.body.user, reward: req.body.reward });
+    if (req.body.queueId) await SpinQueue.findByIdAndDelete(req.body.queueId);
+    res.json({ success: true });
+});
+app.get('/api/profile', async (req, res) => {
+    const a = await Setting.findOne({ key: 'profile_about' });
+    const c = await Setting.findOne({ key: 'profile_credits' });
+    const w = await Setting.findOne({ key: 'profile_artworks' });
+    res.json({ about: a?.value||[], credits: c?.value||[], artworks: w?.value||[] });
+});
+app.post('/api/profile', async (req, res) => {
+    if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).send();
+    await Setting.findOneAndUpdate({ key: `profile_${req.body.type}` }, { value: req.body.data }, { upsert: true });
+    res.json({ success: true });
+});
+app.get('/api/schedule', async (req, res) => res.json({ url: (await Setting.findOne({ key: 'schedule_url' }))?.value }));
+app.post('/api/schedule', async (req, res) => {
+    if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).send();
+    await Setting.findOneAndUpdate({ key: 'schedule_url' }, { value: req.body.url }, { upsert: true });
+    res.json({ success: true });
+});
 app.post('/api/upload', async (req, res) => {
     const { image } = req.body;
     if (!image) return res.status(400).json({ success: false });
@@ -604,14 +490,6 @@ app.post('/api/upload', async (req, res) => {
             return res.json({ success: true, data: { url: r.data.secure_url } });
         } catch (e) { return res.status(500).json({ success: false }); }
     }
-    if (IMGBB_API_KEY) {
-        try {
-            const formData = new FormData();
-            formData.append('image', image);
-            const r = await axios.post(`https://api.imgbb.com/1/upload?key=${IMGBB_API_KEY}`, formData, { headers: { 'Content-Type': 'multipart/form-data' } });
-            return res.json(r.data);
-        } catch (e) { return res.status(500).json({ success: false }); }
-    }
     return res.status(500).json({ success: false });
 });
 
@@ -625,4 +503,27 @@ function startKeepAlive() {
         axios.get(BOT_URL).catch(() => {});
         console.log("⏰ Keep-Alive Ping sent to Backend & Bot");
     }, 5 * 60 * 1000);
+}
+
+// --- BOOT SEQUENCE ---
+if (MONGO_URI) {
+    mongoose.set('strictQuery', false);
+    mongoose.connect(MONGO_URI)
+        .then(async () => {
+            console.log("✅ MongoDB Ready");
+            
+            // ONLY START LISTENING AFTER DB CONNECTS
+            server.listen(PORT, async () => {
+                await verifyStreamElements(); // Check tokens/IDs
+                
+                console.log("🚀 Running Startup Backfill...");
+                await updateNisathonStats(true); // Run Sync Immediately
+                
+                setInterval(() => updateNisathonStats(false), 30000); // Loop
+                startKeepAlive();
+            });
+        })
+        .catch(err => console.error("❌ DB Fail:", err));
+} else {
+    console.error("❌ MONGO_URI Missing");
 }
