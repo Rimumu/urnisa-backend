@@ -109,20 +109,24 @@ app.post('/api/verify', (req, res) => {
 
 // --- HELPER: Process Event ---
 const processNisathonEvent = async (stats, type, user, amount, message, providerId, tier = '1000') => {
+    let isNewEvent = true;
+
     // Check duplication if providerId exists
     if (providerId) {
-        const exists = await NisathonEvent.findOne({ providerId });
-        if (exists) {
-            // Already processed this event
-            return 0;
+        const existingEvent = await NisathonEvent.findOne({ providerId });
+        if (existingEvent) {
+            // IF it exists, we DON'T return 0 immediately anymore.
+            // We want to make sure it's correct.
+            // However, we shouldn't add stats (Nisaballs) twice.
+            // So we flag it as not new.
+            isNewEvent = false;
+            console.log(`ℹ️ Event ${providerId} already exists. Updating metadata...`);
         }
     }
 
     let earnedNisaballs = 0;
     let amountDisplay = "";
     let eventType = type; // normalize types
-
-    console.log(`Processing Event: Type=${type}, User=${user}, Amount=${amount}, Tier=${tier}`);
 
     // Normalize Sub Types (StreamElements sends 'subscriber', 'subscription', 'resub')
     if (['subscriber', 'sub', 'resub', 'subscription'].includes(type)) {
@@ -148,64 +152,79 @@ const processNisathonEvent = async (stats, type, user, amount, message, provider
         amountDisplay = `${tierLabel} Sub`;
         
         eventType = 'sub';
-        stats.currentSubs += 1;
+        
+        if (isNewEvent) stats.currentSubs += 1;
     } else if (type === 'gift') {
         earnedNisaballs = 0.5 * amount;
         amountDisplay = `${amount} Gift Subs`;
-        stats.currentSubs += amount;
+        if (isNewEvent) stats.currentSubs += amount;
     } else if (type === 'cheer' || type === 'bits') {
         earnedNisaballs = amount * 0.002; // 500 bits = 1 NB
         amountDisplay = `${amount} Bits`;
         eventType = 'bits';
-        stats.currentBits += amount;
+        if (isNewEvent) stats.currentBits += amount;
     } else if (type === 'tip' || type === 'donation') {
         earnedNisaballs = amount * 0.2; // $5 = 1 NB
         amountDisplay = `$${amount.toFixed(2)}`;
         eventType = 'donation';
-        stats.currentDonations += amount;
+        if (isNewEvent) stats.currentDonations += amount;
     }
 
-    // Update Totals
-    stats.totalNisaballs = roundOneDecimal(stats.totalNisaballs + earnedNisaballs);
+    // ONLY Update Totals & Timer if it is a NEW event
+    if (isNewEvent) {
+        stats.totalNisaballs = roundOneDecimal(stats.totalNisaballs + earnedNisaballs);
 
-    // Update Timer
-    const timeMultiplier = stats.activeEvent === 'DOUBLE_TIMER' ? 2 : 1;
-    
-    if (!stats.isPaused) {
-        const minutesToAdd = earnedNisaballs * 10 * timeMultiplier;
-        const msToAdd = minutesToAdd * 60 * 1000;
-        const now = new Date().getTime();
-        let currentEndTime = new Date(stats.timerEndTime).getTime();
-        if (currentEndTime < now) currentEndTime = now;
-        stats.timerEndTime = new Date(currentEndTime + msToAdd);
-    } else {
-        const minutesToAdd = earnedNisaballs * 10 * timeMultiplier;
-        stats.remainingTimeMs += (minutesToAdd * 60 * 1000);
+        // Update Timer
+        const timeMultiplier = stats.activeEvent === 'DOUBLE_TIMER' ? 2 : 1;
+        
+        if (!stats.isPaused) {
+            const minutesToAdd = earnedNisaballs * 10 * timeMultiplier;
+            const msToAdd = minutesToAdd * 60 * 1000;
+            const now = new Date().getTime();
+            let currentEndTime = new Date(stats.timerEndTime).getTime();
+            if (currentEndTime < now) currentEndTime = now;
+            stats.timerEndTime = new Date(currentEndTime + msToAdd);
+        } else {
+            const minutesToAdd = earnedNisaballs * 10 * timeMultiplier;
+            stats.remainingTimeMs += (minutesToAdd * 60 * 1000);
+        }
     }
 
-    const newEvent = await NisathonEvent.create({
+    // Upsert the event (Create if new, Update if exists)
+    const eventData = {
         providerId: providerId || `sim-${Date.now()}-${Math.random()}`,
         user: user || 'Anonymous',
         type: eventType,
         amountDisplay,
         message,
         nisaballAmount: earnedNisaballs,
-        createdAt: new Date()
-    });
+        createdAt: isNewEvent ? new Date() : undefined // Keep original date if updating
+    };
 
-    console.log(`✅ Event Processed: +${earnedNisaballs} NB (x${timeMultiplier} time) for ${user}`);
+    // Remove undefined keys
+    Object.keys(eventData).forEach(key => eventData[key] === undefined && delete eventData[key]);
 
-    // --- SPIN QUEUE LOGIC ---
-    if (earnedNisaballs >= 5) {
-        const spinsEarned = Math.floor(earnedNisaballs / 5);
-        for (let i = 0; i < spinsEarned; i++) {
-            await SpinQueue.create({
-                user: user || 'Anonymous',
-                sourceEventId: newEvent._id,
-                nisaballs: earnedNisaballs
-            });
+    const resultEvent = await NisathonEvent.findOneAndUpdate(
+        { providerId: eventData.providerId },
+        eventData,
+        { upsert: true, new: true }
+    );
+
+    if (isNewEvent) {
+        console.log(`✅ Event Processed: +${earnedNisaballs} NB (x${stats.activeEvent === 'DOUBLE_TIMER' ? 2 : 1}) for ${user}`);
+        
+        // --- SPIN QUEUE LOGIC ---
+        if (earnedNisaballs >= 5) {
+            const spinsEarned = Math.floor(earnedNisaballs / 5);
+            for (let i = 0; i < spinsEarned; i++) {
+                await SpinQueue.create({
+                    user: user || 'Anonymous',
+                    sourceEventId: resultEvent._id,
+                    nisaballs: earnedNisaballs
+                });
+            }
+            console.log(`🎡 Added ${spinsEarned} spins to queue for ${user}`);
         }
-        console.log(`🎡 Added ${spinsEarned} spins to queue for ${user}`);
     }
 
     return earnedNisaballs;
@@ -294,8 +313,10 @@ const updateNisathonStats = async (forceLookbackHours = 0) => {
         for (const act of sortedActivities) {
             newestDate = act.createdAt;
             
-            // VERBOSE LOGGING: This helps debug why events might be skipped
-            console.log(`🔎 INSPECTING: ${act.type} by ${act.data.username} at ${act.createdAt} [Tier: ${act.data.tier || 'N/A'}]`);
+            // VERBOSE LOGGING: Specifically for subscribers to debug missing events
+            if (['subscriber', 'sub', 'resub', 'subscription'].includes(act.type)) {
+                console.log(`🔍 SUB EVENT FOUND: User=${act.data.username}, Type=${act.type}, Tier=${act.data.tier}`);
+            }
 
             let type = act.type;
             let amount = 0;
@@ -319,19 +340,27 @@ const updateNisathonStats = async (forceLookbackHours = 0) => {
                 amount = act.data.amount;
             } 
             else {
-                // Log unknown types for debugging
-                // console.log("Skipping unknown type:", type);
                 continue; 
             }
 
+            // We pass ALL found events to process. logic inside handles dupe checking.
             const nbAdded = await processNisathonEvent(stats, type, user, amount, message, providerId, tier);
             changesMade = true;
         }
 
         if (changesMade) {
-            stats.lastActivityTime = newestDate;
+            // Only advance cursor if we weren't in a "Force Lookback" mode
+            // If we forced lookback, we want to reset cursor to NOW, not the old event time,
+            // to avoid re-scanning the same 7 days repeatedly.
+            if (forceLookbackHours === 0) {
+                stats.lastActivityTime = newestDate;
+            } else {
+                // If it was a force sync, set cursor to current time so we continue from here
+                stats.lastActivityTime = new Date().toISOString();
+            }
+            
             await stats.save();
-            console.log(`✅ Sync Complete. Cursor updated to ${newestDate}`);
+            console.log(`✅ Sync Complete.`);
         }
 
     } catch (error) {
@@ -349,9 +378,9 @@ const server = app.listen(PORT, async () => {
     await verifyStreamElementsConnection();
     
     // --- STARTUP BACKFILL ---
-    // Scan last 48 hours immediately on boot to catch missed events
-    console.log("🚀 Running Startup Backfill (Last 48 Hours)...");
-    await updateNisathonStats(48);
+    // Scan last 7 DAYS (168 hours) immediately on boot to catch missed events
+    console.log("🚀 Running Startup Backfill (Last 7 Days)...");
+    await updateNisathonStats(168);
     
     // Start Loops
     setInterval(() => updateNisathonStats(0), 30000); // 30s Poll (Normal incremental sync)
