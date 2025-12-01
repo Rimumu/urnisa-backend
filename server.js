@@ -115,12 +115,8 @@ const processNisathonEvent = async (stats, type, user, amount, message, provider
     if (providerId) {
         const existingEvent = await NisathonEvent.findOne({ providerId });
         if (existingEvent) {
-            // IF it exists, we DON'T return 0 immediately anymore.
-            // We want to make sure it's correct.
-            // However, we shouldn't add stats (Nisaballs) twice.
-            // So we flag it as not new.
             isNewEvent = false;
-            console.log(`ℹ️ Event ${providerId} already exists. Updating metadata...`);
+            // Just updating ensures any missed metadata is captured, but we don't add points twice
         }
     }
 
@@ -240,7 +236,8 @@ const verifyStreamElementsConnection = async () => {
     try {
         console.log("🔍 Verifying StreamElements Connection...");
         const response = await axios.get('https://api.streamelements.com/kappa/v2/channels/me', {
-            headers: { Authorization: `Bearer ${SE_JWT}` }
+            headers: { Authorization: `Bearer ${SE_JWT}` },
+            timeout: 5000
         });
         
         const myChannelId = response.data._id;
@@ -283,29 +280,38 @@ const updateNisathonStats = async (forceLookbackHours = 0) => {
         }
 
         let lastCheck = stats.lastActivityTime;
+        let requestParams = { 
+            limit: 100 // Default limit
+        };
 
-        // Force lookback on startup or manual sync
+        // If forceLookback is requested (e.g. startup or manual sync)
         if (forceLookbackHours > 0) {
-            const lookbackTime = new Date(Date.now() - forceLookbackHours * 60 * 60 * 1000).toISOString();
-            console.log(`🔙 Forcing sync from: ${lookbackTime} (${forceLookbackHours}h ago)`);
-            lastCheck = lookbackTime;
+            console.log(`⚠️ Startup Backfill: Ignoring date filter, fetching latest 100 events raw.`);
+            // NO 'after' param here. We just want the raw latest 100.
+            requestParams.limit = 100;
+        } else {
+            // Normal operation: Only newer than last check
+            requestParams.after = lastCheck;
         }
 
+        // console.log(`🔄 Fetching SE activities with params:`, requestParams);
+        
         const response = await axios.get(`https://api.streamelements.com/kappa/v2/activities/${SE_CHANNEL_ID}`, {
             headers: { Authorization: `Bearer ${SE_JWT}` },
-            params: { 
-                after: lastCheck, 
-                limit: 500 // Max limit to catch everything
-            }
+            params: requestParams,
+            timeout: 10000 // 10s Timeout prevents hanging
         });
 
         const activities = response.data;
-        if (activities.length === 0) {
+        
+        if (!activities || activities.length === 0) {
+            // console.log("   -> No new activities found.");
             return; 
         }
 
         console.log(`   -> Found ${activities.length} activities.`);
 
+        // Sort by date ascending (oldest first) so we process in order
         const sortedActivities = activities.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
         let newestDate = lastCheck;
         let changesMade = false;
@@ -313,9 +319,9 @@ const updateNisathonStats = async (forceLookbackHours = 0) => {
         for (const act of sortedActivities) {
             newestDate = act.createdAt;
             
-            // VERBOSE LOGGING: Specifically for subscribers to debug missing events
+            // VERBOSE LOGGING: specifically for subscribers
             if (['subscriber', 'sub', 'resub', 'subscription'].includes(act.type)) {
-                console.log(`🔍 SUB EVENT FOUND: User=${act.data.username}, Type=${act.type}, Tier=${act.data.tier}`);
+                console.log(`🔎 INSPECTING SUB: User=${act.data.username}, Type=${act.type}, Tier=${act.data.tier}`);
             }
 
             let type = act.type;
@@ -343,22 +349,15 @@ const updateNisathonStats = async (forceLookbackHours = 0) => {
                 continue; 
             }
 
-            // We pass ALL found events to process. logic inside handles dupe checking.
-            const nbAdded = await processNisathonEvent(stats, type, user, amount, message, providerId, tier);
+            // Process event
+            await processNisathonEvent(stats, type, user, amount, message, providerId, tier);
             changesMade = true;
         }
 
         if (changesMade) {
-            // Only advance cursor if we weren't in a "Force Lookback" mode
-            // If we forced lookback, we want to reset cursor to NOW, not the old event time,
-            // to avoid re-scanning the same 7 days repeatedly.
-            if (forceLookbackHours === 0) {
-                stats.lastActivityTime = newestDate;
-            } else {
-                // If it was a force sync, set cursor to current time so we continue from here
-                stats.lastActivityTime = new Date().toISOString();
-            }
-            
+            // If we did a blind fetch (startup), we still want to update the cursor to now/latest
+            // so next time we only get newer stuff.
+            stats.lastActivityTime = newestDate;
             await stats.save();
             console.log(`✅ Sync Complete.`);
         }
@@ -378,9 +377,9 @@ const server = app.listen(PORT, async () => {
     await verifyStreamElementsConnection();
     
     // --- STARTUP BACKFILL ---
-    // Scan last 7 DAYS (168 hours) immediately on boot to catch missed events
-    console.log("🚀 Running Startup Backfill (Last 7 Days)...");
-    await updateNisathonStats(168);
+    // Run immediately with force flag (1)
+    console.log("🚀 Running Startup Backfill...");
+    await updateNisathonStats(1);
     
     // Start Loops
     setInterval(() => updateNisathonStats(0), 30000); // 30s Poll (Normal incremental sync)
