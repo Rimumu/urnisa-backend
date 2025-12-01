@@ -18,7 +18,6 @@ const MONGO_URI = process.env.MONGO_URI;
 
 // --- CONFIG ---
 const SE_JWT = process.env.STREAMELEMENTS_JWT;
-// We start with Env Var, but might auto-correct it later
 let ACTIVE_CHANNEL_ID = process.env.STREAMELEMENTS_CHANNEL_ID;
 
 const CLOUDINARY_CLOUD_NAME = process.env.CLOUDINARY_CLOUD_NAME;
@@ -73,11 +72,10 @@ const SpinHistory = mongoose.model('SpinHistory', SpinHistorySchema);
 
 const roundOneDecimal = (num) => Math.round(num * 10) / 10;
 
-// --- HELPER: Process Event (Upsert) ---
+// --- HELPER: Process Event ---
 const processNisathonEvent = async (stats, type, user, amount, message, providerId, tier = '1000') => {
     let isNewEvent = true;
 
-    // Check if event already processed
     if (providerId) {
         const existing = await NisathonEvent.findOne({ providerId });
         if (existing) isNewEvent = false; 
@@ -87,7 +85,6 @@ const processNisathonEvent = async (stats, type, user, amount, message, provider
     let amountDisplay = "";
     let eventType = type; 
 
-    // Logic for Subs
     if (['subscriber', 'sub', 'resub', 'subscription'].includes(type)) {
         let tVal = 0.5;
         let tLbl = "Tier 1";
@@ -100,29 +97,22 @@ const processNisathonEvent = async (stats, type, user, amount, message, provider
         amountDisplay = `${tLbl} Sub`;
         eventType = 'sub';
         if (isNewEvent) stats.currentSubs += 1;
-    } 
-    // Logic for Gifts
-    else if (type === 'gift') {
+    } else if (type === 'gift') {
         earnedNisaballs = 0.5 * amount;
         amountDisplay = `${amount} Gift Subs`;
         if (isNewEvent) stats.currentSubs += amount;
-    } 
-    // Logic for Bits
-    else if (['cheer', 'bits'].includes(type)) {
+    } else if (['cheer', 'bits'].includes(type)) {
         earnedNisaballs = amount * 0.002;
         amountDisplay = `${amount} Bits`;
         eventType = 'bits';
         if (isNewEvent) stats.currentBits += amount;
-    } 
-    // Logic for Tips
-    else if (['tip', 'donation'].includes(type)) {
+    } else if (['tip', 'donation'].includes(type)) {
         earnedNisaballs = amount * 0.2;
         amountDisplay = `$${amount.toFixed(2)}`;
         eventType = 'donation';
         if (isNewEvent) stats.currentDonations += amount;
     }
 
-    // Add to Stats (Only if new)
     if (isNewEvent) {
         stats.totalNisaballs = roundOneDecimal(stats.totalNisaballs + earnedNisaballs);
         const mult = stats.activeEvent === 'DOUBLE_TIMER' ? 2 : 1;
@@ -137,7 +127,6 @@ const processNisathonEvent = async (stats, type, user, amount, message, provider
         }
     }
 
-    // Save/Update Event
     const eventData = {
         providerId: providerId || `sim-${Date.now()}`,
         user: user || 'Anonymous',
@@ -155,10 +144,8 @@ const processNisathonEvent = async (stats, type, user, amount, message, provider
         { upsert: true, new: true }
     );
 
-    // Add to Wheel Queue
     if (isNewEvent && earnedNisaballs >= 5) {
         const spins = Math.floor(earnedNisaballs / 5);
-        console.log(`🎡 Adding ${spins} spins for ${user}`);
         for (let i = 0; i < spins; i++) {
             await SpinQueue.create({ 
                 user: user||'Anon', 
@@ -170,7 +157,7 @@ const processNisathonEvent = async (stats, type, user, amount, message, provider
     return earnedNisaballs;
 };
 
-// --- SE AUTH CHECK ---
+// --- AUTH & SYNC ---
 const verifyStreamElements = async () => {
     if (!SE_JWT) { console.error("❌ ERROR: No SE_JWT Configured"); return; }
     try {
@@ -192,23 +179,18 @@ const verifyStreamElements = async () => {
     }
 };
 
-// --- SYNC LOGIC ---
 const updateNisathonStats = async (forceBackfill = false) => {
-    // Guard Clauses with Logging
-    if (!ACTIVE_CHANNEL_ID) { console.log("❌ Sync Aborted: No Channel ID"); return; }
-    if (!SE_JWT) { console.log("❌ Sync Aborted: No JWT"); return; }
-    if (mongoose.connection.readyState !== 1) return;
+    if (!ACTIVE_CHANNEL_ID || !SE_JWT || mongoose.connection.readyState !== 1) return;
 
     try {
         let stats = await NisathonStats.findOne({ key: 'main' });
         if (!stats) stats = await NisathonStats.create({ key: 'main', timerEndTime: new Date(Date.now() + 3*3600000) });
 
-        const limit = forceBackfill ? 100 : 50; // 100 on startup, 50 on poll
+        const limit = forceBackfill ? 100 : 50; 
         const url = `https://api.streamelements.com/kappa/v2/activities/${ACTIVE_CHANNEL_ID}`;
         
         if (forceBackfill) console.log(`📡 Backfilling 100 events from: ${url}`);
 
-        // Fetch from SE
         const { data: activities } = await axios.get(url, {
             headers: { Authorization: `Bearer ${SE_JWT}` },
             params: { limit }, 
@@ -222,83 +204,67 @@ const updateNisathonStats = async (forceBackfill = false) => {
 
         if (forceBackfill) console.log(`📥 Received ${activities.length} items.`);
         
-        // Sort Oldest to Newest
         activities.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
-        
         let newestDate = stats.lastActivityTime;
         let changesMade = false;
 
         for (const act of activities) {
             newestDate = act.createdAt;
             
-            // --- DEBUG: Check for User ---
             if (act.data.username?.toLowerCase() === 'greatrimu') {
                 console.log(`👀 TARGET FOUND: ${act.type} | ${act.data.username} | Tier: ${act.data.tier}`);
             }
 
-            // Map Fields
             let amount = 0;
             let tier = '1000';
-            
             if (['subscriber', 'sub', 'resub', 'subscription'].includes(act.type)) {
                 amount = 1;
                 tier = act.data.tier || '1000';
             } else if (act.type === 'gift') {
                 amount = act.data.amount || 1;
-            } else if (['cheer', 'tip'].includes(act.type)) {
+            } else if (['cheer', 'bits'].includes(act.type)) {
+                amount = act.data.amount;
+            } else if (['tip', 'donation'].includes(act.type)) {
                 amount = act.data.amount;
             } else {
-                continue; // Skip non-monetary events
+                continue; 
             }
 
-            // Process
-            await processNisathonEvent(stats, act.type, act.data.username, amount, act.data.message, act._id, tier);
-            changesMade = true;
+            const nbAdded = await processNisathonEvent(stats, act.type, act.data.username, amount, act.data.message, act._id, tier);
+            if (nbAdded > 0) changesMade = true;
         }
 
-        if (changesMade) {
+        if (changesMade || forceBackfill) {
             if (!forceBackfill) stats.lastActivityTime = newestDate;
             await stats.save();
-            if (forceBackfill) console.log("✅ Backfill Complete.");
+            if (changesMade) console.log("✅ Database Updated.");
         }
-
     } catch (e) {
         console.error("Sync Error:", e.message);
-        if (e.response) console.error("   Details:", e.response.data);
     }
 };
 
 // --- ROUTES ---
-
 app.get('/', (req, res) => res.send('Backend Online'));
 
-// ** NEW DEBUG ROUTES **
-app.get('/api/debug/se-latest', async (req, res) => {
+// ** DEBUG ROUTE ADDED HERE **
+app.get('/api/debug/raw', async (req, res) => {
     if (!ACTIVE_CHANNEL_ID || !SE_JWT) return res.json({ error: "Config Missing" });
     try {
         const { data } = await axios.get(`https://api.streamelements.com/kappa/v2/activities/${ACTIVE_CHANNEL_ID}`, {
             headers: { Authorization: `Bearer ${SE_JWT}` },
             params: { limit: 20 }
         });
-        res.json({ configId: ACTIVE_CHANNEL_ID, count: data.length, data });
-    } catch (e) { res.json({ error: e.message, details: e.response?.data }); }
-});
-
-app.get('/api/debug/user/:username', async (req, res) => {
-    if (!ACTIVE_CHANNEL_ID || !SE_JWT) return res.json({ error: "Config Missing" });
-    try {
-        const { data } = await axios.get(`https://api.streamelements.com/kappa/v2/activities/${ACTIVE_CHANNEL_ID}`, {
-            headers: { Authorization: `Bearer ${SE_JWT}` },
-            params: { limit: 100 }
+        res.json({
+            configId: ACTIVE_CHANNEL_ID,
+            count: data.length,
+            data: data
         });
-        const matches = data.filter(a => a.data.username?.toLowerCase() === req.params.username.toLowerCase());
-        res.json({ found: matches.length, matches });
-    } catch (e) { res.json({ error: e.message }); }
+    } catch (e) { res.json({ error: e.message, details: e.response?.data }); }
 });
 
 app.post('/api/verify', (req, res) => res.json(req.body.password === ADMIN_PASSWORD ? {success:true} : {error:'Invalid'}));
 
-// ** NISATHON ROUTES **
 app.get('/api/nisathon/stats', async (req, res) => {
     if (mongoose.connection.readyState !== 1) return res.json({});
     let stats = await NisathonStats.findOne({ key: 'main' });
@@ -314,9 +280,7 @@ app.get('/api/nisathon/leaderboard', async (req, res) => {
     res.json(lb.map((x, i) => ({ rank: i+1, user: x._id, totalNisaballs: roundOneDecimal(x.total) })));
 });
 
-app.get('/api/nisathon/recent', async (req, res) => {
-    res.json(await NisathonEvent.find().sort({ createdAt: -1 }).limit(10));
-});
+app.get('/api/nisathon/recent', async (req, res) => res.json(await NisathonEvent.find().sort({ createdAt: -1 }).limit(10)));
 
 app.post('/api/nisathon/test-event', async (req, res) => {
     if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).send();
@@ -326,7 +290,7 @@ app.post('/api/nisathon/test-event', async (req, res) => {
     res.json({ success: true });
 });
 
-// ** TIMER CONTROLS **
+// Timer & Event Controls
 app.post('/api/nisathon/timer/set', async (req, res) => {
     if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).send();
     const stats = await NisathonStats.findOne({ key: 'main' });
@@ -358,38 +322,19 @@ app.post('/api/nisathon/event', async (req, res) => {
     await NisathonStats.findOneAndUpdate({ key: 'main' }, { activeEvent: req.body.activeEvent });
     res.json({ success: true });
 });
-
 app.post('/api/nisathon/reset', async (req, res) => {
     if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).send();
     await NisathonEvent.deleteMany({}); await SpinQueue.deleteMany({}); await SpinHistory.deleteMany({});
     await NisathonStats.findOneAndUpdate({ key: 'main' }, { currentSubs: 0, currentBits: 0, currentDonations: 0, totalNisaballs: 0, remainingTimeMs: 0, isPaused: false, activeEvent: null, lastActivityTime: new Date().toISOString() });
     res.json({ success: true });
 });
-
 app.post('/api/nisathon/sync', async (req, res) => {
     if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).send();
     await updateNisathonStats(true);
     res.json({ success: true });
 });
 
-// ** CONTENT API **
-app.get('/api/schedule', async (req, res) => res.json({ url: (await Setting.findOne({ key: 'schedule_url' }))?.value || DEFAULT_SCHEDULE_URL }));
-app.post('/api/schedule', async (req, res) => {
-    if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).send();
-    await Setting.findOneAndUpdate({ key: 'schedule_url' }, { value: req.body.url }, { upsert: true });
-    res.json({ success: true });
-});
-app.get('/api/profile', async (req, res) => {
-    const a = await Setting.findOne({ key: 'profile_about' });
-    const c = await Setting.findOne({ key: 'profile_credits' });
-    const w = await Setting.findOne({ key: 'profile_artworks' });
-    res.json({ about: a?.value||[], credits: c?.value||[], artworks: w?.value||[] });
-});
-app.post('/api/profile', async (req, res) => {
-    if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).send();
-    await Setting.findOneAndUpdate({ key: `profile_${req.body.type}` }, { value: req.body.data }, { upsert: true });
-    res.json({ success: true });
-});
+// Content
 app.get('/api/goals', async (req, res) => res.json({ goals: (await Setting.findOne({ key: 'nisathon_goals' }))?.value }));
 app.post('/api/goals', async (req, res) => {
     if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).send();
@@ -410,16 +355,32 @@ app.post('/api/wheel/spin-result', async (req, res) => {
     if (req.body.queueId) await SpinQueue.findByIdAndDelete(req.body.queueId);
     res.json({ success: true });
 });
-
+app.get('/api/profile', async (req, res) => {
+    const a = await Setting.findOne({ key: 'profile_about' });
+    const c = await Setting.findOne({ key: 'profile_credits' });
+    const w = await Setting.findOne({ key: 'profile_artworks' });
+    res.json({ about: a?.value||[], credits: c?.value||[], artworks: w?.value||[] });
+});
+app.post('/api/profile', async (req, res) => {
+    if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).send();
+    await Setting.findOneAndUpdate({ key: `profile_${req.body.type}` }, { value: req.body.data }, { upsert: true });
+    res.json({ success: true });
+});
+app.get('/api/schedule', async (req, res) => res.json({ url: (await Setting.findOne({ key: 'schedule_url' }))?.value || DEFAULT_SCHEDULE_URL }));
+app.post('/api/schedule', async (req, res) => {
+    if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).send();
+    await Setting.findOneAndUpdate({ key: 'schedule_url' }, { value: req.body.url }, { upsert: true });
+    res.json({ success: true });
+});
 app.post('/api/upload', async (req, res) => {
     const { image } = req.body;
     if (!image) return res.status(400).send();
-    if (CLOUDINARY_CLOUD_NAME) {
+    if (process.env.CLOUDINARY_CLOUD_NAME) {
         try {
             const ts = Math.round(new Date().getTime()/1000);
-            const sig = crypto.createHash('sha1').update(`timestamp=${ts}${CLOUDINARY_API_SECRET}`).digest('hex');
-            const f = new FormData(); f.append('file', `data:image/jpeg;base64,${image}`); f.append('api_key', CLOUDINARY_API_KEY); f.append('timestamp', ts); f.append('signature', sig);
-            const r = await axios.post(`https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/image/upload`, f);
+            const sig = crypto.createHash('sha1').update(`timestamp=${ts}${process.env.CLOUDINARY_API_SECRET}`).digest('hex');
+            const f = new FormData(); f.append('file', `data:image/jpeg;base64,${image}`); f.append('api_key', process.env.CLOUDINARY_API_KEY); f.append('timestamp', ts); f.append('signature', sig);
+            const r = await axios.post(`https://api.cloudinary.com/v1_1/${process.env.CLOUDINARY_CLOUD_NAME}/image/upload`, f);
             return res.json({ success: true, data: { url: r.data.secure_url } });
         } catch (e) { return res.status(500).send(); }
     }
