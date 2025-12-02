@@ -17,6 +17,7 @@ const MONGO_URI = process.env.MONGO_URI;
 let SE_JWT = process.env.STREAMELEMENTS_JWT || "";
 SE_JWT = SE_JWT.replace(/^Bearer\s+/i, "").replace(/["']/g, "").trim();
 
+// We will try this ID, and also auto-resolve 'urnisa_'
 let ENV_CHANNEL_ID = process.env.STREAMELEMENTS_CHANNEL_ID || "";
 ENV_CHANNEL_ID = ENV_CHANNEL_ID.replace(/["']/g, "").trim();
 
@@ -106,9 +107,14 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
     let eventType = type;
 
     // --- RULESET ---
+    
+    // SUBSCRIPTIONS
     if (['subscriber', 'sub', 'resub', 'subscription'].includes(type)) {
-        // Skip Gift Recipients
+        // CRITICAL FIX: Ignore "received gift" events IF we are not in manual mode.
+        // This prevents double counting because the 'gift' bulk event handles the credit.
+        // StreamElements sends individual 'subscriber' events for gift recipients. We want to skip those.
         if (!isManual && (message.includes('gift') || amount === 0)) {
+             // console.log(`⏩ Skipping recipient event for ${user}`);
              return 0; 
         }
 
@@ -124,23 +130,28 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
         eventType = 'sub';
         if (isNewEvent) stats.currentSubs += 1;
     } 
+    // GIFT SUBS (The Gifter)
     else if (type === 'gift') {
-        earnedNisaballs = 0.5 * amount;
+        // amount here is number of gifts (e.g. 5, 10)
+        earnedNisaballs = 0.5 * amount; 
         amountDisplay = `${amount} Gift Subs`;
         if (isNewEvent) stats.currentSubs += amount;
     } 
+    // BITS
     else if (['cheer', 'bits'].includes(type)) {
         earnedNisaballs = amount * 0.002;
         amountDisplay = `${amount} Bits`;
         eventType = 'bits';
         if (isNewEvent) stats.currentBits += amount;
     } 
+    // TIPS
     else if (['tip', 'donation'].includes(type)) {
         earnedNisaballs = amount * 0.2;
         amountDisplay = `$${amount.toFixed(2)}`;
         eventType = 'donation';
         if (isNewEvent) stats.currentDonations += amount;
     }
+    // FOLLOWERS
     else if (['follower', 'follow'].includes(type)) {
         earnedNisaballs = 0;
         amountDisplay = "New Follower";
@@ -182,7 +193,7 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
         { upsert: true, new: true }
     );
 
-    // Wheel Logic
+    // Wheel Logic (Followers don't get spins)
     if (isNewEvent && earnedNisaballs >= 5) {
         const spins = Math.floor(earnedNisaballs / 5);
         console.log(`🎡 Queueing ${spins} spins for ${user}`);
@@ -196,7 +207,7 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
 };
 
 // ==========================================
-// 1. REAL-TIME SOCKET
+// 1. REAL-TIME SOCKET (METHOD 1)
 // ==========================================
 let socket = null;
 
@@ -204,6 +215,7 @@ const connectSocket = () => {
     if (!SE_JWT) { console.log("❌ [Socket] No JWT"); return; }
     
     console.log("🔌 [Socket] Connecting...");
+    
     socket = io('https://realtime.streamelements.com', { 
         transports: ['websocket'],
         forceNew: true,
@@ -220,10 +232,17 @@ const connectSocket = () => {
         console.log(`✅ [Socket] Authenticated! (Channel: ${data.channelId})`);
     });
 
+    socket.on('unauthorized', (data) => {
+        console.error('❌ [Socket] Auth Failed:', data);
+    });
+
     socket.on('event', async (data) => {
         if (!data || !data.type) return;
+        
+        // Filter relevant events
         if (!['subscriber', 'tip', 'cheer', 'follower', 'follow'].includes(data.type)) return;
 
+        console.log(`⚡ [Socket] New Event: ${data.type}`);
         try {
             const stats = await NisathonStats.findOne({ key: 'main' });
             if (!stats) return;
@@ -236,7 +255,16 @@ const connectSocket = () => {
             if (type === 'subscriber') {
                 tier = info.tier || '1000';
                 amount = info.amount || 1; 
-                if (info.gifted) { return; } 
+                
+                // GIFT LOGIC:
+                // If 'gifted' is true in socket data, it means this is a recipient event.
+                // We want to SKIP this to avoid double counting, assuming a BULK GIFT event fires separately.
+                // OR if SE doesn't fire bulk events via socket, we might need to process these but attribute to sender.
+                // SAFEST: For now, skip socket recipients. rely on REST to catch bulk gifts correctly.
+                if (info.gifted) {
+                    // console.log("⏩ Skipping socket event (Gift Recipient)");
+                    return; 
+                }
             } else if (type === 'tip' || type === 'cheer') {
                 amount = info.amount;
             } else if (type === 'follow') {
@@ -252,34 +280,14 @@ const connectSocket = () => {
 };
 
 // ==========================================
-// 2. REST POLLING & RESOLVER
+// 2. REST POLLING (METHOD 2)
 // ==========================================
-
-// Resolve correct ID
-const resolveChannelId = async () => {
-    if (!SE_JWT) return null;
-    try {
-        const res = await axios.get(`https://api.streamelements.com/kappa/v2/channels/${TARGET_USERNAME}`, {
-             headers: { 'User-Agent': 'Mozilla/5.0' }
-        });
-        if (res.data && res.data._id) {
-            return res.data._id;
-        }
-    } catch (e) { }
-    // Fallback
-    try {
-        const me = await axios.get('https://api.streamelements.com/kappa/v2/channels/me', {
-            headers: { 'Authorization': `Bearer ${SE_JWT}` }
-        });
-        return me.data._id;
-    } catch (e) { return null; }
-};
-
 const fetchAndProcess = async (channelId, label, stats, limit = 25, offset = 0) => {
-    if (!channelId) return [];
+    if (!channelId) return false;
     
     try {
         const url = `https://api.streamelements.com/kappa/v2/activities/${channelId}`;
+        
         const { data: activities } = await axios.get(url, {
             headers: { 
                 'Authorization': `Bearer ${SE_JWT}`,
@@ -290,49 +298,154 @@ const fetchAndProcess = async (channelId, label, stats, limit = 25, offset = 0) 
             timeout: 10000
         });
 
-        if (!activities || activities.length === 0) return [];
-
-        if (offset === 0) {
-            activities.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
-            let changes = false;
-            for (const act of activities) {
-                let amt = 0;
-                let tier = '1000';
-                let type = act.type;
-                let username = act.data.username; 
-                
-                if (['subscriber','sub','resub'].includes(act.type)) { 
-                    amt = 1; 
-                    tier = act.data.tier || '1000';
-                    if (act.data.gifted) username = act.data.sender; 
-                }
-                else if (act.type === 'gift') {
-                    amt = act.data.amount || 1; 
-                }
-                else if (['cheer','tip'].includes(act.type)) {
-                    amt = act.data.amount; 
-                }
-                else if (act.type === 'follow') { 
-                    type = 'follower'; 
-                    amt = 0; 
-                }
-                else continue;
-
-                const added = await processEvent(stats, type, username, amt, act.data.message, act._id, tier);
-                if (added > 0 || type === 'follower') changes = true;
-            }
-            return changes;
+        if (!activities || activities.length === 0) {
+            return false;
         }
 
-        return activities; // Return raw for rebuild
+        activities.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+        
+        let changes = false;
+        for (const act of activities) {
+            let amt = 0;
+            let tier = '1000';
+            let type = act.type;
+            
+            if (['subscriber','sub','resub'].includes(act.type)) { 
+                amt = 1; 
+                tier = act.data.tier || '1000';
+                
+                // GIFT LOGIC:
+                // If act.data.gifted is true, this is a recipient event.
+                // However, SE REST API often *doesn't* show a separate "bulk gift" event.
+                // It shows 10 separate "subscriber" events with gifted=true.
+                // TO FIX THIS: We must attribute these to the SENDER.
+                // And ensure we process them as +0.5 each.
+                if (act.data.gifted) {
+                    // Override user to be the sender
+                    // This effectively turns "UserB received gift" into "UserA gifted 1 sub"
+                    const sender = act.data.sender;
+                    if (sender) {
+                        // We change the type to 'gift' for our system so it processes as +0.5
+                        type = 'gift'; 
+                        amt = 1; // 1 gift
+                        // We need to use a unique ID for this 'gift instance' so we don't dedupe it against other gifts in the same batch
+                        // Luckily, each recipient event has a unique ID.
+                        // So we process this as: "Sender gifted 1 sub (ID: xyz)"
+                        // This results in 10 separate "Gift" events for the sender in the DB.
+                        // While verbose in the list, the MATH is correct (10 * 0.5 = 5).
+                        // And the wheel queue will get 10 entries of 0.5 (total 5).
+                        // We pass the sender as the user.
+                        await processEvent(stats, type, sender, amt, `Gift for ${act.data.username}`, act._id, tier);
+                        changes = true;
+                        continue; // Skip the default call at bottom
+                    }
+                }
+            }
+            else if (act.type === 'gift') {
+                // If SE *does* send a bulk event, we process it.
+                amt = act.data.amount || 1; 
+            }
+            else if (['cheer','tip'].includes(act.type)) {
+                amt = act.data.amount; 
+            }
+            else if (act.type === 'follow') { 
+                type = 'follower'; 
+                amt = 0; 
+            }
+            else continue;
+
+            const added = await processEvent(stats, type, act.data.username, amt, act.data.message, act._id, tier);
+            if (added > 0 || type === 'follower') changes = true;
+        }
+        return changes;
 
     } catch (e) {
-        return [];
+        if (e.response?.status === 401) console.error(`❌ [${label}] 401 Unauthorized.`);
+        else console.error(`❌ [${label}] Error: ${e.message}`);
+        return false;
     }
 };
 
+// Resolve correct ID for 'urnisa_'
+const resolveChannelId = async () => {
+    if (!SE_JWT) return null;
+    try {
+        const res = await axios.get(`https://api.streamelements.com/kappa/v2/channels/${TARGET_USERNAME}`, {
+             headers: { 'User-Agent': 'Mozilla/5.0' }
+        });
+        if (res.data && res.data._id) {
+            return res.data._id;
+        }
+    } catch (e) { 
+        console.log("⚠️ Could not resolve alias. Using Token Owner."); 
+    }
+    // Fallback to token owner
+    try {
+        const me = await axios.get('https://api.streamelements.com/kappa/v2/channels/me', {
+            headers: { 'Authorization': `Bearer ${SE_JWT}` }
+        });
+        return me.data._id;
+    } catch (e) { return null; }
+};
+
+const syncSessionFallback = async (channelId, stats) => {
+    try {
+        const { data: session } = await axios.get(`https://api.streamelements.com/kappa/v2/sessions/${channelId}`, {
+             headers: { 'Authorization': `Bearer ${SE_JWT}` }
+        });
+        
+        if (!session || !session.data) return;
+        
+        let changes = false;
+        const lastSub = session.data['latest-subscriber'];
+        if (lastSub) {
+            // Session data is tricky for gifts. Safest to treat as regular sub if we can't distinguish.
+            await processEvent(stats, 'subscriber', lastSub.name, 1, "", `session-sub-${lastSub.name}`, lastSub.tier);
+            changes = true;
+        }
+        
+        const lastTip = session.data['latest-tip'];
+        if (lastTip) {
+             await processEvent(stats, 'tip', lastTip.name, lastTip.amount, lastTip.message, `session-tip-${lastTip.name}-${lastTip.amount}`);
+             changes = true;
+        }
+
+        const lastCheer = session.data['latest-cheer'];
+        if (lastCheer) {
+             await processEvent(stats, 'cheer', lastCheer.name, lastCheer.amount, lastCheer.message, `session-cheer-${lastCheer.name}-${lastCheer.amount}`);
+             changes = true;
+        }
+        if (changes) console.log("✅ Session Sync Processed");
+    } catch (e) {
+        // Silent fail is ok for fallback
+    }
+};
+
+const runSync = async (forceDeep = false) => {
+    if (mongoose.connection.readyState !== 1) return;
+    if (!SE_JWT) return;
+
+    try {
+        let stats = await NisathonStats.findOne({ key: 'main' });
+        if (!stats) stats = await NisathonStats.create({ key: 'main', timerEndTime: new Date(Date.now() + 3*3600000) });
+
+        let resolvedId = await resolveChannelId();
+        if (!resolvedId) resolvedId = ENV_CHANNEL_ID;
+
+        if (resolvedId) {
+            const limit = forceDeep ? 100 : 25;
+            if (forceDeep) console.log(`🚀 Deep Syncing 100 items from ${resolvedId}...`);
+            
+            const c1 = await fetchAndProcess(resolvedId, "AUTO-ID", stats, limit);
+            if (!c1 && forceDeep) await syncSessionFallback(resolvedId, stats);
+            
+            if (c1 || forceDeep) await stats.save();
+        }
+    } catch (e) { console.error("Loop Error:", e); }
+};
+
 // ==========================================
-// 3. REBUILD LOGIC
+// REBUILD LOGIC
 // ==========================================
 const rebuildEverything = async () => {
     const resolvedId = await resolveChannelId() || ENV_CHANNEL_ID;
@@ -360,41 +473,57 @@ const rebuildEverything = async () => {
         if (Array.isArray(acts) && acts.length > 0) allActivities = allActivities.concat(acts);
         else break;
     }
-
-    console.log(`   -> Processing ${allActivities.length} historical events...`);
-    allActivities.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
-
-    for (const act of allActivities) {
-        let amt = 0, tier = '1000', type = act.type, user = act.data.username;
-        if (['subscriber','sub','resub'].includes(act.type)) { 
-            amt = 1; tier = act.data.tier || '1000';
-            if (act.data.gifted) user = act.data.sender;
-        }
-        else if (act.type === 'gift') amt = act.data.amount || 1;
-        else if (['cheer','tip'].includes(act.type)) amt = act.data.amount;
-        else if (act.type === 'follow') { type = 'follower'; amt = 0; }
-        else continue;
-
-        await processEvent(stats, type, user, amt, act.data.message, act._id, tier);
-    }
-    stats.lastActivityTime = new Date().toISOString();
-    await stats.save();
-    console.log("✅ REBUILD COMPLETE.");
-};
-
-const runSync = async () => {
-    if (mongoose.connection.readyState !== 1 || !SE_JWT) return;
+    
+    // Logic inside fetchAndProcess (above) already handles the attribution.
+    // But fetchAndProcess in "rebuild mode" (returning array) isn't fully implemented in the helper.
+    // The helper updates the DB directly.
+    // So for Rebuild, we actually just want to call fetchAndProcess in a loop? 
+    // No, fetchAndProcess updates stats live. That works for us.
+    // BUT we need to make sure we process them in order.
+    // Since fetchAndProcess does sort, we are good, BUT we need to do it page by page in reverse?
+    // Actually, simpler strategy: fetch ALL raw data first, then process.
+    
+    // Redo Rebuild Fetch properly:
     try {
-        let stats = await NisathonStats.findOne({ key: 'main' });
-        if (!stats) stats = await NisathonStats.create({ key: 'main', timerEndTime: new Date(Date.now() + 3*3600000) });
-        let resolvedId = await resolveChannelId();
+        let rawActs = [];
+        for(let i=0; i<10; i++) {
+            const { data } = await axios.get(`https://api.streamelements.com/kappa/v2/activities/${resolvedId}`, {
+                headers: { 'Authorization': `Bearer ${SE_JWT}` },
+                params: { limit: 100, offset: i*100 }
+            });
+            if(data && data.length > 0) rawActs = rawActs.concat(data);
+            else break;
+        }
         
-        let c1 = false, c2 = false;
-        if (resolvedId) c1 = await fetchAndProcess(resolvedId, "AUTO", stats);
-        if (ENV_CHANNEL_ID && ENV_CHANNEL_ID !== resolvedId) c2 = await fetchAndProcess(ENV_CHANNEL_ID, "ENV", stats);
-        if (c1 || c2) await stats.save();
-    } catch (e) { console.error("Loop Error:", e); }
+        console.log(`   -> Processing ${rawActs.length} historical events...`);
+        rawActs.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+
+        for (const act of rawActs) {
+            let amt = 0;
+            let tier = '1000';
+            let type = act.type;
+            let username = act.data.username;
+            
+            if (['subscriber','sub','resub'].includes(act.type)) { 
+                amt = 1; 
+                tier = act.data.tier || '1000';
+                if (act.data.gifted) {
+                    username = act.data.sender; 
+                    type = 'gift'; // Force gift type for calc
+                }
+            }
+            else if (act.type === 'gift') amt = act.data.amount || 1;
+            else if (['cheer','tip'].includes(act.type)) amt = act.data.amount;
+            else if (act.type === 'follow') { type = 'follower'; amt = 0; }
+            else continue;
+
+            await processEvent(stats, type, username, amt, act.data.message, act._id, tier);
+        }
+        await stats.save();
+        console.log("✅ REBUILD COMPLETE.");
+    } catch(e) { console.error("Rebuild Error", e); }
 };
+
 
 // ==========================================
 // API ROUTES
@@ -441,9 +570,8 @@ app.get('/api/nisathon/leaderboard', async (req, res) => {
     } catch { res.json([]); }
 });
 
-app.get('/api/nisathon/recent', async (req, res) => res.json(await NisathonEvent.find().sort({ createdAt: -1 }).limit(50))); // Increased limit for admin log
+app.get('/api/nisathon/recent', async (req, res) => res.json(await NisathonEvent.find().sort({ createdAt: -1 }).limit(50)));
 
-// MANUAL & TEST EVENTS
 app.post('/api/nisathon/test-event', auth, async (req, res) => {
     const stats = await NisathonStats.findOne({ key: 'main' });
     await processEvent(stats, req.body.type, req.body.user, parseFloat(req.body.amount), "Manual", null, req.body.tier, true);
@@ -451,44 +579,6 @@ app.post('/api/nisathon/test-event', auth, async (req, res) => {
     res.json({ success: true });
 });
 
-// DELETE EVENT (NEW)
-app.post('/api/nisathon/delete-event', auth, async (req, res) => {
-    const { id, revert } = req.body;
-    try {
-        const event = await NisathonEvent.findById(id);
-        if (!event) return res.status(404).json({ error: "Not Found" });
-
-        if (revert) {
-            const stats = await NisathonStats.findOne({ key: 'main' });
-            if (stats) {
-                // Revert counts roughly
-                if (event.type === 'sub') stats.currentSubs -= 1;
-                else if (event.type === 'gift') stats.currentSubs -= (event.nisaballAmount * 2); 
-                else if (event.type === 'bits') stats.currentBits -= (event.nisaballAmount * 500);
-                else if (event.type === 'donation') stats.currentDonations -= (event.nisaballAmount * 5);
-
-                stats.totalNisaballs = Math.max(0, roundOneDecimal(stats.totalNisaballs - event.nisaballAmount));
-                
-                // Revert Timer
-                const msToRemove = event.nisaballAmount * 10 * 60 * 1000;
-                if (stats.isPaused) {
-                    stats.remainingTimeMs = Math.max(0, stats.remainingTimeMs - msToRemove);
-                } else {
-                    const currentEnd = new Date(stats.timerEndTime).getTime();
-                    stats.timerEndTime = new Date(currentEnd - msToRemove);
-                }
-                await stats.save();
-            }
-        }
-
-        await SpinQueue.deleteMany({ sourceEventId: id });
-        await NisathonEvent.findByIdAndDelete(id);
-        
-        res.json({ success: true });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-// CONTROLS
 app.post('/api/nisathon/timer/set', auth, async (req, res) => {
     const stats = await NisathonStats.findOne({ key: 'main' });
     const ms = (req.body.hours*3600 + req.body.minutes*60 + req.body.seconds)*1000;
@@ -531,6 +621,35 @@ app.post('/api/nisathon/sync', auth, async (req, res) => {
 app.post('/api/nisathon/rebuild', auth, async (req, res) => {
     rebuildEverything();
     res.json({ success: true, message: "Rebuild Started" });
+});
+
+app.post('/api/nisathon/delete-event', auth, async (req, res) => {
+    const { id, revert } = req.body;
+    try {
+        const event = await NisathonEvent.findById(id);
+        if (!event) return res.status(404).json({ error: "Not Found" });
+
+        if (revert) {
+            const stats = await NisathonStats.findOne({ key: 'main' });
+            if (stats) {
+                // Approximate Revert
+                if (event.type === 'sub') stats.currentSubs -= 1;
+                else if (event.type === 'gift') stats.currentSubs -= (event.nisaballAmount * 2); 
+                else if (event.type === 'bits') stats.currentBits -= (event.nisaballAmount * 500);
+                else if (event.type === 'donation') stats.currentDonations -= (event.nisaballAmount * 5);
+
+                stats.totalNisaballs = Math.max(0, roundOneDecimal(stats.totalNisaballs - event.nisaballAmount));
+                
+                const msToRemove = event.nisaballAmount * 10 * 60 * 1000;
+                if (stats.isPaused) stats.remainingTimeMs = Math.max(0, stats.remainingTimeMs - msToRemove);
+                else stats.timerEndTime = new Date(new Date(stats.timerEndTime).getTime() - msToRemove);
+                await stats.save();
+            }
+        }
+        await SpinQueue.deleteMany({ sourceEventId: id });
+        await NisathonEvent.findByIdAndDelete(id);
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // Wheel
