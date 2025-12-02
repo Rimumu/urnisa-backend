@@ -16,7 +16,7 @@ SE_JWT = SE_JWT.replace(/^Bearer\s+/i, "").replace(/["']/g, "").trim();
 
 // We will overwrite this with the auto-resolved ID
 let SE_CHANNEL_ID = process.env.STREAMELEMENTS_CHANNEL_ID || "";
-const TARGET_USERNAME = 'urnisa_'; // HARDCODED TARGET TO FIX CONFIG ISSUES
+const TARGET_USERNAME = 'urnisa_'; 
 
 const CLOUDINARY_CLOUD_NAME = process.env.CLOUDINARY_CLOUD_NAME;
 const CLOUDINARY_API_KEY = process.env.CLOUDINARY_API_KEY;
@@ -24,7 +24,6 @@ const CLOUDINARY_API_SECRET = process.env.CLOUDINARY_API_SECRET;
 const IMGBB_API_KEY = process.env.IMGBB_API_KEY || process.env.VITE_IMGBB_API_KEY;
 const DEFAULT_SCHEDULE_URL = 'https://cdn.discordapp.com/attachments/1338254150479118347/1439859590152978443/3_am_17.png';
 
-// --- APP SETUP ---
 const app = express();
 app.use(express.json({ limit: '50mb' }));
 app.use(cors({ origin: '*' }));
@@ -166,7 +165,10 @@ const resolveChannelId = async () => {
     }
     try {
         console.log(`🔍 Resolving Account ID for username: '${TARGET_USERNAME}'...`);
-        const response = await axios.get(`https://api.streamelements.com/kappa/v2/channels/${TARGET_USERNAME}`);
+        // Add User-Agent to look like a browser
+        const response = await axios.get(`https://api.streamelements.com/kappa/v2/channels/${TARGET_USERNAME}`, {
+             headers: { 'User-Agent': 'Mozilla/5.0' }
+        });
         
         if (response.data && response.data._id) {
             const realId = response.data._id;
@@ -176,7 +178,6 @@ const resolveChannelId = async () => {
         }
     } catch (e) {
         console.error(`❌ Failed to resolve ID: ${e.message}`);
-        // Fallback to trying the 'me' endpoint if the alias lookup fails (maybe token is for that user?)
         try {
             const meRes = await axios.get('https://api.streamelements.com/kappa/v2/channels/me', {
                 headers: { Authorization: `Bearer ${SE_JWT}` }
@@ -191,13 +192,55 @@ const resolveChannelId = async () => {
     return false;
 };
 
+// --- FALLBACK: SESSION SYNC ---
+// Fetches "Latest" items from the session if activity list is empty
+const syncSessionFallback = async (stats) => {
+    try {
+        console.log(`⚡ Running Session Fallback (Latest Events Check)...`);
+        const { data: session } = await axios.get(`https://api.streamelements.com/kappa/v2/sessions/${SE_CHANNEL_ID}`, {
+             headers: { 'Authorization': `Bearer ${SE_JWT}`, 'User-Agent': 'Mozilla/5.0' }
+        });
+        
+        if (!session.data) return;
+        
+        // Create synthetic IDs for session data so we don't add them duplicates if they don't change
+        // We use the 'name' and 'createdAt' (if avail) or just 'name' if SE doesn't provide time
+        // NOTE: Session data from SE often lacks a timestamp, so this is a best-effort "Latest" display.
+        
+        // Latest Subscriber
+        const lastSub = session.data['latest-subscriber'];
+        if (lastSub) {
+            // We use a pseudo-ID. If user subs again, name is same. This is a limitation of Fallback.
+            // But better than nothing.
+            await processEvent(stats, 'subscriber', lastSub.name, 1, "", `session-sub-${lastSub.name}`, lastSub.tier);
+        }
+        
+        // Latest Tip
+        const lastTip = session.data['latest-tip'];
+        if (lastTip) {
+             await processEvent(stats, 'tip', lastTip.name, lastTip.amount, lastTip.message, `session-tip-${lastTip.name}-${lastTip.amount}`);
+        }
+
+        // Latest Cheer
+        const lastCheer = session.data['latest-cheer'];
+        if (lastCheer) {
+             await processEvent(stats, 'cheer', lastCheer.name, lastCheer.amount, lastCheer.message, `session-cheer-${lastCheer.name}-${lastCheer.amount}`);
+        }
+
+        console.log("✅ Session Fallback Processed");
+
+    } catch (e) {
+        console.error("Session Fallback Failed:", e.message);
+    }
+};
+
 // --- STREAMELEMENTS SYNC ---
 const syncStreamElements = async (stats, limit = 50) => {
     if (!SE_JWT || !SE_CHANNEL_ID) return false;
 
     try {
         const response = await axios.get(`https://api.streamelements.com/kappa/v2/activities/${SE_CHANNEL_ID}`, {
-            headers: { 'Authorization': `Bearer ${SE_JWT}` },
+            headers: { 'Authorization': `Bearer ${SE_JWT}`, 'User-Agent': 'Mozilla/5.0' },
             params: { limit },
             timeout: 10000
         });
@@ -205,12 +248,13 @@ const syncStreamElements = async (stats, limit = 50) => {
         const activities = response.data;
         if (!activities || activities.length === 0) {
             console.log(`⚠️ [SE] No activities found for ID: ${SE_CHANNEL_ID}`);
+            // TRIGGER FALLBACK
+            await syncSessionFallback(stats);
             return false;
         }
 
         activities.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
         
-        // LOG NEWEST FOR DEBUG
         const newest = activities[activities.length - 1];
         console.log(`📡 [SE] Poll OK. Newest: ${newest.type} by ${newest.data.username}`);
 
@@ -244,6 +288,8 @@ const syncStreamElements = async (stats, limit = 50) => {
         return changesMade;
     } catch (e) {
         console.error(`❌ [SE] Sync Error: ${e.response?.status || e.message}`);
+        // Try fallback on error too
+        await syncSessionFallback(stats);
         return false;
     }
 };
