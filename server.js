@@ -5,7 +5,9 @@ const mongoose = require('mongoose');
 const crypto = require('crypto');
 require('dotenv').config();
 
-// --- CONFIGURATION ---
+// ==========================================
+// CONFIGURATION & SETUP
+// ==========================================
 const PORT = process.env.PORT || 3001;
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "admin";
 const MONGO_URI = process.env.MONGO_URI;
@@ -14,42 +16,55 @@ const MONGO_URI = process.env.MONGO_URI;
 let SE_JWT = process.env.STREAMELEMENTS_JWT || "";
 SE_JWT = SE_JWT.replace(/^Bearer\s+/i, "").replace(/["']/g, "").trim();
 
-// Initial ID from Env (Might be wrong, we will correct it)
 let SE_CHANNEL_ID = process.env.STREAMELEMENTS_CHANNEL_ID || "";
 SE_CHANNEL_ID = SE_CHANNEL_ID.replace(/["']/g, "").trim();
 
-const TARGET_USERNAME = 'urnisa_'; 
+const TARGET_USERNAME = 'urnisa_'; // Hardcoded target for auto-resolution
 
+// Twitch Config (Optional Hybrid)
+const TWITCH_CLIENT_ID = process.env.TWITCH_CLIENT_ID;
+const TWITCH_CLIENT_SECRET = process.env.TWITCH_CLIENT_SECRET;
+
+// Image Hosting
 const CLOUDINARY_CLOUD_NAME = process.env.CLOUDINARY_CLOUD_NAME;
 const CLOUDINARY_API_KEY = process.env.CLOUDINARY_API_KEY;
 const CLOUDINARY_API_SECRET = process.env.CLOUDINARY_API_SECRET;
 const IMGBB_API_KEY = process.env.IMGBB_API_KEY || process.env.VITE_IMGBB_API_KEY;
 
+const DEFAULT_SCHEDULE_URL = 'https://cdn.discordapp.com/attachments/1338254150479118347/1439859590152978443/3_am_17.png';
+
 const app = express();
 app.use(express.json({ limit: '50mb' }));
 app.use(cors({ origin: '*' }));
 
-console.log("--- URNISA BACKEND REBOOTING (AUTO-FIX MODE) ---");
+console.log("--- URNISA BACKEND REBOOTING ---");
 
-// --- SCHEMAS ---
-const SettingSchema = new mongoose.Schema({ key: { type: String, unique: true }, value: mongoose.Schema.Types.Mixed });
-const Setting = mongoose.model('Setting', SettingSchema);
+// ==========================================
+// DATABASE SCHEMAS
+// ==========================================
+if (MONGO_URI) {
+    mongoose.set('strictQuery', false);
+    mongoose.connect(MONGO_URI)
+        .then(() => console.log("✅ MongoDB Connected"))
+        .catch(e => console.error("❌ MongoDB Error:", e));
+}
 
-const NisathonStatsSchema = new mongoose.Schema({
+const Setting = mongoose.model('Setting', new mongoose.Schema({ key: { type: String, unique: true }, value: mongoose.Schema.Types.Mixed }));
+
+const NisathonStats = mongoose.model('NisathonStats', new mongoose.Schema({
     key: { type: String, default: 'main', unique: true },
     currentSubs: { type: Number, default: 0 },
     currentBits: { type: Number, default: 0 },
     currentDonations: { type: Number, default: 0 },
-    totalNisaballs: { type: Number, default: 0 }, 
+    totalNisaballs: { type: Number, default: 0 },
     timerEndTime: { type: Date, default: Date.now },
     remainingTimeMs: { type: Number, default: 0 },
     isPaused: { type: Boolean, default: false },
     activeEvent: { type: String, default: null },
     lastActivityTime: { type: String, default: new Date().toISOString() }
-});
-const NisathonStats = mongoose.model('NisathonStats', NisathonStatsSchema);
+}));
 
-const NisathonEventSchema = new mongoose.Schema({
+const NisathonEvent = mongoose.model('NisathonEvent', new mongoose.Schema({
     providerId: { type: String, unique: true },
     user: { type: String, required: true },
     type: { type: String, required: true },
@@ -57,26 +72,26 @@ const NisathonEventSchema = new mongoose.Schema({
     message: String,
     nisaballAmount: { type: Number, default: 0 },
     createdAt: { type: Date, default: Date.now }
-});
-const NisathonEvent = mongoose.model('NisathonEvent', NisathonEventSchema);
+}));
 
-const SpinQueueSchema = new mongoose.Schema({
+const SpinQueue = mongoose.model('SpinQueue', new mongoose.Schema({
     user: String, sourceEventId: String, nisaballs: Number, createdAt: { type: Date, default: Date.now }
-});
-const SpinQueue = mongoose.model('SpinQueue', SpinQueueSchema);
+}));
 
-const SpinHistorySchema = new mongoose.Schema({
+const SpinHistory = mongoose.model('SpinHistory', new mongoose.Schema({
     user: String, reward: String, timestamp: { type: Date, default: Date.now }
-});
-const SpinHistory = mongoose.model('SpinHistory', SpinHistorySchema);
+}));
 
 const roundOneDecimal = (num) => Math.round(num * 10) / 10;
 
-// --- EVENT PROCESSOR ---
+// ==========================================
+// CORE LOGIC
+// ==========================================
+
 const processEvent = async (stats, type, user, amount, message, providerId, tier = '1000', isManual = false) => {
     let isNewEvent = true;
 
-    // Deduplicate
+    // Check duplicates (unless manual override)
     if (providerId && !isManual) {
         const existing = await NisathonEvent.findOne({ providerId });
         if (existing) isNewEvent = false;
@@ -86,7 +101,7 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
     let amountDisplay = "";
     let eventType = type;
 
-    // Rules
+    // --- RULESET ---
     if (['subscriber', 'sub', 'resub', 'subscription'].includes(type)) {
         let tVal = 0.5;
         let tLbl = "Tier 1";
@@ -118,7 +133,7 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
         if (isNewEvent) stats.currentDonations += amount;
     }
 
-    // Update Stats
+    // Update Stats & Timer
     if (isNewEvent) {
         stats.totalNisaballs = roundOneDecimal(stats.totalNisaballs + earnedNisaballs);
         const mult = stats.activeEvent === 'DOUBLE_TIMER' ? 2 : 1;
@@ -133,7 +148,7 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
         }
     }
 
-    // DB Upsert
+    // Save Event
     const eventData = {
         providerId: providerId || `sim-${Date.now()}`,
         user: user || 'Anonymous',
@@ -151,7 +166,7 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
         { upsert: true, new: true }
     );
 
-    // Wheel Queue
+    // Wheel Logic
     if (isNewEvent && earnedNisaballs >= 5) {
         const spins = Math.floor(earnedNisaballs / 5);
         console.log(`🎡 Queueing ${spins} spins for ${user}`);
@@ -160,12 +175,13 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
         }
     }
     
-    if (isNewEvent) console.log(`✅ SAVED EVENT: ${user} (${eventType})`);
     return earnedNisaballs;
 };
 
-// --- CRITICAL FIX: RESOLVE REAL ID ---
-const forceResolveChannelId = async () => {
+// ==========================================
+// HELPERS: ID RESOLUTION (The Fix for 0 Events)
+// ==========================================
+const resolveChannelId = async () => {
     if (!SE_JWT) {
         console.error("❌ NO JWT FOUND. CANNOT RESOLVE ID.");
         return false;
@@ -186,8 +202,8 @@ const forceResolveChannelId = async () => {
             
             if (SE_CHANNEL_ID !== realId) {
                 console.log(`⚠️ CONFIG MISMATCH DETECTED!`);
-                console.log(`   Configured ID: ${SE_CHANNEL_ID}`);
-                console.log(`   REAL ID:       ${realId}`);
+                console.log(`   Configured: ${SE_CHANNEL_ID}`);
+                console.log(`   REAL ID:    ${realId}`);
                 console.log(`✅ SWITCHING TO REAL ID...`);
                 SE_CHANNEL_ID = realId;
             } else {
@@ -197,70 +213,39 @@ const forceResolveChannelId = async () => {
         }
     } catch (e) {
         console.error(`❌ Failed to resolve ID for ${TARGET_USERNAME}: ${e.message}`);
-        console.error("   -> Ensure the username 'urnisa_' is correct and StreamElements page is public.");
+        // Fallback: Use Token Owner ID if alias lookup fails
+        try {
+            const meRes = await axios.get('https://api.streamelements.com/kappa/v2/channels/me', {
+                headers: { Authorization: `Bearer ${SE_JWT}` }
+            });
+            if (meRes.data._id) {
+                console.log(`⚠️ Alias failed, using Token Owner ID: ${meRes.data._id}`);
+                SE_CHANNEL_ID = meRes.data._id;
+                return true;
+            }
+        } catch (e2) {}
     }
     return false;
 };
 
-// --- FALLBACK: SESSION SYNC ---
-const syncSessionFallback = async (stats) => {
-    try {
-        console.log(`⚡ Checking Session Data (Live Fallback)...`);
-        const { data: session } = await axios.get(`https://api.streamelements.com/kappa/v2/sessions/${SE_CHANNEL_ID}`, {
-             headers: { 'Authorization': `Bearer ${SE_JWT}` }
-        });
-        
-        if (!session) {
-             console.log("❌ Session API returned null.");
-             return;
-        }
-        
-        // Log what we see in session
-        // console.log("Session Keys:", Object.keys(session));
-
-        // Check specific keys SE uses
-        const lastSub = session['latest-subscriber'];
-        if (lastSub) {
-            console.log(`   -> Found Session Sub: ${lastSub.name}`);
-            await processEvent(stats, 'subscriber', lastSub.name, 1, "", `session-sub-${lastSub.name}`, lastSub.tier);
-        }
-        
-        const lastTip = session['latest-tip'];
-        if (lastTip) {
-             console.log(`   -> Found Session Tip: ${lastTip.name} ($${lastTip.amount})`);
-             await processEvent(stats, 'tip', lastTip.name, lastTip.amount, lastTip.message, `session-tip-${lastTip.name}-${lastTip.amount}`);
-        }
-
-        const lastCheer = session['latest-cheer'];
-        if (lastCheer) {
-             console.log(`   -> Found Session Cheer: ${lastCheer.name} (${lastCheer.amount})`);
-             await processEvent(stats, 'cheer', lastCheer.name, lastCheer.amount, lastCheer.message, `session-cheer-${lastCheer.name}-${lastCheer.amount}`);
-        }
-
-    } catch (e) {
-        console.error("Session Fallback Error:", e.message);
-    }
-};
-
-// --- STREAMELEMENTS SYNC ---
+// ==========================================
+// PROVIDER 1: STREAMELEMENTS
+// ==========================================
 const syncStreamElements = async (stats, limit = 50) => {
     if (!SE_JWT || !SE_CHANNEL_ID) return false;
 
     try {
-        const response = await axios.get(`https://api.streamelements.com/kappa/v2/activities/${SE_CHANNEL_ID}`, {
-            headers: { 'Authorization': `Bearer ${SE_JWT}` },
+        const config = {
+            headers: { 'Authorization': `Bearer ${SE_JWT}`, 'Accept': 'application/json' },
             params: { limit },
             timeout: 10000
-        });
+        };
 
+        const url = `https://api.streamelements.com/kappa/v2/activities/${SE_CHANNEL_ID}`;
+        const response = await axios.get(url, config);
         const activities = response.data;
-        
-        // If empty, force session fallback immediately
-        if (!activities || activities.length === 0) {
-            console.log(`⚠️ [SE] Activity Feed Empty for ${SE_CHANNEL_ID}`);
-            await syncSessionFallback(stats);
-            return false;
-        }
+
+        if (!activities || activities.length === 0) return false;
 
         // Sort Oldest -> Newest
         activities.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
@@ -274,7 +259,6 @@ const syncStreamElements = async (stats, limit = 50) => {
             let amount = 0;
             let tier = '1000';
             const type = act.type;
-            const user = act.data.username;
 
             if (['subscriber', 'sub', 'resub', 'subscription'].includes(type)) {
                 amount = 1;
@@ -287,19 +271,22 @@ const syncStreamElements = async (stats, limit = 50) => {
                 continue;
             }
 
-            const added = await processEvent(stats, type, user, amount, act.data.message, act._id, tier);
+            const added = await processEvent(stats, type, act.data.username, amount, act.data.message, act._id, tier);
             if (added > 0) changesMade = true;
         }
 
         stats.lastActivityTime = newestDate;
         return changesMade;
+
     } catch (e) {
-        console.error(`❌ [SE] Sync Error: ${e.response?.status || e.message}`);
+        console.error(`❌ SE Sync Failed: ${e.message}`);
         return false;
     }
 };
 
-// --- MAIN LOOP ---
+// ==========================================
+// MAIN LOOP
+// ==========================================
 const runSync = async (forceDeep = false) => {
     if (mongoose.connection.readyState !== 1) return;
 
@@ -309,11 +296,11 @@ const runSync = async (forceDeep = false) => {
 
         if (forceDeep) console.log("🚀 Running Deep Sync...");
 
-        const changes = await syncStreamElements(stats, forceDeep ? 100 : 25);
+        const seChanged = await syncStreamElements(stats, forceDeep ? 100 : 25);
 
-        if (changes || forceDeep) {
+        if (seChanged || forceDeep) {
             await stats.save();
-            if (changes) console.log("✅ Stats Saved.");
+            if (seChanged) console.log("✅ Stats Updated from Sync");
         }
     } catch (e) {
         console.error("Main Loop Error:", e);
@@ -335,7 +322,7 @@ app.get('/api/debug/se-latest', async (req, res) => {
             params: { limit: 25 }
         });
         res.json(response.data);
-    } catch (e) { res.json({ error: e.message }); }
+    } catch (e) { res.json({ error: e.message, status: e.response?.status }); }
 });
 
 // AUTH
@@ -476,11 +463,9 @@ if (MONGO_URI) {
             console.log("✅ MongoDB Ready");
             app.listen(PORT, async () => {
                 console.log(`✅ Server on ${PORT}`);
-                
-                // 1. Resolve ID
+                // Resolve ID before starting sync loops
                 await resolveChannelId();
                 
-                // 2. Deep Sync
                 console.log("🚀 Startup Deep Sync...");
                 await runSync(true);
                 setInterval(() => runSync(false), 30000);
