@@ -62,12 +62,11 @@ const NisathonStats = mongoose.model('NisathonStats', new mongoose.Schema({
     lastActivityTime: { type: String, default: new Date().toISOString() }
 }));
 
-// NEW: Standalone Countdown Schema
 const CountdownStats = mongoose.model('CountdownStats', new mongoose.Schema({
     key: { type: String, default: 'main', unique: true },
     timerEndTime: { type: Date, default: Date.now },
     remainingTimeMs: { type: Number, default: 0 },
-    isPaused: { type: Boolean, default: true } // Paused by default
+    isPaused: { type: Boolean, default: true }
 }));
 
 const NisathonEvent = mongoose.model('NisathonEvent', new mongoose.Schema({
@@ -91,7 +90,7 @@ const SpinHistory = mongoose.model('SpinHistory', new mongoose.Schema({
 const roundOneDecimal = (num) => Math.round(num * 10) / 10;
 
 // ==========================================
-// CORE LOGIC (Nisathon)
+// CORE LOGIC
 // ==========================================
 
 const processEvent = async (stats, type, user, amount, message, providerId, tier = '1000', isManual = false) => {
@@ -152,7 +151,7 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
         const msAdd = earnedNisaballs * 10 * mult * 60000;
         
         if (earnedNisaballs > 0) {
-             if (!stats.isPaused) {
+            if (!stats.isPaused) {
                 const now = Date.now();
                 const curEnd = new Date(stats.timerEndTime).getTime();
                 stats.timerEndTime = new Date(Math.max(now, curEnd) + msAdd);
@@ -202,7 +201,14 @@ const connectSocket = () => {
     if (!SE_JWT) { console.log("❌ [Socket] No JWT"); return; }
     
     console.log("🔌 [Socket] Connecting...");
-    socket = io('https://realtime.streamelements.com', { transports: ['websocket'] });
+    
+    // StreamElements uses Socket.IO v2. 
+    // We MUST use 'transports: [websocket]' to avoid polling issues.
+    socket = io('https://realtime.streamelements.com', { 
+        transports: ['websocket'],
+        autoConnect: true,
+        reconnection: true
+    });
 
     socket.on('connect', () => {
         console.log('🔌 [Socket] Connected. Authenticating...');
@@ -218,9 +224,12 @@ const connectSocket = () => {
     });
 
     socket.on('event', async (data) => {
+        // LOG RAW DATA FOR DEBUGGING
+        // console.log('🔥 [Socket] RAW:', JSON.stringify(data));
+
         if (!data || !data.type) return;
         
-        // Added 'follower' to the filter list
+        // Allow 'follow' event type
         if (!['subscriber', 'tip', 'cheer', 'follower', 'follow'].includes(data.type)) return;
 
         console.log(`⚡ [Socket] New Event: ${data.type}`);
@@ -240,7 +249,7 @@ const connectSocket = () => {
             } else if (type === 'tip' || type === 'cheer') {
                 amount = info.amount;
             } else if (type === 'follow') {
-                type = 'follower'; // Normalize
+                type = 'follower'; 
                 amount = 0;
             }
 
@@ -248,6 +257,10 @@ const connectSocket = () => {
             await processEvent(stats, type, info.username, amount, info.message||"", providerId, tier);
             await stats.save();
         } catch (e) { console.error("Socket Error:", e); }
+    });
+    
+    socket.on('disconnect', () => {
+        console.log('⚠️ [Socket] Disconnected');
     });
 };
 
@@ -285,11 +298,12 @@ const fetchAndProcess = async (channelId, label, stats) => {
             if (['subscriber','sub','resub'].includes(act.type)) { amt = 1; tier = act.data.tier || '1000'; }
             else if (act.type === 'gift') amt = act.data.amount || 1;
             else if (['cheer','tip'].includes(act.type)) amt = act.data.amount;
+            // Explicitly allow followers in REST sync now
             else if (act.type === 'follow') { type = 'follower'; amt = 0; }
             else continue;
 
             const added = await processEvent(stats, type, act.data.username, amt, act.data.message, act._id, tier);
-            if (added > 0) changes = true;
+            if (added > 0 || type === 'follower') changes = true; // Mark change even if 0 NB for followers
         }
         return changes;
 
@@ -388,7 +402,23 @@ const runSync = async () => {
 // ==========================================
 app.get('/', (req, res) => res.send('Backend OK'));
 
-// AUTH
+app.get('/api/debug/se-latest', async (req, res) => {
+    if (!SE_JWT || !ENV_CHANNEL_ID) return res.json({ error: "Missing Config" });
+    let targetId = ENV_CHANNEL_ID;
+    try {
+        const r = await axios.get(`https://api.streamelements.com/kappa/v2/channels/${TARGET_USERNAME}`, { headers: { 'Authorization': `Bearer ${SE_JWT}` } });
+        targetId = r.data._id;
+    } catch(e){}
+
+    try {
+        const response = await axios.get(`https://api.streamelements.com/kappa/v2/activities/${targetId}`, {
+            headers: { Authorization: `Bearer ${SE_JWT}` },
+            params: { limit: 25 }
+        });
+        res.json({ configId: targetId, data: response.data });
+    } catch (e) { res.json({ error: e.message }); }
+});
+
 const auth = (req, res, next) => {
     if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).json({ error: 'Unauthorized' });
     next();
