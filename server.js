@@ -17,7 +17,6 @@ const MONGO_URI = process.env.MONGO_URI;
 let SE_JWT = process.env.STREAMELEMENTS_JWT || "";
 SE_JWT = SE_JWT.replace(/^Bearer\s+/i, "").replace(/["']/g, "").trim();
 
-// We will try this ID, and also auto-resolve 'urnisa_'
 let ENV_CHANNEL_ID = process.env.STREAMELEMENTS_CHANNEL_ID || "";
 ENV_CHANNEL_ID = ENV_CHANNEL_ID.replace(/["']/g, "").trim();
 
@@ -147,10 +146,11 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
     // Update Stats & Timer
     if (isNewEvent) {
         stats.totalNisaballs = roundOneDecimal(stats.totalNisaballs + earnedNisaballs);
-        const mult = stats.activeEvent === 'DOUBLE_TIMER' ? 2 : 1;
-        const msAdd = earnedNisaballs * 10 * mult * 60000;
         
         if (earnedNisaballs > 0) {
+            const mult = stats.activeEvent === 'DOUBLE_TIMER' ? 2 : 1;
+            const msAdd = earnedNisaballs * 10 * mult * 60000;
+            
             if (!stats.isPaused) {
                 const now = Date.now();
                 const curEnd = new Date(stats.timerEndTime).getTime();
@@ -203,9 +203,9 @@ const connectSocket = () => {
     console.log("🔌 [Socket] Connecting...");
     
     // StreamElements uses Socket.IO v2. 
-    // We MUST use 'transports: [websocket]' to avoid polling issues.
     socket = io('https://realtime.streamelements.com', { 
         transports: ['websocket'],
+        forceNew: true,
         autoConnect: true,
         reconnection: true
     });
@@ -224,12 +224,9 @@ const connectSocket = () => {
     });
 
     socket.on('event', async (data) => {
-        // LOG RAW DATA FOR DEBUGGING
-        // console.log('🔥 [Socket] RAW:', JSON.stringify(data));
-
         if (!data || !data.type) return;
         
-        // Allow 'follow' event type
+        // Added 'follower' to the filter list
         if (!['subscriber', 'tip', 'cheer', 'follower', 'follow'].includes(data.type)) return;
 
         console.log(`⚡ [Socket] New Event: ${data.type}`);
@@ -258,20 +255,17 @@ const connectSocket = () => {
             await stats.save();
         } catch (e) { console.error("Socket Error:", e); }
     });
-    
-    socket.on('disconnect', () => {
-        console.log('⚠️ [Socket] Disconnected');
-    });
 };
 
 // ==========================================
 // 2. REST POLLING (METHOD 2)
 // ==========================================
-const fetchAndProcess = async (channelId, label, stats) => {
+const fetchAndProcess = async (channelId, label, stats, limit = 25) => {
     if (!channelId) return false;
     
     try {
         const url = `https://api.streamelements.com/kappa/v2/activities/${channelId}`;
+        if (limit > 25) console.log(`📡 [${label}] Backfilling ${limit} events...`);
         
         const { data: activities } = await axios.get(url, {
             headers: { 
@@ -279,7 +273,7 @@ const fetchAndProcess = async (channelId, label, stats) => {
                 'Accept': 'application/json',
                 'User-Agent': 'UrnisaBot/1.0' 
             },
-            params: { limit: 25 },
+            params: { limit },
             timeout: 10000
         });
 
@@ -298,12 +292,11 @@ const fetchAndProcess = async (channelId, label, stats) => {
             if (['subscriber','sub','resub'].includes(act.type)) { amt = 1; tier = act.data.tier || '1000'; }
             else if (act.type === 'gift') amt = act.data.amount || 1;
             else if (['cheer','tip'].includes(act.type)) amt = act.data.amount;
-            // Explicitly allow followers in REST sync now
             else if (act.type === 'follow') { type = 'follower'; amt = 0; }
             else continue;
 
             const added = await processEvent(stats, type, act.data.username, amt, act.data.message, act._id, tier);
-            if (added > 0 || type === 'follower') changes = true; // Mark change even if 0 NB for followers
+            if (added > 0 || type === 'follower') changes = true;
         }
         return changes;
 
@@ -369,7 +362,7 @@ const syncSessionFallback = async (channelId, stats) => {
     }
 };
 
-const runSync = async () => {
+const runSync = async (forceDeep = false) => {
     if (mongoose.connection.readyState !== 1) return;
     if (!SE_JWT) return;
 
@@ -384,12 +377,14 @@ const runSync = async () => {
         } catch (e) {}
 
         let c1 = false, c2 = false;
+        const limit = forceDeep ? 100 : 25;
+
         if (resolvedId) {
-            c1 = await fetchAndProcess(resolvedId, "AUTO-ID", stats);
-            if (!c1) await syncSessionFallback(resolvedId, stats);
+            c1 = await fetchAndProcess(resolvedId, "AUTO-ID", stats, limit);
+            if (!c1 && forceDeep) await syncSessionFallback(resolvedId, stats);
         }
         if (ENV_CHANNEL_ID && ENV_CHANNEL_ID !== resolvedId) {
-            c2 = await fetchAndProcess(ENV_CHANNEL_ID, "ENV-ID", stats);
+            c2 = await fetchAndProcess(ENV_CHANNEL_ID, "ENV-ID", stats, limit);
         }
 
         if (c1 || c2) await stats.save();
@@ -402,23 +397,7 @@ const runSync = async () => {
 // ==========================================
 app.get('/', (req, res) => res.send('Backend OK'));
 
-app.get('/api/debug/se-latest', async (req, res) => {
-    if (!SE_JWT || !ENV_CHANNEL_ID) return res.json({ error: "Missing Config" });
-    let targetId = ENV_CHANNEL_ID;
-    try {
-        const r = await axios.get(`https://api.streamelements.com/kappa/v2/channels/${TARGET_USERNAME}`, { headers: { 'Authorization': `Bearer ${SE_JWT}` } });
-        targetId = r.data._id;
-    } catch(e){}
-
-    try {
-        const response = await axios.get(`https://api.streamelements.com/kappa/v2/activities/${targetId}`, {
-            headers: { Authorization: `Bearer ${SE_JWT}` },
-            params: { limit: 25 }
-        });
-        res.json({ configId: targetId, data: response.data });
-    } catch (e) { res.json({ error: e.message }); }
-});
-
+// AUTH
 const auth = (req, res, next) => {
     if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).json({ error: 'Unauthorized' });
     next();
