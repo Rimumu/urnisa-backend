@@ -16,14 +16,11 @@ const MONGO_URI = process.env.MONGO_URI;
 let SE_JWT = process.env.STREAMELEMENTS_JWT || "";
 SE_JWT = SE_JWT.replace(/^Bearer\s+/i, "").replace(/["']/g, "").trim();
 
-let SE_CHANNEL_ID = process.env.STREAMELEMENTS_CHANNEL_ID || "";
-SE_CHANNEL_ID = SE_CHANNEL_ID.replace(/["']/g, "").trim();
+// We will try this ID, and also auto-resolve 'urnisa_'
+let ENV_CHANNEL_ID = process.env.STREAMELEMENTS_CHANNEL_ID || "";
+ENV_CHANNEL_ID = ENV_CHANNEL_ID.replace(/["']/g, "").trim();
 
-const TARGET_USERNAME = 'urnisa_'; // Hardcoded target for auto-resolution
-
-// Twitch Config (Optional Hybrid)
-const TWITCH_CLIENT_ID = process.env.TWITCH_CLIENT_ID;
-const TWITCH_CLIENT_SECRET = process.env.TWITCH_CLIENT_SECRET;
+const TARGET_USERNAME = 'urnisa_';
 
 // Image Hosting
 const CLOUDINARY_CLOUD_NAME = process.env.CLOUDINARY_CLOUD_NAME;
@@ -56,7 +53,7 @@ const NisathonStats = mongoose.model('NisathonStats', new mongoose.Schema({
     currentSubs: { type: Number, default: 0 },
     currentBits: { type: Number, default: 0 },
     currentDonations: { type: Number, default: 0 },
-    totalNisaballs: { type: Number, default: 0 },
+    totalNisaballs: { type: Number, default: 0 }, 
     timerEndTime: { type: Date, default: Date.now },
     remainingTimeMs: { type: Number, default: 0 },
     isPaused: { type: Boolean, default: false },
@@ -175,138 +172,121 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
         }
     }
     
+    if (isNewEvent) console.log(`✅ ADDED: ${user} (${eventType}) +${earnedNisaballs}NB`);
     return earnedNisaballs;
 };
 
 // ==========================================
-// HELPERS: ID RESOLUTION (The Fix for 0 Events)
+// SYNC LOGIC (DUAL ID + SESSION FALLBACK)
 // ==========================================
-const resolveChannelId = async () => {
-    if (!SE_JWT) {
-        console.error("❌ NO JWT FOUND. CANNOT RESOLVE ID.");
-        return false;
-    }
+
+const fetchAndProcess = async (channelId, label, stats) => {
+    if (!channelId) return false;
     try {
-        console.log(`🔍 Force-Resolving ID for: '${TARGET_USERNAME}'...`);
-        
-        // This endpoint gets public channel info
-        const response = await axios.get(`https://api.streamelements.com/kappa/v2/channels/${TARGET_USERNAME}`, {
-             headers: { 
-                 'User-Agent': 'Mozilla/5.0',
-                 'Authorization': `Bearer ${SE_JWT}`
-             }
+        // console.log(`📡 [${label}] Checking ${channelId}...`);
+        const { data: activities } = await axios.get(`https://api.streamelements.com/kappa/v2/activities/${channelId}`, {
+            headers: { 'Authorization': `Bearer ${SE_JWT}` },
+            params: { limit: 25 }, // Just latest 25
+            timeout: 8000
         });
-        
-        if (response.data && response.data._id) {
-            const realId = response.data._id;
-            
-            if (SE_CHANNEL_ID !== realId) {
-                console.log(`⚠️ CONFIG MISMATCH DETECTED!`);
-                console.log(`   Configured: ${SE_CHANNEL_ID}`);
-                console.log(`   REAL ID:    ${realId}`);
-                console.log(`✅ SWITCHING TO REAL ID...`);
-                SE_CHANNEL_ID = realId;
-            } else {
-                console.log(`✅ Configured ID matches Real ID: ${realId}`);
-            }
-            return true;
+
+        if (!activities || activities.length === 0) {
+            console.log(`⚠️ [${label}] 0 activities found.`);
+            return false;
         }
-    } catch (e) {
-        console.error(`❌ Failed to resolve ID for ${TARGET_USERNAME}: ${e.message}`);
-        // Fallback: Use Token Owner ID if alias lookup fails
-        try {
-            const meRes = await axios.get('https://api.streamelements.com/kappa/v2/channels/me', {
-                headers: { Authorization: `Bearer ${SE_JWT}` }
-            });
-            if (meRes.data._id) {
-                console.log(`⚠️ Alias failed, using Token Owner ID: ${meRes.data._id}`);
-                SE_CHANNEL_ID = meRes.data._id;
-                return true;
-            }
-        } catch (e2) {}
-    }
-    return false;
-};
 
-// ==========================================
-// PROVIDER 1: STREAMELEMENTS
-// ==========================================
-const syncStreamElements = async (stats, limit = 50) => {
-    if (!SE_JWT || !SE_CHANNEL_ID) return false;
-
-    try {
-        const config = {
-            headers: { 'Authorization': `Bearer ${SE_JWT}`, 'Accept': 'application/json' },
-            params: { limit },
-            timeout: 10000
-        };
-
-        const url = `https://api.streamelements.com/kappa/v2/activities/${SE_CHANNEL_ID}`;
-        const response = await axios.get(url, config);
-        const activities = response.data;
-
-        if (!activities || activities.length === 0) return false;
-
+        // console.log(`✅ [${label}] Found ${activities.length} items.`);
+        
         // Sort Oldest -> Newest
         activities.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
         
-        let changesMade = false;
-        let newestDate = stats.lastActivityTime;
-
+        let changes = false;
         for (const act of activities) {
-            newestDate = act.createdAt;
-            
-            let amount = 0;
+            // Normalized Data
+            let amt = 0;
             let tier = '1000';
-            const type = act.type;
+            if (['subscriber','sub','resub'].includes(act.type)) { amt = 1; tier = act.data.tier || '1000'; }
+            else if (act.type === 'gift') amt = act.data.amount || 1;
+            else if (['cheer','tip'].includes(act.type)) amt = act.data.amount;
+            else continue;
 
-            if (['subscriber', 'sub', 'resub', 'subscription'].includes(type)) {
-                amount = 1;
-                tier = act.data.tier || '1000';
-            } else if (type === 'gift') {
-                amount = act.data.amount || 1;
-            } else if (['cheer', 'tip'].includes(type)) {
-                amount = act.data.amount;
-            } else {
-                continue;
-            }
-
-            const added = await processEvent(stats, type, act.data.username, amount, act.data.message, act._id, tier);
-            if (added > 0) changesMade = true;
+            const added = await processEvent(stats, act.type, act.data.username, amt, act.data.message, act._id, tier);
+            if (added > 0) changes = true;
         }
-
-        stats.lastActivityTime = newestDate;
-        return changesMade;
+        return changes;
 
     } catch (e) {
-        console.error(`❌ SE Sync Failed: ${e.message}`);
+        console.error(`❌ [${label}] Error: ${e.response?.status || e.message}`);
         return false;
     }
 };
 
-// ==========================================
-// MAIN LOOP
-// ==========================================
-const runSync = async (forceDeep = false) => {
+const syncSessionFallback = async (channelId, stats) => {
+    try {
+        // console.log(`⚡ Checking Session Data for ${channelId}...`);
+        const { data: session } = await axios.get(`https://api.streamelements.com/kappa/v2/sessions/${channelId}`, {
+             headers: { 'Authorization': `Bearer ${SE_JWT}` }
+        });
+        
+        if (!session || !session.data) return false;
+        
+        // Check specific keys SE uses
+        const lastSub = session.data['latest-subscriber'];
+        if (lastSub) {
+            await processEvent(stats, 'subscriber', lastSub.name, 1, "", `session-sub-${lastSub.name}`, lastSub.tier);
+        }
+        
+        const lastTip = session.data['latest-tip'];
+        if (lastTip) {
+             await processEvent(stats, 'tip', lastTip.name, lastTip.amount, lastTip.message, `session-tip-${lastTip.name}-${lastTip.amount}`);
+        }
+
+        const lastCheer = session.data['latest-cheer'];
+        if (lastCheer) {
+             await processEvent(stats, 'cheer', lastCheer.name, lastCheer.amount, lastCheer.message, `session-cheer-${lastCheer.name}-${lastCheer.amount}`);
+        }
+        return true;
+    } catch (e) {
+        return false;
+    }
+};
+
+const runSync = async () => {
     if (mongoose.connection.readyState !== 1) return;
+    if (!SE_JWT) return;
 
     try {
         let stats = await NisathonStats.findOne({ key: 'main' });
         if (!stats) stats = await NisathonStats.create({ key: 'main', timerEndTime: new Date(Date.now() + 3*3600000) });
 
-        if (forceDeep) console.log("🚀 Running Deep Sync...");
+        // 1. Resolve Real ID for 'urnisa_'
+        let resolvedId = null;
+        try {
+            const r = await axios.get(`https://api.streamelements.com/kappa/v2/channels/${TARGET_USERNAME}`, { headers: { 'Authorization': `Bearer ${SE_JWT}` } });
+            resolvedId = r.data._id;
+        } catch (e) { console.error("Resolve Error:", e.message); }
 
-        const seChanged = await syncStreamElements(stats, forceDeep ? 100 : 25);
-
-        if (seChanged || forceDeep) {
-            await stats.save();
-            if (seChanged) console.log("✅ Stats Updated from Sync");
+        // 2. Try both IDs (Configured + Resolved)
+        let c1 = false, c2 = false;
+        
+        if (resolvedId) {
+            c1 = await fetchAndProcess(resolvedId, "AUTO-ID", stats);
+            // Also try session on the real ID if activities failed
+            if (!c1) await syncSessionFallback(resolvedId, stats);
         }
+        
+        if (ENV_CHANNEL_ID && ENV_CHANNEL_ID !== resolvedId) {
+            c2 = await fetchAndProcess(ENV_CHANNEL_ID, "ENV-ID", stats);
+        }
+
+        if (c1 || c2) {
+            await stats.save();
+        }
+
     } catch (e) {
-        console.error("Main Loop Error:", e);
+        console.error("Loop Error:", e);
     }
 };
-
 
 // ==========================================
 // API ROUTES
@@ -315,14 +295,21 @@ app.get('/', (req, res) => res.send('Urnisa Backend Active'));
 
 // DEBUG
 app.get('/api/debug/se-latest', async (req, res) => {
-    if (!SE_JWT || !SE_CHANNEL_ID) return res.json({ error: "Missing Config" });
+    if (!SE_JWT) return res.json({ error: "Missing Config" });
+    // Try resolved ID first
+    let targetId = ENV_CHANNEL_ID;
     try {
-        const response = await axios.get(`https://api.streamelements.com/kappa/v2/activities/${SE_CHANNEL_ID}`, {
+        const r = await axios.get(`https://api.streamelements.com/kappa/v2/channels/${TARGET_USERNAME}`, { headers: { 'Authorization': `Bearer ${SE_JWT}` } });
+        targetId = r.data._id;
+    } catch(e){}
+
+    try {
+        const response = await axios.get(`https://api.streamelements.com/kappa/v2/activities/${targetId}`, {
             headers: { Authorization: `Bearer ${SE_JWT}` },
             params: { limit: 25 }
         });
-        res.json(response.data);
-    } catch (e) { res.json({ error: e.message, status: e.response?.status }); }
+        res.json({ configId: targetId, data: response.data });
+    } catch (e) { res.json({ error: e.message }); }
 });
 
 // AUTH
@@ -392,7 +379,7 @@ app.post('/api/nisathon/reset', auth, async (req, res) => {
     res.json({ success: true });
 });
 app.post('/api/nisathon/sync', auth, async (req, res) => {
-    await runSync(true);
+    await runSync();
     res.json({ success: true });
 });
 
@@ -463,12 +450,15 @@ if (MONGO_URI) {
             console.log("✅ MongoDB Ready");
             app.listen(PORT, async () => {
                 console.log(`✅ Server on ${PORT}`);
-                // Resolve ID before starting sync loops
-                await resolveChannelId();
                 
-                console.log("🚀 Startup Deep Sync...");
+                // 1. Run First Sync immediately
+                console.log("🚀 Startup Sync...");
                 await runSync(true);
+                
+                // 2. Loop
                 setInterval(() => runSync(false), 30000);
+                
+                // Keep Alive
                 setInterval(() => { axios.get('https://urnisa-backend.onrender.com').catch(()=>{}) }, 300000);
             });
         })
