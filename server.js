@@ -1,3 +1,4 @@
+
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
@@ -14,17 +15,13 @@ const MONGO_URI = process.env.MONGO_URI;
 
 // StreamElements Config
 let SE_JWT = process.env.STREAMELEMENTS_JWT || "";
+// aggressive cleanup: remove 'Bearer ', quotes, spaces
 SE_JWT = SE_JWT.replace(/^Bearer\s+/i, "").replace(/["']/g, "").trim();
 
 let SE_CHANNEL_ID = process.env.STREAMELEMENTS_CHANNEL_ID || "";
 SE_CHANNEL_ID = SE_CHANNEL_ID.replace(/["']/g, "").trim();
 
-// Twitch Config (Optional Hybrid)
-const TWITCH_CLIENT_ID = process.env.TWITCH_CLIENT_ID;
-const TWITCH_CLIENT_SECRET = process.env.TWITCH_CLIENT_SECRET;
-let TWITCH_ACCESS_TOKEN = null;
-
-// Image Hosting
+// Cloudinary
 const CLOUDINARY_CLOUD_NAME = process.env.CLOUDINARY_CLOUD_NAME;
 const CLOUDINARY_API_KEY = process.env.CLOUDINARY_API_KEY;
 const CLOUDINARY_API_SECRET = process.env.CLOUDINARY_API_SECRET;
@@ -37,26 +34,17 @@ app.use(express.json({ limit: '50mb' }));
 app.use(cors({ origin: '*' }));
 
 console.log("--- URNISA BACKEND REBOOTING ---");
+console.log(`🔑 JWT Loaded: ${SE_JWT ? "Yes" : "No"} (Length: ${SE_JWT.length})`);
+console.log(`🆔 Channel ID: ${SE_CHANNEL_ID || "Not Set"}`);
 
 // ==========================================
 // DATABASE SCHEMAS
 // ==========================================
-// Connection Logic with Robust Options
 if (MONGO_URI) {
     mongoose.set('strictQuery', false);
-    
-    // Event Listeners
-    mongoose.connection.on('connected', () => console.log('✅ MongoDB Connected'));
-    mongoose.connection.on('error', (err) => console.error('❌ MongoDB Error:', err));
-    mongoose.connection.on('disconnected', () => console.log('⚠️ MongoDB Disconnected'));
-
-    mongoose.connect(MONGO_URI, {
-        serverSelectionTimeoutMS: 30000, // Give it 30s to connect before failing
-        socketTimeoutMS: 45000,
-        family: 4 // Use IPv4
-    }).catch(e => console.error("❌ Initial DB Connection Failed:", e));
-} else {
-    console.error("❌ MONGO_URI Missing in Env Vars");
+    mongoose.connect(MONGO_URI)
+        .then(() => console.log("✅ MongoDB Connected"))
+        .catch(e => console.error("❌ MongoDB Error:", e));
 }
 
 const Setting = mongoose.model('Setting', new mongoose.Schema({ key: { type: String, unique: true }, value: mongoose.Schema.Types.Mixed }));
@@ -77,7 +65,7 @@ const NisathonStats = mongoose.model('NisathonStats', new mongoose.Schema({
 const NisathonEvent = mongoose.model('NisathonEvent', new mongoose.Schema({
     providerId: { type: String, unique: true },
     user: { type: String, required: true },
-    type: { type: String, required: true }, 
+    type: { type: String, required: true }, // sub, gift, bits, donation
     amountDisplay: { type: String, required: true },
     message: String,
     nisaballAmount: { type: Number, default: 0 },
@@ -95,16 +83,10 @@ const SpinHistory = mongoose.model('SpinHistory', new mongoose.Schema({
 const roundOneDecimal = (num) => Math.round(num * 10) / 10;
 
 // ==========================================
-// CORE LOGIC
+// CORE LOGIC (Process & Calculate)
 // ==========================================
 
 const processEvent = async (stats, type, user, amount, message, providerId, tier = '1000', isManual = false) => {
-    // GUARD: Prevent processing if DB disconnected to avoid buffering timeouts
-    if (mongoose.connection.readyState !== 1) {
-        console.warn("⚠️ Skipping event process: DB not ready");
-        return 0;
-    }
-
     let isNewEvent = true;
 
     // Check duplicates (unless manual override)
@@ -118,6 +100,7 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
     let eventType = type;
 
     // --- RULESET ---
+    // Subs
     if (['subscriber', 'sub', 'resub', 'subscription'].includes(type)) {
         let tVal = 0.5;
         let tLbl = "Tier 1";
@@ -131,17 +114,20 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
         eventType = 'sub';
         if (isNewEvent) stats.currentSubs += 1;
     } 
+    // Gifts
     else if (type === 'gift') {
         earnedNisaballs = 0.5 * amount;
         amountDisplay = `${amount} Gift Subs`;
         if (isNewEvent) stats.currentSubs += amount;
     } 
+    // Bits
     else if (['cheer', 'bits'].includes(type)) {
         earnedNisaballs = amount * 0.002;
         amountDisplay = `${amount} Bits`;
         eventType = 'bits';
         if (isNewEvent) stats.currentBits += amount;
     } 
+    // Donations
     else if (['tip', 'donation'].includes(type)) {
         earnedNisaballs = amount * 0.2;
         amountDisplay = `$${amount.toFixed(2)}`;
@@ -149,7 +135,7 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
         if (isNewEvent) stats.currentDonations += amount;
     }
 
-    // Update Stats & Timer
+    // --- UPDATE STATS ---
     if (isNewEvent) {
         stats.totalNisaballs = roundOneDecimal(stats.totalNisaballs + earnedNisaballs);
         const mult = stats.activeEvent === 'DOUBLE_TIMER' ? 2 : 1;
@@ -158,13 +144,14 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
         if (!stats.isPaused) {
             const now = Date.now();
             const curEnd = new Date(stats.timerEndTime).getTime();
+            // If timer expired, start from now. Else extend.
             stats.timerEndTime = new Date(Math.max(now, curEnd) + msAdd);
         } else {
             stats.remainingTimeMs += msAdd;
         }
     }
 
-    // Save Event
+    // --- DB UPSERT ---
     const eventData = {
         providerId: providerId || `sim-${Date.now()}`,
         user: user || 'Anonymous',
@@ -174,6 +161,7 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
         nisaballAmount: earnedNisaballs,
         createdAt: isNewEvent ? new Date() : undefined
     };
+    // Remove undefineds
     Object.keys(eventData).forEach(k => eventData[k] === undefined && delete eventData[k]);
 
     const res = await NisathonEvent.findOneAndUpdate(
@@ -182,20 +170,23 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
         { upsert: true, new: true }
     );
 
-    // Wheel Logic
+    // --- WHEEL QUEUE ---
     if (isNewEvent && earnedNisaballs >= 5) {
         const spins = Math.floor(earnedNisaballs / 5);
         console.log(`🎡 Queueing ${spins} spins for ${user}`);
         for (let i = 0; i < spins; i++) {
-            await SpinQueue.create({ user: user||'Anon', sourceEventId: res._id, nisaballs: earnedNisaballs });
+            await SpinQueue.create({ 
+                user: user||'Anon', 
+                sourceEventId: res._id, 
+                nisaballs: earnedNisaballs 
+            });
         }
     }
-    
     return earnedNisaballs;
 };
 
 // ==========================================
-// PROVIDER 1: STREAMELEMENTS
+// PROVIDER: STREAMELEMENTS
 // ==========================================
 const syncStreamElements = async (stats, limit = 50) => {
     if (!SE_JWT || !SE_CHANNEL_ID) return false;
@@ -221,7 +212,7 @@ const syncStreamElements = async (stats, limit = 50) => {
 
         for (const act of activities) {
             newestDate = act.createdAt;
-            
+
             let amount = 0;
             let tier = '1000';
             const type = act.type;
@@ -246,6 +237,7 @@ const syncStreamElements = async (stats, limit = 50) => {
 
     } catch (e) {
         console.error(`❌ SE Sync Failed: ${e.message}`);
+        if (e.response?.status === 401) console.error("   -> Unauthorized. Check JWT.");
         return false;
     }
 };
@@ -254,11 +246,7 @@ const syncStreamElements = async (stats, limit = 50) => {
 // MAIN LOOP
 // ==========================================
 const runSync = async (forceDeep = false) => {
-    // GUARD: Check DB connection status before doing anything
-    if (mongoose.connection.readyState !== 1) {
-        console.log("⏳ Sync paused: DB not connected");
-        return;
-    }
+    if (mongoose.connection.readyState !== 1) return;
 
     try {
         let stats = await NisathonStats.findOne({ key: 'main' });
@@ -277,6 +265,7 @@ const runSync = async (forceDeep = false) => {
     }
 };
 
+
 // ==========================================
 // API ROUTES
 // ==========================================
@@ -291,7 +280,7 @@ app.get('/api/debug/se-latest', async (req, res) => {
             params: { limit: 25 }
         });
         res.json({ configId: SE_CHANNEL_ID, data: response.data });
-    } catch (e) { res.json({ error: e.message }); }
+    } catch (e) { res.json({ error: e.message, status: e.response?.status }); }
 });
 
 // AUTH
