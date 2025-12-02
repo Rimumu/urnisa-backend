@@ -3,6 +3,7 @@ const cors = require('cors');
 const axios = require('axios');
 const mongoose = require('mongoose');
 const crypto = require('crypto');
+const io = require('socket.io-client'); // NEW: Websocket Client
 require('dotenv').config();
 
 // ==========================================
@@ -34,7 +35,7 @@ const app = express();
 app.use(express.json({ limit: '50mb' }));
 app.use(cors({ origin: '*' }));
 
-console.log("--- URNISA BACKEND REBOOTING ---");
+console.log("--- URNISA HYBRID BACKEND STARTING ---");
 
 // ==========================================
 // DATABASE SCHEMAS
@@ -88,7 +89,7 @@ const roundOneDecimal = (num) => Math.round(num * 10) / 10;
 const processEvent = async (stats, type, user, amount, message, providerId, tier = '1000', isManual = false) => {
     let isNewEvent = true;
 
-    // Check duplicates (unless manual override)
+    // Check duplicates
     if (providerId && !isManual) {
         const existing = await NisathonEvent.findOne({ providerId });
         if (existing) isNewEvent = false;
@@ -172,21 +173,100 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
         }
     }
     
-    if (isNewEvent) console.log(`✅ ADDED: ${user} (${eventType}) +${earnedNisaballs}NB`);
+    if (isNewEvent) console.log(`✅ SAVED: ${user} (${eventType}) +${earnedNisaballs}NB`);
     return earnedNisaballs;
 };
 
 // ==========================================
-// SYNC LOGIC (DUAL ID + SESSION FALLBACK)
+// METHOD 1: REAL-TIME WEBSOCKET (SOCKET.IO)
 // ==========================================
+let socket = null;
 
+const connectToStreamElementsSocket = () => {
+    if (!SE_JWT) {
+        console.error("❌ [Socket] No JWT, cannot connect.");
+        return;
+    }
+
+    console.log("🔌 [Socket] Connecting to wss://realtime.streamelements.com...");
+    
+    socket = io('https://realtime.streamelements.com', {
+        transports: ['websocket']
+    });
+
+    socket.on('connect', () => {
+        console.log('🔌 [Socket] Connected! Authenticating...');
+        socket.emit('authenticate', { method: 'jwt', token: SE_JWT });
+    });
+
+    socket.on('authenticated', (data) => {
+        console.log(`✅ [Socket] Authenticated! Channel ID: ${data.channelId}`);
+    });
+
+    socket.on('unauthorized', (data) => {
+        console.error('❌ [Socket] Unauthorized:', data);
+    });
+
+    socket.on('event', async (data) => {
+        if (!data || !data.type) return;
+        console.log(`⚡ [Socket] Event Received: ${data.type}`);
+        
+        // Parse Socket Data to match processEvent signature
+        // SE Socket structure: { type: 'subscriber', data: { username: '...', amount: 1, tier: '1000', ... } }
+        const evt = data;
+        const info = data.data;
+
+        try {
+            const stats = await NisathonStats.findOne({ key: 'main' });
+            if (!stats) return;
+
+            let amount = 1;
+            let tier = '1000';
+            let type = evt.type; // subscriber, tip, cheer
+
+            if (type === 'subscriber') {
+                tier = info.tier || '1000';
+                amount = info.amount || 1; // For gifts/bulk? Usually 1 for single sub
+                if (info.gifted) type = 'gift'; // Sometimes handled differently
+            } else if (type === 'tip') {
+                amount = info.amount;
+            } else if (type === 'cheer') {
+                amount = info.amount;
+            }
+
+            // Use _id from socket event if available, else generate one based on time
+            const providerId = evt._id || `sock-${Date.now()}-${Math.random()}`;
+            
+            await processEvent(
+                stats, 
+                type, 
+                info.username, 
+                amount, 
+                info.message || "", 
+                providerId, 
+                tier
+            );
+            await stats.save();
+
+        } catch (e) {
+            console.error("❌ [Socket] Process Error:", e);
+        }
+    });
+
+    socket.on('disconnect', () => {
+        console.log('⚠️ [Socket] Disconnected');
+    });
+};
+
+// ==========================================
+// METHOD 2: HISTORICAL DATA (REST API)
+// ==========================================
 const fetchAndProcess = async (channelId, label, stats) => {
     if (!channelId) return false;
     try {
-        // console.log(`📡 [${label}] Checking ${channelId}...`);
         const { data: activities } = await axios.get(`https://api.streamelements.com/kappa/v2/activities/${channelId}`, {
             headers: { 'Authorization': `Bearer ${SE_JWT}` },
-            params: { limit: 25 }, // Just latest 25
+            params: { limit: 25 }, 
             timeout: 8000
         });
 
@@ -195,14 +275,10 @@ const fetchAndProcess = async (channelId, label, stats) => {
             return false;
         }
 
-        // console.log(`✅ [${label}] Found ${activities.length} items.`);
-        
-        // Sort Oldest -> Newest
         activities.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
         
         let changes = false;
         for (const act of activities) {
-            // Normalized Data
             let amt = 0;
             let tier = '1000';
             if (['subscriber','sub','resub'].includes(act.type)) { amt = 1; tier = act.data.tier || '1000'; }
@@ -214,39 +290,8 @@ const fetchAndProcess = async (channelId, label, stats) => {
             if (added > 0) changes = true;
         }
         return changes;
-
     } catch (e) {
-        console.error(`❌ [${label}] Error: ${e.response?.status || e.message}`);
-        return false;
-    }
-};
-
-const syncSessionFallback = async (channelId, stats) => {
-    try {
-        // console.log(`⚡ Checking Session Data for ${channelId}...`);
-        const { data: session } = await axios.get(`https://api.streamelements.com/kappa/v2/sessions/${channelId}`, {
-             headers: { 'Authorization': `Bearer ${SE_JWT}` }
-        });
-        
-        if (!session || !session.data) return false;
-        
-        // Check specific keys SE uses
-        const lastSub = session.data['latest-subscriber'];
-        if (lastSub) {
-            await processEvent(stats, 'subscriber', lastSub.name, 1, "", `session-sub-${lastSub.name}`, lastSub.tier);
-        }
-        
-        const lastTip = session.data['latest-tip'];
-        if (lastTip) {
-             await processEvent(stats, 'tip', lastTip.name, lastTip.amount, lastTip.message, `session-tip-${lastTip.name}-${lastTip.amount}`);
-        }
-
-        const lastCheer = session.data['latest-cheer'];
-        if (lastCheer) {
-             await processEvent(stats, 'cheer', lastCheer.name, lastCheer.amount, lastCheer.message, `session-cheer-${lastCheer.name}-${lastCheer.amount}`);
-        }
-        return true;
-    } catch (e) {
+        console.error(`❌ [${label}] REST Error: ${e.response?.status}`);
         return false;
     }
 };
@@ -259,29 +304,17 @@ const runSync = async () => {
         let stats = await NisathonStats.findOne({ key: 'main' });
         if (!stats) stats = await NisathonStats.create({ key: 'main', timerEndTime: new Date(Date.now() + 3*3600000) });
 
-        // 1. Resolve Real ID for 'urnisa_'
         let resolvedId = null;
         try {
             const r = await axios.get(`https://api.streamelements.com/kappa/v2/channels/${TARGET_USERNAME}`, { headers: { 'Authorization': `Bearer ${SE_JWT}` } });
             resolvedId = r.data._id;
-        } catch (e) { console.error("Resolve Error:", e.message); }
+        } catch (e) {}
 
-        // 2. Try both IDs (Configured + Resolved)
         let c1 = false, c2 = false;
-        
-        if (resolvedId) {
-            c1 = await fetchAndProcess(resolvedId, "AUTO-ID", stats);
-            // Also try session on the real ID if activities failed
-            if (!c1) await syncSessionFallback(resolvedId, stats);
-        }
-        
-        if (ENV_CHANNEL_ID && ENV_CHANNEL_ID !== resolvedId) {
-            c2 = await fetchAndProcess(ENV_CHANNEL_ID, "ENV-ID", stats);
-        }
+        if (resolvedId) c1 = await fetchAndProcess(resolvedId, "AUTO-ID", stats);
+        if (ENV_CHANNEL_ID && ENV_CHANNEL_ID !== resolvedId) c2 = await fetchAndProcess(ENV_CHANNEL_ID, "ENV-ID", stats);
 
-        if (c1 || c2) {
-            await stats.save();
-        }
+        if (c1 || c2) await stats.save();
 
     } catch (e) {
         console.error("Loop Error:", e);
@@ -291,50 +324,39 @@ const runSync = async () => {
 // ==========================================
 // API ROUTES
 // ==========================================
-app.get('/', (req, res) => res.send('Urnisa Backend Active'));
+app.get('/', (req, res) => res.send('Urnisa Hybrid Backend Active'));
 
-// DEBUG
 app.get('/api/debug/se-latest', async (req, res) => {
-    if (!SE_JWT) return res.json({ error: "Missing Config" });
-    // Try resolved ID first
-    let targetId = ENV_CHANNEL_ID;
+    if (!SE_JWT || !ENV_CHANNEL_ID) return res.json({ error: "Missing Config" });
     try {
-        const r = await axios.get(`https://api.streamelements.com/kappa/v2/channels/${TARGET_USERNAME}`, { headers: { 'Authorization': `Bearer ${SE_JWT}` } });
-        targetId = r.data._id;
-    } catch(e){}
-
-    try {
-        const response = await axios.get(`https://api.streamelements.com/kappa/v2/activities/${targetId}`, {
+        const response = await axios.get(`https://api.streamelements.com/kappa/v2/activities/${ENV_CHANNEL_ID}`, {
             headers: { Authorization: `Bearer ${SE_JWT}` },
             params: { limit: 25 }
         });
-        res.json({ configId: targetId, data: response.data });
+        res.json(response.data);
     } catch (e) { res.json({ error: e.message }); }
 });
 
-// AUTH
 const auth = (req, res, next) => {
     if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).json({ error: 'Unauthorized' });
     next();
 };
 app.post('/api/verify', (req, res) => res.json(req.body.password === ADMIN_PASSWORD ? {success:true} : {error:'Invalid'}));
 
-// NISATHON
 app.get('/api/nisathon/stats', async (req, res) => {
     if (mongoose.connection.readyState !== 1) return res.json({});
     let stats = await NisathonStats.findOne({ key: 'main' });
     if (!stats) stats = await NisathonStats.create({ key: 'main' });
     res.json(stats);
 });
+
 app.get('/api/nisathon/leaderboard', async (req, res) => {
-    try {
-        const lb = await NisathonEvent.aggregate([{ $group: { _id: "$user", total: { $sum: "$nisaballAmount" } } }, { $sort: { total: -1 } }, { $limit: 10 }]);
-        res.json(lb.map((x, i) => ({ rank: i+1, user: x._id, totalNisaballs: roundOneDecimal(x.total) })));
-    } catch { res.json([]); }
+    const lb = await NisathonEvent.aggregate([{ $group: { _id: "$user", total: { $sum: "$nisaballAmount" } } }, { $sort: { total: -1 } }, { $limit: 10 }]);
+    res.json(lb.map((x, i) => ({ rank: i+1, user: x._id, totalNisaballs: roundOneDecimal(x.total) })));
 });
+
 app.get('/api/nisathon/recent', async (req, res) => res.json(await NisathonEvent.find().sort({ createdAt: -1 }).limit(10)));
 
-// MANUAL & TEST EVENTS
 app.post('/api/nisathon/test-event', auth, async (req, res) => {
     const stats = await NisathonStats.findOne({ key: 'main' });
     await processEvent(stats, req.body.type, req.body.user, parseFloat(req.body.amount), "Manual", null, req.body.tier, true);
@@ -342,7 +364,6 @@ app.post('/api/nisathon/test-event', auth, async (req, res) => {
     res.json({ success: true });
 });
 
-// CONTROLS
 app.post('/api/nisathon/timer/set', auth, async (req, res) => {
     const stats = await NisathonStats.findOne({ key: 'main' });
     const ms = (req.body.hours*3600 + req.body.minutes*60 + req.body.seconds)*1000;
@@ -379,68 +400,24 @@ app.post('/api/nisathon/reset', auth, async (req, res) => {
     res.json({ success: true });
 });
 app.post('/api/nisathon/sync', auth, async (req, res) => {
-    await runSync();
+    await runSync(true);
     res.json({ success: true });
 });
 
-// Wheel
+app.get('/api/goals', async (req, res) => res.json({ goals: (await Setting.findOne({ key: 'nisathon_goals' }))?.value }));
+app.post('/api/goals', auth, async (req, res) => { await Setting.findOneAndUpdate({ key: 'nisathon_goals' }, { value: req.body.goals }, { upsert: true }); res.json({ success: true }); });
+app.get('/api/wheel', async (req, res) => res.json({ items: (await Setting.findOne({ key: 'wheel_items' }))?.value }));
+app.post('/api/wheel', auth, async (req, res) => { await Setting.findOneAndUpdate({ key: 'wheel_items' }, { value: req.body.items }, { upsert: true }); res.json({ success: true }); });
 app.get('/api/wheel/queue', async (req, res) => res.json(await SpinQueue.find().sort({ createdAt: 1 })));
 app.get('/api/wheel/history', async (req, res) => res.json(await SpinHistory.find().sort({ timestamp: -1 })));
-app.post('/api/wheel/spin-result', auth, async (req, res) => {
-    await SpinHistory.create({ user: req.body.user, reward: req.body.reward });
-    if (req.body.queueId) await SpinQueue.findByIdAndDelete(req.body.queueId);
-    res.json({ success: true });
-});
-
-// Content
-app.get('/api/goals', async (req, res) => res.json({ goals: (await Setting.findOne({ key: 'nisathon_goals' }))?.value }));
-app.post('/api/goals', auth, async (req, res) => {
-    await Setting.findOneAndUpdate({ key: 'nisathon_goals' }, { value: req.body.goals }, { upsert: true });
-    res.json({ success: true });
-});
-app.get('/api/wheel', async (req, res) => res.json({ items: (await Setting.findOne({ key: 'wheel_items' }))?.value }));
-app.post('/api/wheel', auth, async (req, res) => {
-    await Setting.findOneAndUpdate({ key: 'wheel_items' }, { value: req.body.items }, { upsert: true });
-    res.json({ success: true });
-});
-app.get('/api/profile', async (req, res) => {
-    const a = await Setting.findOne({ key: 'profile_about' });
-    const c = await Setting.findOne({ key: 'profile_credits' });
-    const w = await Setting.findOne({ key: 'profile_artworks' });
-    res.json({ about: a?.value||[], credits: c?.value||[], artworks: w?.value||[] });
-});
-app.post('/api/profile', auth, async (req, res) => {
-    await Setting.findOneAndUpdate({ key: `profile_${req.body.type}` }, { value: req.body.data }, { upsert: true });
-    res.json({ success: true });
-});
+app.post('/api/wheel/spin-result', auth, async (req, res) => { await SpinHistory.create({ user: req.body.user, reward: req.body.reward }); if (req.body.queueId) await SpinQueue.findByIdAndDelete(req.body.queueId); res.json({ success: true }); });
+app.get('/api/profile', async (req, res) => { const a = await Setting.findOne({ key: 'profile_about' }); const c = await Setting.findOne({ key: 'profile_credits' }); const w = await Setting.findOne({ key: 'profile_artworks' }); res.json({ about: a?.value||[], credits: c?.value||[], artworks: w?.value||[] }); });
+app.post('/api/profile', auth, async (req, res) => { await Setting.findOneAndUpdate({ key: `profile_${req.body.type}` }, { value: req.body.data }, { upsert: true }); res.json({ success: true }); });
 app.get('/api/schedule', async (req, res) => res.json({ url: (await Setting.findOne({ key: 'schedule_url' }))?.value || DEFAULT_SCHEDULE_URL }));
-app.post('/api/schedule', auth, async (req, res) => {
-    await Setting.findOneAndUpdate({ key: 'schedule_url' }, { value: req.body.url }, { upsert: true });
-    res.json({ success: true });
-});
-app.post('/api/stream-status', auth, async (req, res) => {
-    await Setting.findOneAndUpdate({ key: 'stream_status_override' }, { value: req.body.override }, { upsert: true });
-    res.json({ success: true });
-});
-app.get('/api/stream-status', async (req, res) => {
-    const s = await Setting.findOne({ key: 'stream_status_override' });
-    res.json({ override: s?.value || 'auto' });
-});
-
-app.post('/api/upload', async (req, res) => {
-    const { image } = req.body;
-    if (!image) return res.status(400).send();
-    if (CLOUDINARY_CLOUD_NAME) {
-        try {
-            const ts = Math.round(new Date().getTime()/1000);
-            const sig = crypto.createHash('sha1').update(`timestamp=${ts}${CLOUDINARY_API_SECRET}`).digest('hex');
-            const f = new FormData(); f.append('file', `data:image/jpeg;base64,${image}`); f.append('api_key', CLOUDINARY_API_KEY); f.append('timestamp', ts); f.append('signature', sig);
-            const r = await axios.post(`https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/image/upload`, f);
-            return res.json({ success: true, data: { url: r.data.secure_url } });
-        } catch (e) { return res.status(500).send(); }
-    }
-    return res.status(500).send();
-});
+app.post('/api/schedule', auth, async (req, res) => { await Setting.findOneAndUpdate({ key: 'schedule_url' }, { value: req.body.url }, { upsert: true }); res.json({ success: true }); });
+app.post('/api/stream-status', auth, async (req, res) => { await Setting.findOneAndUpdate({ key: 'stream_status_override' }, { value: req.body.override }, { upsert: true }); res.json({ success: true }); });
+app.get('/api/stream-status', async (req, res) => { const s = await Setting.findOne({ key: 'stream_status_override' }); res.json({ override: s?.value || 'auto' }); });
+app.post('/api/upload', async (req, res) => { const { image } = req.body; if (!image) return res.status(400).send(); if (CLOUDINARY_CLOUD_NAME) { try { const ts = Math.round(new Date().getTime()/1000); const sig = crypto.createHash('sha1').update(`timestamp=${ts}${CLOUDINARY_API_SECRET}`).digest('hex'); const f = new FormData(); f.append('file', `data:image/jpeg;base64,${image}`); f.append('api_key', CLOUDINARY_API_KEY); f.append('timestamp', ts); f.append('signature', sig); const r = await axios.post(`https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/image/upload`, f); return res.json({ success: true, data: { url: r.data.secure_url } }); } catch (e) { return res.status(500).send(); } } return res.status(500).send(); });
 
 // START
 if (MONGO_URI) {
@@ -448,17 +425,13 @@ if (MONGO_URI) {
     mongoose.connect(MONGO_URI)
         .then(() => {
             console.log("✅ MongoDB Ready");
-            app.listen(PORT, async () => {
+            app.listen(PORT, () => {
                 console.log(`✅ Server on ${PORT}`);
                 
-                // 1. Run First Sync immediately
-                console.log("🚀 Startup Sync...");
-                await runSync(true);
+                // Init Sockets & Polling
+                connectToStreamElementsSocket();
+                setInterval(() => runSync(), 30000);
                 
-                // 2. Loop
-                setInterval(() => runSync(false), 30000);
-                
-                // Keep Alive
                 setInterval(() => { axios.get('https://urnisa-backend.onrender.com').catch(()=>{}) }, 300000);
             });
         })
