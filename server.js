@@ -10,12 +10,13 @@ const PORT = process.env.PORT || 3001;
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "admin";
 const MONGO_URI = process.env.MONGO_URI;
 
-// StreamElements Config (Sanitized)
+// StreamElements Config
 let SE_JWT = process.env.STREAMELEMENTS_JWT || "";
 SE_JWT = SE_JWT.replace(/^Bearer\s+/i, "").replace(/["']/g, "").trim();
 
+// We will overwrite this with the auto-resolved ID
 let SE_CHANNEL_ID = process.env.STREAMELEMENTS_CHANNEL_ID || "";
-SE_CHANNEL_ID = SE_CHANNEL_ID.replace(/["']/g, "").trim();
+const TARGET_USERNAME = 'urnisa_'; // HARDCODED TARGET TO FIX CONFIG ISSUES
 
 const CLOUDINARY_CLOUD_NAME = process.env.CLOUDINARY_CLOUD_NAME;
 const CLOUDINARY_API_KEY = process.env.CLOUDINARY_API_KEY;
@@ -75,7 +76,6 @@ const roundOneDecimal = (num) => Math.round(num * 10) / 10;
 const processEvent = async (stats, type, user, amount, message, providerId, tier = '1000', isManual = false) => {
     let isNewEvent = true;
 
-    // Deduplicate
     if (providerId && !isManual) {
         const existing = await NisathonEvent.findOne({ providerId });
         if (existing) isNewEvent = false;
@@ -85,7 +85,6 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
     let amountDisplay = "";
     let eventType = type;
 
-    // Rules
     if (['subscriber', 'sub', 'resub', 'subscription'].includes(type)) {
         let tVal = 0.5;
         let tLbl = "Tier 1";
@@ -117,7 +116,6 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
         if (isNewEvent) stats.currentDonations += amount;
     }
 
-    // Update Stats
     if (isNewEvent) {
         stats.totalNisaballs = roundOneDecimal(stats.totalNisaballs + earnedNisaballs);
         const mult = stats.activeEvent === 'DOUBLE_TIMER' ? 2 : 1;
@@ -132,7 +130,6 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
         }
     }
 
-    // DB Upsert
     const eventData = {
         providerId: providerId || `sim-${Date.now()}`,
         user: user || 'Anonymous',
@@ -142,7 +139,6 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
         nisaballAmount: earnedNisaballs,
         createdAt: isNewEvent ? new Date() : undefined
     };
-    // Clean undefineds
     Object.keys(eventData).forEach(k => eventData[k] === undefined && delete eventData[k]);
 
     const res = await NisathonEvent.findOneAndUpdate(
@@ -151,7 +147,6 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
         { upsert: true, new: true }
     );
 
-    // Wheel Queue
     if (isNewEvent && earnedNisaballs >= 5) {
         const spins = Math.floor(earnedNisaballs / 5);
         console.log(`🎡 Queueing ${spins} spins for ${user}`);
@@ -161,6 +156,39 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
     }
     
     return earnedNisaballs;
+};
+
+// --- CHANNEL RESOLVER ---
+const resolveChannelId = async () => {
+    if (!SE_JWT) {
+        console.error("❌ NO JWT FOUND");
+        return false;
+    }
+    try {
+        console.log(`🔍 Resolving Account ID for username: '${TARGET_USERNAME}'...`);
+        const response = await axios.get(`https://api.streamelements.com/kappa/v2/channels/${TARGET_USERNAME}`);
+        
+        if (response.data && response.data._id) {
+            const realId = response.data._id;
+            console.log(`✅ RESOLVED ID: ${realId}`);
+            SE_CHANNEL_ID = realId; // OVERWRITE GLOBAL ID
+            return true;
+        }
+    } catch (e) {
+        console.error(`❌ Failed to resolve ID: ${e.message}`);
+        // Fallback to trying the 'me' endpoint if the alias lookup fails (maybe token is for that user?)
+        try {
+            const meRes = await axios.get('https://api.streamelements.com/kappa/v2/channels/me', {
+                headers: { Authorization: `Bearer ${SE_JWT}` }
+            });
+            if (meRes.data._id) {
+                console.log(`⚠️ Alias failed, using Token Owner ID: ${meRes.data._id}`);
+                SE_CHANNEL_ID = meRes.data._id;
+                return true;
+            }
+        } catch (e2) {}
+    }
+    return false;
 };
 
 // --- STREAMELEMENTS SYNC ---
@@ -176,16 +204,15 @@ const syncStreamElements = async (stats, limit = 50) => {
 
         const activities = response.data;
         if (!activities || activities.length === 0) {
-            console.log(`⚠️ [SE] No activities found. Check ID: ${SE_CHANNEL_ID}`);
+            console.log(`⚠️ [SE] No activities found for ID: ${SE_CHANNEL_ID}`);
             return false;
         }
 
-        // Sort Oldest -> Newest
         activities.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
         
-        // LOG THE NEWEST ACTIVITY FOR DEBUGGING
+        // LOG NEWEST FOR DEBUG
         const newest = activities[activities.length - 1];
-        console.log(`📡 [SE] Poll: ${activities.length} events. Newest: ${newest.type} by ${newest.data.username} at ${newest.createdAt}`);
+        console.log(`📡 [SE] Poll OK. Newest: ${newest.type} by ${newest.data.username}`);
 
         let changesMade = false;
         let newestDate = stats.lastActivityTime;
@@ -193,7 +220,6 @@ const syncStreamElements = async (stats, limit = 50) => {
         for (const act of activities) {
             newestDate = act.createdAt;
             
-            // Normalized Fields
             let amount = 0;
             let tier = '1000';
             const type = act.type;
@@ -239,33 +265,36 @@ const runSync = async (forceDeep = false) => {
             if (changes) console.log("✅ Stats Saved.");
         }
     } catch (e) {
-        console.error("Sync Loop Error:", e);
+        console.error("Main Loop Error:", e);
     }
 };
 
-// --- ROUTES ---
+
+// ==========================================
+// API ROUTES
+// ==========================================
 app.get('/', (req, res) => res.send('Urnisa Backend Active'));
 
-// Debug
+// DEBUG
 app.get('/api/debug/se-latest', async (req, res) => {
     if (!SE_JWT || !SE_CHANNEL_ID) return res.json({ error: "Missing Config" });
     try {
         const response = await axios.get(`https://api.streamelements.com/kappa/v2/activities/${SE_CHANNEL_ID}`, {
             headers: { Authorization: `Bearer ${SE_JWT}` },
-            params: { limit: 20 }
+            params: { limit: 25 }
         });
         res.json(response.data);
     } catch (e) { res.json({ error: e.message }); }
 });
 
-// Auth
+// AUTH
 const auth = (req, res, next) => {
     if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).json({ error: 'Unauthorized' });
     next();
 };
 app.post('/api/verify', (req, res) => res.json(req.body.password === ADMIN_PASSWORD ? {success:true} : {error:'Invalid'}));
 
-// Nisathon Read
+// NISATHON
 app.get('/api/nisathon/stats', async (req, res) => {
     if (mongoose.connection.readyState !== 1) return res.json({});
     let stats = await NisathonStats.findOne({ key: 'main' });
@@ -280,7 +309,7 @@ app.get('/api/nisathon/leaderboard', async (req, res) => {
 });
 app.get('/api/nisathon/recent', async (req, res) => res.json(await NisathonEvent.find().sort({ createdAt: -1 }).limit(10)));
 
-// Manual Event
+// MANUAL & TEST EVENTS
 app.post('/api/nisathon/test-event', auth, async (req, res) => {
     const stats = await NisathonStats.findOne({ key: 'main' });
     await processEvent(stats, req.body.type, req.body.user, parseFloat(req.body.amount), "Manual", null, req.body.tier, true);
@@ -288,7 +317,7 @@ app.post('/api/nisathon/test-event', auth, async (req, res) => {
     res.json({ success: true });
 });
 
-// Controls
+// CONTROLS
 app.post('/api/nisathon/timer/set', auth, async (req, res) => {
     const stats = await NisathonStats.findOne({ key: 'main' });
     const ms = (req.body.hours*3600 + req.body.minutes*60 + req.body.seconds)*1000;
@@ -388,24 +417,20 @@ app.post('/api/upload', async (req, res) => {
     return res.status(500).send();
 });
 
-// --- BOOT ---
+// START
 if (MONGO_URI) {
     mongoose.set('strictQuery', false);
     mongoose.connect(MONGO_URI)
         .then(() => {
             console.log("✅ MongoDB Ready");
-            // START SERVER ONLY AFTER DB CONNECT
-            app.listen(PORT, () => {
+            app.listen(PORT, async () => {
                 console.log(`✅ Server on ${PORT}`);
-                console.log(`ℹ️ Channel ID: ${SE_CHANNEL_ID}`);
+                // Resolve ID before starting sync loops
+                await resolveChannelId();
                 
-                // Startup Deep Sync
-                setTimeout(() => runSync(true), 5000); 
-                
-                // Loop
+                console.log("🚀 Startup Deep Sync...");
+                await runSync(true);
                 setInterval(() => runSync(false), 30000);
-                
-                // Ping
                 setInterval(() => { axios.get('https://urnisa-backend.onrender.com').catch(()=>{}) }, 300000);
             });
         })
