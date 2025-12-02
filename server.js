@@ -17,7 +17,6 @@ const MONGO_URI = process.env.MONGO_URI;
 let SE_JWT = process.env.STREAMELEMENTS_JWT || "";
 SE_JWT = SE_JWT.replace(/^Bearer\s+/i, "").replace(/["']/g, "").trim();
 
-// We will try this ID, and also auto-resolve 'urnisa_'
 let ENV_CHANNEL_ID = process.env.STREAMELEMENTS_CHANNEL_ID || "";
 ENV_CHANNEL_ID = ENV_CHANNEL_ID.replace(/["']/g, "").trim();
 
@@ -130,8 +129,8 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
         eventType = 'donation';
         if (isNewEvent) stats.currentDonations += amount;
     }
-    // FOLLOWER LOGIC (No Nisaballs)
-    else if (type === 'follower' || type === 'follow') {
+    // FOLLOWER LOGIC
+    else if (['follower', 'follow'].includes(type)) {
         earnedNisaballs = 0;
         amountDisplay = "New Follower";
         eventType = 'follower';
@@ -140,19 +139,15 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
     // Update Stats & Timer
     if (isNewEvent) {
         stats.totalNisaballs = roundOneDecimal(stats.totalNisaballs + earnedNisaballs);
+        const mult = stats.activeEvent === 'DOUBLE_TIMER' ? 2 : 1;
+        const msAdd = earnedNisaballs * 10 * mult * 60000;
         
-        // Only update timer if Nisaballs were earned
-        if (earnedNisaballs > 0) {
-            const mult = stats.activeEvent === 'DOUBLE_TIMER' ? 2 : 1;
-            const msAdd = earnedNisaballs * 10 * mult * 60000;
-            
-            if (!stats.isPaused) {
-                const now = Date.now();
-                const curEnd = new Date(stats.timerEndTime).getTime();
-                stats.timerEndTime = new Date(Math.max(now, curEnd) + msAdd);
-            } else {
-                stats.remainingTimeMs += msAdd;
-            }
+        if (!stats.isPaused) {
+            const now = Date.now();
+            const curEnd = new Date(stats.timerEndTime).getTime();
+            stats.timerEndTime = new Date(Math.max(now, curEnd) + msAdd);
+        } else {
+            stats.remainingTimeMs += msAdd;
         }
     }
 
@@ -212,12 +207,14 @@ const connectSocket = () => {
     });
 
     socket.on('event', async (data) => {
+        // LOG RAW DATA FOR DEBUGGING
+        console.log('🔥 [Socket] RAW:', data);
+
         if (!data || !data.type) return;
         
-        // Added 'follower' to the filter list
-        if (!['subscriber', 'tip', 'cheer', 'follower'].includes(data.type)) return;
+        // Accept 'follow' (SE name) and 'follower'
+        if (!['subscriber', 'tip', 'cheer', 'follower', 'follow'].includes(data.type)) return;
 
-        console.log(`⚡ [Socket] New Event: ${data.type}`);
         try {
             const stats = await NisathonStats.findOne({ key: 'main' });
             if (!stats) return;
@@ -233,7 +230,8 @@ const connectSocket = () => {
                 if (info.gifted) type = 'gift'; 
             } else if (type === 'tip' || type === 'cheer') {
                 amount = info.amount;
-            } else if (type === 'follower') {
+            } else if (type === 'follow') {
+                type = 'follower'; // Normalize
                 amount = 0;
             }
 
@@ -252,20 +250,18 @@ const fetchAndProcess = async (channelId, label, stats) => {
     
     try {
         const url = `https://api.streamelements.com/kappa/v2/activities/${channelId}`;
-        // console.log(`📡 [${label}] Checking ${channelId}...`);
         
         const { data: activities } = await axios.get(url, {
             headers: { 
                 'Authorization': `Bearer ${SE_JWT}`,
                 'Accept': 'application/json',
-                'User-Agent': 'UrnisaBot/1.0' // Fix 403/401 on some endpoints
+                'User-Agent': 'UrnisaBot/1.0' 
             },
             params: { limit: 25 },
             timeout: 10000
         });
 
         if (!activities || activities.length === 0) {
-            // console.log(`⚠️ [${label}] 0 activities.`);
             return false;
         }
 
@@ -275,18 +271,21 @@ const fetchAndProcess = async (channelId, label, stats) => {
         for (const act of activities) {
             let amt = 0;
             let tier = '1000';
+            let type = act.type;
+            
             if (['subscriber','sub','resub'].includes(act.type)) { amt = 1; tier = act.data.tier || '1000'; }
             else if (act.type === 'gift') amt = act.data.amount || 1;
             else if (['cheer','tip'].includes(act.type)) amt = act.data.amount;
-            else continue; // We skip followers in historical REST sync to avoid clogging DB
+            else if (act.type === 'follow') { type = 'follower'; amt = 0; }
+            else continue;
 
-            const added = await processEvent(stats, act.type, act.data.username, amt, act.data.message, act._id, tier);
+            const added = await processEvent(stats, type, act.data.username, amt, act.data.message, act._id, tier);
             if (added > 0) changes = true;
         }
         return changes;
 
     } catch (e) {
-        if (e.response?.status === 401) console.error(`❌ [${label}] 401 Unauthorized. Check JWT!`);
+        if (e.response?.status === 401) console.error(`❌ [${label}] 401 Unauthorized.`);
         else console.error(`❌ [${label}] Error: ${e.message}`);
         return false;
     }
@@ -381,7 +380,7 @@ const runSync = async () => {
 app.get('/', (req, res) => res.send('Backend OK'));
 
 app.get('/api/debug/se-latest', async (req, res) => {
-    if (!SE_JWT) return res.json({ error: "Missing Config" });
+    if (!SE_JWT || !ENV_CHANNEL_ID) return res.json({ error: "Missing Config" });
     let targetId = ENV_CHANNEL_ID;
     try {
         const r = await axios.get(`https://api.streamelements.com/kappa/v2/channels/${TARGET_USERNAME}`, { headers: { 'Authorization': `Bearer ${SE_JWT}` } });
@@ -411,8 +410,10 @@ app.get('/api/nisathon/stats', async (req, res) => {
 });
 
 app.get('/api/nisathon/leaderboard', async (req, res) => {
-    const lb = await NisathonEvent.aggregate([{ $group: { _id: "$user", total: { $sum: "$nisaballAmount" } } }, { $sort: { total: -1 } }, { $limit: 10 }]);
-    res.json(lb.map((x, i) => ({ rank: i+1, user: x._id, totalNisaballs: roundOneDecimal(x.total) })));
+    try {
+        const lb = await NisathonEvent.aggregate([{ $group: { _id: "$user", total: { $sum: "$nisaballAmount" } } }, { $sort: { total: -1 } }, { $limit: 10 }]);
+        res.json(lb.map((x, i) => ({ rank: i+1, user: x._id, totalNisaballs: roundOneDecimal(x.total) })));
+    } catch { res.json([]); }
 });
 
 app.get('/api/nisathon/recent', async (req, res) => res.json(await NisathonEvent.find().sort({ createdAt: -1 }).limit(10)));
@@ -482,7 +483,21 @@ app.get('/api/schedule', async (req, res) => res.json({ url: (await Setting.find
 app.post('/api/schedule', auth, async (req, res) => { await Setting.findOneAndUpdate({ key: 'schedule_url' }, { value: req.body.url }, { upsert: true }); res.json({ success: true }); });
 app.post('/api/stream-status', auth, async (req, res) => { await Setting.findOneAndUpdate({ key: 'stream_status_override' }, { value: req.body.override }, { upsert: true }); res.json({ success: true }); });
 app.get('/api/stream-status', async (req, res) => { const s = await Setting.findOne({ key: 'stream_status_override' }); res.json({ override: s?.value || 'auto' }); });
-app.post('/api/upload', async (req, res) => { const { image } = req.body; if (!image) return res.status(400).send(); if (CLOUDINARY_CLOUD_NAME) { try { const ts = Math.round(new Date().getTime()/1000); const sig = crypto.createHash('sha1').update(`timestamp=${ts}${CLOUDINARY_API_SECRET}`).digest('hex'); const f = new FormData(); f.append('file', `data:image/jpeg;base64,${image}`); f.append('api_key', CLOUDINARY_API_KEY); f.append('timestamp', ts); f.append('signature', sig); const r = await axios.post(`https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/image/upload`, f); return res.json({ success: true, data: { url: r.data.secure_url } }); } catch (e) { return res.status(500).send(); } } return res.status(500).send(); });
+
+app.post('/api/upload', async (req, res) => {
+    const { image } = req.body;
+    if (!image) return res.status(400).send();
+    if (CLOUDINARY_CLOUD_NAME) {
+        try {
+            const ts = Math.round(new Date().getTime()/1000);
+            const sig = crypto.createHash('sha1').update(`timestamp=${ts}${CLOUDINARY_API_SECRET}`).digest('hex');
+            const f = new FormData(); f.append('file', `data:image/jpeg;base64,${image}`); f.append('api_key', CLOUDINARY_API_KEY); f.append('timestamp', ts); f.append('signature', sig);
+            const r = await axios.post(`https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/image/upload`, f);
+            return res.json({ success: true, data: { url: r.data.secure_url } });
+        } catch (e) { return res.status(500).send(); }
+    }
+    return res.status(500).send();
+});
 
 // START
 if (MONGO_URI) {
@@ -493,10 +508,12 @@ if (MONGO_URI) {
             app.listen(PORT, async () => {
                 console.log(`✅ Server on ${PORT}`);
                 
-                // Init Sockets & Polling
+                await resolveChannelId();
                 connectSocket();
-                setInterval(() => runSync(), 30000);
                 
+                console.log("🚀 Startup Deep Sync...");
+                await runSync(true);
+                setInterval(() => runSync(false), 30000);
                 setInterval(() => { axios.get('https://urnisa-backend.onrender.com').catch(()=>{}) }, 300000);
             });
         })
