@@ -5,21 +5,26 @@ const mongoose = require('mongoose');
 const crypto = require('crypto');
 require('dotenv').config();
 
-// --- CONFIGURATION & SANITIZATION ---
+// ==========================================
+// CONFIGURATION & SETUP
+// ==========================================
 const PORT = process.env.PORT || 3001;
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "admin"; 
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "admin";
 const MONGO_URI = process.env.MONGO_URI;
 
-// Sanitize JWT: Remove 'Bearer ' prefix if present, remove quotes, trim whitespace
-// This fixes the "No authorization token found" error if the env var is malformed
+// StreamElements Config
 let SE_JWT = process.env.STREAMELEMENTS_JWT || "";
-SE_JWT = SE_JWT.replace(/Bearer\s+/i, "").replace(/["']/g, "").trim();
+SE_JWT = SE_JWT.replace(/^Bearer\s+/i, "").replace(/["']/g, "").trim();
 
-// Sanitize Channel ID
 let SE_CHANNEL_ID = process.env.STREAMELEMENTS_CHANNEL_ID || "";
 SE_CHANNEL_ID = SE_CHANNEL_ID.replace(/["']/g, "").trim();
 
-// Cloudinary
+// Twitch Config (Optional Hybrid)
+const TWITCH_CLIENT_ID = process.env.TWITCH_CLIENT_ID;
+const TWITCH_CLIENT_SECRET = process.env.TWITCH_CLIENT_SECRET;
+let TWITCH_ACCESS_TOKEN = null;
+
+// Image Hosting
 const CLOUDINARY_CLOUD_NAME = process.env.CLOUDINARY_CLOUD_NAME;
 const CLOUDINARY_API_KEY = process.env.CLOUDINARY_API_KEY;
 const CLOUDINARY_API_SECRET = process.env.CLOUDINARY_API_SECRET;
@@ -27,30 +32,49 @@ const IMGBB_API_KEY = process.env.IMGBB_API_KEY || process.env.VITE_IMGBB_API_KE
 
 const DEFAULT_SCHEDULE_URL = 'https://cdn.discordapp.com/attachments/1338254150479118347/1439859590152978443/3_am_17.png';
 
-// --- EXPRESS SETUP ---
 const app = express();
 app.use(express.json({ limit: '50mb' }));
 app.use(cors({ origin: '*' }));
 
-// --- MONGOOSE SCHEMAS ---
-const SettingSchema = new mongoose.Schema({ key: { type: String, unique: true }, value: mongoose.Schema.Types.Mixed });
-const Setting = mongoose.model('Setting', SettingSchema);
+console.log("--- URNISA BACKEND REBOOTING ---");
 
-const NisathonStatsSchema = new mongoose.Schema({
+// ==========================================
+// DATABASE SCHEMAS
+// ==========================================
+// Connection Logic with Robust Options
+if (MONGO_URI) {
+    mongoose.set('strictQuery', false);
+    
+    // Event Listeners
+    mongoose.connection.on('connected', () => console.log('✅ MongoDB Connected'));
+    mongoose.connection.on('error', (err) => console.error('❌ MongoDB Error:', err));
+    mongoose.connection.on('disconnected', () => console.log('⚠️ MongoDB Disconnected'));
+
+    mongoose.connect(MONGO_URI, {
+        serverSelectionTimeoutMS: 30000, // Give it 30s to connect before failing
+        socketTimeoutMS: 45000,
+        family: 4 // Use IPv4
+    }).catch(e => console.error("❌ Initial DB Connection Failed:", e));
+} else {
+    console.error("❌ MONGO_URI Missing in Env Vars");
+}
+
+const Setting = mongoose.model('Setting', new mongoose.Schema({ key: { type: String, unique: true }, value: mongoose.Schema.Types.Mixed }));
+
+const NisathonStats = mongoose.model('NisathonStats', new mongoose.Schema({
     key: { type: String, default: 'main', unique: true },
     currentSubs: { type: Number, default: 0 },
     currentBits: { type: Number, default: 0 },
     currentDonations: { type: Number, default: 0 },
-    totalNisaballs: { type: Number, default: 0 }, 
+    totalNisaballs: { type: Number, default: 0 },
     timerEndTime: { type: Date, default: Date.now },
     remainingTimeMs: { type: Number, default: 0 },
     isPaused: { type: Boolean, default: false },
     activeEvent: { type: String, default: null },
-    lastActivityTime: { type: String, default: new Date().toISOString() } 
-});
-const NisathonStats = mongoose.model('NisathonStats', NisathonStatsSchema);
+    lastActivityTime: { type: String, default: new Date().toISOString() }
+}));
 
-const NisathonEventSchema = new mongoose.Schema({
+const NisathonEvent = mongoose.model('NisathonEvent', new mongoose.Schema({
     providerId: { type: String, unique: true },
     user: { type: String, required: true },
     type: { type: String, required: true }, 
@@ -58,40 +82,40 @@ const NisathonEventSchema = new mongoose.Schema({
     message: String,
     nisaballAmount: { type: Number, default: 0 },
     createdAt: { type: Date, default: Date.now }
-});
-const NisathonEvent = mongoose.model('NisathonEvent', NisathonEventSchema);
+}));
 
-const SpinQueueSchema = new mongoose.Schema({
-    user: { type: String, required: true },
-    sourceEventId: { type: String },
-    nisaballs: Number,
-    createdAt: { type: Date, default: Date.now }
-});
-const SpinQueue = mongoose.model('SpinQueue', SpinQueueSchema);
+const SpinQueue = mongoose.model('SpinQueue', new mongoose.Schema({
+    user: String, sourceEventId: String, nisaballs: Number, createdAt: { type: Date, default: Date.now }
+}));
 
-const SpinHistorySchema = new mongoose.Schema({
-    user: { type: String, required: true },
-    reward: { type: String, required: true },
-    timestamp: { type: Date, default: Date.now }
-});
-const SpinHistory = mongoose.model('SpinHistory', SpinHistorySchema);
+const SpinHistory = mongoose.model('SpinHistory', new mongoose.Schema({
+    user: String, reward: String, timestamp: { type: Date, default: Date.now }
+}));
 
-// --- LOGIC HELPERS ---
 const roundOneDecimal = (num) => Math.round(num * 10) / 10;
 
-// --- CORE EVENT PROCESSOR ---
-const processNisathonEvent = async (stats, type, user, amount, message, providerId, tier = '1000') => {
+// ==========================================
+// CORE LOGIC
+// ==========================================
+
+const processEvent = async (stats, type, user, amount, message, providerId, tier = '1000', isManual = false) => {
+    // GUARD: Prevent processing if DB disconnected to avoid buffering timeouts
+    if (mongoose.connection.readyState !== 1) {
+        console.warn("⚠️ Skipping event process: DB not ready");
+        return 0;
+    }
+
     let isNewEvent = true;
 
-    // Idempotency Check
-    if (providerId) {
+    // Check duplicates (unless manual override)
+    if (providerId && !isManual) {
         const existing = await NisathonEvent.findOne({ providerId });
-        if (existing) isNewEvent = false; 
+        if (existing) isNewEvent = false;
     }
 
     let earnedNisaballs = 0;
     let amountDisplay = "";
-    let eventType = type; 
+    let eventType = type;
 
     // --- RULESET ---
     if (['subscriber', 'sub', 'resub', 'subscription'].includes(type)) {
@@ -125,7 +149,7 @@ const processNisathonEvent = async (stats, type, user, amount, message, provider
         if (isNewEvent) stats.currentDonations += amount;
     }
 
-    // --- UPDATE STATS ---
+    // Update Stats & Timer
     if (isNewEvent) {
         stats.totalNisaballs = roundOneDecimal(stats.totalNisaballs + earnedNisaballs);
         const mult = stats.activeEvent === 'DOUBLE_TIMER' ? 2 : 1;
@@ -140,7 +164,7 @@ const processNisathonEvent = async (stats, type, user, amount, message, provider
         }
     }
 
-    // --- DB UPSERT ---
+    // Save Event
     const eventData = {
         providerId: providerId || `sim-${Date.now()}`,
         user: user || 'Anonymous',
@@ -158,45 +182,38 @@ const processNisathonEvent = async (stats, type, user, amount, message, provider
         { upsert: true, new: true }
     );
 
+    // Wheel Logic
     if (isNewEvent && earnedNisaballs >= 5) {
         const spins = Math.floor(earnedNisaballs / 5);
         console.log(`🎡 Queueing ${spins} spins for ${user}`);
         for (let i = 0; i < spins; i++) {
-            await SpinQueue.create({ 
-                user: user||'Anon', 
-                sourceEventId: res._id, 
-                nisaballs: earnedNisaballs 
-            });
+            await SpinQueue.create({ user: user||'Anon', sourceEventId: res._id, nisaballs: earnedNisaballs });
         }
     }
+    
     return earnedNisaballs;
 };
 
-// --- PROVIDER: STREAMELEMENTS ---
-const syncStreamElements = async (stats, forceBackfill = false) => {
-    if (!SE_JWT || !SE_CHANNEL_ID) {
-        console.log("❌ Skipped SE Sync: Missing Config");
-        return false;
-    }
+// ==========================================
+// PROVIDER 1: STREAMELEMENTS
+// ==========================================
+const syncStreamElements = async (stats, limit = 50) => {
+    if (!SE_JWT || !SE_CHANNEL_ID) return false;
 
     try {
-        const limit = forceBackfill ? 100 : 50;
         const config = {
-            headers: { 'Authorization': `Bearer ${SE_JWT}` },
+            headers: { 'Authorization': `Bearer ${SE_JWT}`, 'Accept': 'application/json' },
             params: { limit },
-            timeout: 15000
+            timeout: 10000
         };
 
-        if (forceBackfill) console.log(`📡 [SE] Fetching ${limit} latest events...`);
-        
         const url = `https://api.streamelements.com/kappa/v2/activities/${SE_CHANNEL_ID}`;
-        const { data: activities } = await axios.get(url, config);
+        const response = await axios.get(url, config);
+        const activities = response.data;
 
-        if (!activities || activities.length === 0) {
-            if (forceBackfill) console.log(`⚠️ [SE] API returned 0 events. Check Channel ID: ${SE_CHANNEL_ID}`);
-            return false;
-        }
+        if (!activities || activities.length === 0) return false;
 
+        // Sort Oldest -> Newest
         activities.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
         
         let changesMade = false;
@@ -204,107 +221,85 @@ const syncStreamElements = async (stats, forceBackfill = false) => {
 
         for (const act of activities) {
             newestDate = act.createdAt;
-
-            if (act.data.username?.toLowerCase() === 'greatrimu') {
-                console.log(`👀 TARGET FOUND: ${act.type} | ${act.data.username} | Tier: ${act.data.tier}`);
-            }
-
+            
             let amount = 0;
             let tier = '1000';
-            
-            if (['subscriber', 'sub', 'resub', 'subscription'].includes(act.type)) {
+            const type = act.type;
+
+            if (['subscriber', 'sub', 'resub', 'subscription'].includes(type)) {
                 amount = 1;
                 tier = act.data.tier || '1000';
-            } else if (act.type === 'gift') {
+            } else if (type === 'gift') {
                 amount = act.data.amount || 1;
-            } else if (['cheer', 'tip'].includes(act.type)) {
+            } else if (['cheer', 'tip'].includes(type)) {
                 amount = act.data.amount;
             } else {
                 continue;
             }
 
-            const added = await processEvent(stats, act.type, act.data.username, amount, act.data.message, act._id, tier);
+            const added = await processEvent(stats, type, act.data.username, amount, act.data.message, act._id, tier);
             if (added > 0) changesMade = true;
         }
 
-        if (!forceBackfill) stats.lastActivityTime = newestDate;
+        stats.lastActivityTime = newestDate;
         return changesMade;
 
     } catch (e) {
-        if (e.response?.status === 401) {
-            console.error("❌ [SE] 401 Unauthorized. CHECK JWT TOKEN!");
-        } else {
-            console.error(`❌ [SE] Error: ${e.message}`);
-        }
+        console.error(`❌ SE Sync Failed: ${e.message}`);
         return false;
     }
 };
 
-// --- MAIN SYNC LOOP ---
-const runSync = async (forceBackfill = false) => {
-    if (mongoose.connection.readyState !== 1) return;
+// ==========================================
+// MAIN LOOP
+// ==========================================
+const runSync = async (forceDeep = false) => {
+    // GUARD: Check DB connection status before doing anything
+    if (mongoose.connection.readyState !== 1) {
+        console.log("⏳ Sync paused: DB not connected");
+        return;
+    }
 
     try {
         let stats = await NisathonStats.findOne({ key: 'main' });
         if (!stats) stats = await NisathonStats.create({ key: 'main', timerEndTime: new Date(Date.now() + 3*3600000) });
 
-        const seChanged = await syncStreamElements(stats, forceBackfill);
-        
-        if (seChanged || forceBackfill) {
+        if (forceDeep) console.log("🚀 Running Deep Sync (500 items)...");
+
+        const seChanged = await syncStreamElements(stats, forceDeep ? 500 : 50);
+
+        if (seChanged || forceDeep) {
             await stats.save();
-            if (seChanged) console.log("✅ Stats Updated.");
+            if (seChanged) console.log("✅ Stats Updated from Sync");
         }
     } catch (e) {
-        console.error("Sync Loop Error:", e);
+        console.error("Main Loop Error:", e);
     }
 };
 
-// --- API ROUTES ---
-app.get('/', (req, res) => res.send('Backend Online'));
-app.post('/api/verify', (req, res) => res.json(req.body.password === ADMIN_PASSWORD ? {success:true} : {error:'Invalid'}));
+// ==========================================
+// API ROUTES
+// ==========================================
+app.get('/', (req, res) => res.send('Urnisa Backend Active'));
+
+// DEBUG
+app.get('/api/debug/se-latest', async (req, res) => {
+    if (!SE_JWT || !SE_CHANNEL_ID) return res.json({ error: "Missing Config" });
+    try {
+        const response = await axios.get(`https://api.streamelements.com/kappa/v2/activities/${SE_CHANNEL_ID}`, {
+            headers: { Authorization: `Bearer ${SE_JWT}` },
+            params: { limit: 25 }
+        });
+        res.json({ configId: SE_CHANNEL_ID, data: response.data });
+    } catch (e) { res.json({ error: e.message }); }
+});
 
 // AUTH
 const auth = (req, res, next) => {
     if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).json({ error: 'Unauthorized' });
     next();
 };
-
-// STREAM STATUS OVERRIDE
-app.get('/api/stream-status', async (req, res) => {
-    try {
-        const s = await Setting.findOne({ key: 'stream_status_override' });
-        res.json({ override: s?.value || 'auto' });
-    } catch (e) { res.json({ override: 'auto' }); }
-});
-
-app.post('/api/stream-status', auth, async (req, res) => {
-    await Setting.findOneAndUpdate({ key: 'stream_status_override' }, { value: req.body.override }, { upsert: true });
-    res.json({ success: true });
-});
-
-// DEBUG ROUTES
-app.get('/api/debug/se-latest', async (req, res) => {
-    if (!SE_JWT || !SE_CHANNEL_ID) return res.json({ error: "Config Missing" });
-    try {
-        const { data } = await axios.get(`https://api.streamelements.com/kappa/v2/activities/${SE_CHANNEL_ID}`, {
-            headers: { Authorization: `Bearer ${SE_JWT}` },
-            params: { limit: 25 }
-        });
-        res.json({ configId: SE_CHANNEL_ID, data: data });
-    } catch (e) { res.json({ error: e.message, status: e.response?.status }); }
-});
-
-app.get('/api/debug/user/:username', async (req, res) => {
-    if (!SE_JWT || !SE_CHANNEL_ID) return res.json({ error: "Config Missing" });
-    try {
-        const { data } = await axios.get(`https://api.streamelements.com/kappa/v2/activities/${SE_CHANNEL_ID}`, {
-            headers: { Authorization: `Bearer ${SE_JWT}` },
-            params: { limit: 100 }
-        });
-        const matches = data.filter(a => a.data.username && a.data.username.toLowerCase() === req.params.username.toLowerCase());
-        res.json({ found: matches.length, matches });
-    } catch (e) { res.json({ error: e.message }); }
-});
+app.post('/api/verify', (req, res) => res.json(req.body.password === ADMIN_PASSWORD ? {success:true} : {error:'Invalid'}));
 
 // NISATHON
 app.get('/api/nisathon/stats', async (req, res) => {
@@ -314,15 +309,17 @@ app.get('/api/nisathon/stats', async (req, res) => {
     res.json(stats);
 });
 app.get('/api/nisathon/leaderboard', async (req, res) => {
-    const lb = await NisathonEvent.aggregate([{ $group: { _id: "$user", total: { $sum: "$nisaballAmount" } } }, { $sort: { total: -1 } }, { $limit: 10 }]);
-    res.json(lb.map((x, i) => ({ rank: i+1, user: x._id, totalNisaballs: roundOneDecimal(x.total) })));
+    try {
+        const lb = await NisathonEvent.aggregate([{ $group: { _id: "$user", total: { $sum: "$nisaballAmount" } } }, { $sort: { total: -1 } }, { $limit: 10 }]);
+        res.json(lb.map((x, i) => ({ rank: i+1, user: x._id, totalNisaballs: roundOneDecimal(x.total) })));
+    } catch { res.json([]); }
 });
 app.get('/api/nisathon/recent', async (req, res) => res.json(await NisathonEvent.find().sort({ createdAt: -1 }).limit(10)));
 
 // MANUAL & TEST EVENTS
 app.post('/api/nisathon/test-event', auth, async (req, res) => {
     const stats = await NisathonStats.findOne({ key: 'main' });
-    await processNisathonEvent(stats, req.body.type, req.body.user, parseFloat(req.body.amount), "Manual Entry", null, req.body.tier);
+    await processEvent(stats, req.body.type, req.body.user, parseFloat(req.body.amount), "Manual Entry", null, req.body.tier, true);
     await stats.save();
     res.json({ success: true });
 });
@@ -403,6 +400,14 @@ app.post('/api/schedule', auth, async (req, res) => {
     await Setting.findOneAndUpdate({ key: 'schedule_url' }, { value: req.body.url }, { upsert: true });
     res.json({ success: true });
 });
+app.post('/api/stream-status', auth, async (req, res) => {
+    await Setting.findOneAndUpdate({ key: 'stream_status_override' }, { value: req.body.override }, { upsert: true });
+    res.json({ success: true });
+});
+app.get('/api/stream-status', async (req, res) => {
+    const s = await Setting.findOne({ key: 'stream_status_override' });
+    res.json({ override: s?.value || 'auto' });
+});
 
 // UPLOAD
 app.post('/api/upload', async (req, res) => {
@@ -421,13 +426,9 @@ app.post('/api/upload', async (req, res) => {
 });
 
 // START
-if (MONGO_URI) {
-    app.listen(PORT, () => {
-        console.log(`✅ Server on ${PORT}`);
-        setTimeout(() => runSync(true), 5000);
-        setInterval(() => runSync(false), 30000);
-        setInterval(() => { axios.get('https://urnisa-backend.onrender.com').catch(()=>{}) }, 300000);
-    });
-} else {
-    console.error("❌ MONGO_URI Missing");
-}
+app.listen(PORT, () => {
+    console.log(`✅ Server on ${PORT}`);
+    setTimeout(() => runSync(true), 5000);
+    setInterval(() => runSync(false), 30000);
+    setInterval(() => { axios.get('https://urnisa-backend.onrender.com').catch(()=>{}) }, 300000);
+});
