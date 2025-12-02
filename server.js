@@ -14,21 +14,22 @@ const MONGO_URI = process.env.MONGO_URI;
 let SE_JWT = process.env.STREAMELEMENTS_JWT || "";
 SE_JWT = SE_JWT.replace(/^Bearer\s+/i, "").replace(/["']/g, "").trim();
 
-// We will overwrite this with the auto-resolved ID
+// Initial ID from Env (Might be wrong, we will correct it)
 let SE_CHANNEL_ID = process.env.STREAMELEMENTS_CHANNEL_ID || "";
+SE_CHANNEL_ID = SE_CHANNEL_ID.replace(/["']/g, "").trim();
+
 const TARGET_USERNAME = 'urnisa_'; 
 
 const CLOUDINARY_CLOUD_NAME = process.env.CLOUDINARY_CLOUD_NAME;
 const CLOUDINARY_API_KEY = process.env.CLOUDINARY_API_KEY;
 const CLOUDINARY_API_SECRET = process.env.CLOUDINARY_API_SECRET;
 const IMGBB_API_KEY = process.env.IMGBB_API_KEY || process.env.VITE_IMGBB_API_KEY;
-const DEFAULT_SCHEDULE_URL = 'https://cdn.discordapp.com/attachments/1338254150479118347/1439859590152978443/3_am_17.png';
 
 const app = express();
 app.use(express.json({ limit: '50mb' }));
 app.use(cors({ origin: '*' }));
 
-console.log("--- URNISA BACKEND INITIALIZING ---");
+console.log("--- URNISA BACKEND REBOOTING (AUTO-FIX MODE) ---");
 
 // --- SCHEMAS ---
 const SettingSchema = new mongoose.Schema({ key: { type: String, unique: true }, value: mongoose.Schema.Types.Mixed });
@@ -75,6 +76,7 @@ const roundOneDecimal = (num) => Math.round(num * 10) / 10;
 const processEvent = async (stats, type, user, amount, message, providerId, tier = '1000', isManual = false) => {
     let isNewEvent = true;
 
+    // Deduplicate
     if (providerId && !isManual) {
         const existing = await NisathonEvent.findOne({ providerId });
         if (existing) isNewEvent = false;
@@ -84,6 +86,7 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
     let amountDisplay = "";
     let eventType = type;
 
+    // Rules
     if (['subscriber', 'sub', 'resub', 'subscription'].includes(type)) {
         let tVal = 0.5;
         let tLbl = "Tier 1";
@@ -115,6 +118,7 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
         if (isNewEvent) stats.currentDonations += amount;
     }
 
+    // Update Stats
     if (isNewEvent) {
         stats.totalNisaballs = roundOneDecimal(stats.totalNisaballs + earnedNisaballs);
         const mult = stats.activeEvent === 'DOUBLE_TIMER' ? 2 : 1;
@@ -129,6 +133,7 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
         }
     }
 
+    // DB Upsert
     const eventData = {
         providerId: providerId || `sim-${Date.now()}`,
         user: user || 'Anonymous',
@@ -146,6 +151,7 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
         { upsert: true, new: true }
     );
 
+    // Wheel Queue
     if (isNewEvent && earnedNisaballs >= 5) {
         const spins = Math.floor(earnedNisaballs / 5);
         console.log(`🎡 Queueing ${spins} spins for ${user}`);
@@ -154,83 +160,85 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
         }
     }
     
+    if (isNewEvent) console.log(`✅ SAVED EVENT: ${user} (${eventType})`);
     return earnedNisaballs;
 };
 
-// --- CHANNEL RESOLVER ---
-const resolveChannelId = async () => {
+// --- CRITICAL FIX: RESOLVE REAL ID ---
+const forceResolveChannelId = async () => {
     if (!SE_JWT) {
-        console.error("❌ NO JWT FOUND");
+        console.error("❌ NO JWT FOUND. CANNOT RESOLVE ID.");
         return false;
     }
     try {
-        console.log(`🔍 Resolving Account ID for username: '${TARGET_USERNAME}'...`);
-        // Add User-Agent to look like a browser
+        console.log(`🔍 Force-Resolving ID for: '${TARGET_USERNAME}'...`);
+        
+        // This endpoint gets public channel info
         const response = await axios.get(`https://api.streamelements.com/kappa/v2/channels/${TARGET_USERNAME}`, {
-             headers: { 'User-Agent': 'Mozilla/5.0' }
+             headers: { 
+                 'User-Agent': 'Mozilla/5.0',
+                 'Authorization': `Bearer ${SE_JWT}`
+             }
         });
         
         if (response.data && response.data._id) {
             const realId = response.data._id;
-            console.log(`✅ RESOLVED ID: ${realId}`);
-            SE_CHANNEL_ID = realId; // OVERWRITE GLOBAL ID
+            
+            if (SE_CHANNEL_ID !== realId) {
+                console.log(`⚠️ CONFIG MISMATCH DETECTED!`);
+                console.log(`   Configured ID: ${SE_CHANNEL_ID}`);
+                console.log(`   REAL ID:       ${realId}`);
+                console.log(`✅ SWITCHING TO REAL ID...`);
+                SE_CHANNEL_ID = realId;
+            } else {
+                console.log(`✅ Configured ID matches Real ID: ${realId}`);
+            }
             return true;
         }
     } catch (e) {
-        console.error(`❌ Failed to resolve ID: ${e.message}`);
-        try {
-            const meRes = await axios.get('https://api.streamelements.com/kappa/v2/channels/me', {
-                headers: { Authorization: `Bearer ${SE_JWT}` }
-            });
-            if (meRes.data._id) {
-                console.log(`⚠️ Alias failed, using Token Owner ID: ${meRes.data._id}`);
-                SE_CHANNEL_ID = meRes.data._id;
-                return true;
-            }
-        } catch (e2) {}
+        console.error(`❌ Failed to resolve ID for ${TARGET_USERNAME}: ${e.message}`);
+        console.error("   -> Ensure the username 'urnisa_' is correct and StreamElements page is public.");
     }
     return false;
 };
 
 // --- FALLBACK: SESSION SYNC ---
-// Fetches "Latest" items from the session if activity list is empty
 const syncSessionFallback = async (stats) => {
     try {
-        console.log(`⚡ Running Session Fallback (Latest Events Check)...`);
+        console.log(`⚡ Checking Session Data (Live Fallback)...`);
         const { data: session } = await axios.get(`https://api.streamelements.com/kappa/v2/sessions/${SE_CHANNEL_ID}`, {
-             headers: { 'Authorization': `Bearer ${SE_JWT}`, 'User-Agent': 'Mozilla/5.0' }
+             headers: { 'Authorization': `Bearer ${SE_JWT}` }
         });
         
-        if (!session.data) return;
+        if (!session) {
+             console.log("❌ Session API returned null.");
+             return;
+        }
         
-        // Create synthetic IDs for session data so we don't add them duplicates if they don't change
-        // We use the 'name' and 'createdAt' (if avail) or just 'name' if SE doesn't provide time
-        // NOTE: Session data from SE often lacks a timestamp, so this is a best-effort "Latest" display.
-        
-        // Latest Subscriber
-        const lastSub = session.data['latest-subscriber'];
+        // Log what we see in session
+        // console.log("Session Keys:", Object.keys(session));
+
+        // Check specific keys SE uses
+        const lastSub = session['latest-subscriber'];
         if (lastSub) {
-            // We use a pseudo-ID. If user subs again, name is same. This is a limitation of Fallback.
-            // But better than nothing.
+            console.log(`   -> Found Session Sub: ${lastSub.name}`);
             await processEvent(stats, 'subscriber', lastSub.name, 1, "", `session-sub-${lastSub.name}`, lastSub.tier);
         }
         
-        // Latest Tip
-        const lastTip = session.data['latest-tip'];
+        const lastTip = session['latest-tip'];
         if (lastTip) {
+             console.log(`   -> Found Session Tip: ${lastTip.name} ($${lastTip.amount})`);
              await processEvent(stats, 'tip', lastTip.name, lastTip.amount, lastTip.message, `session-tip-${lastTip.name}-${lastTip.amount}`);
         }
 
-        // Latest Cheer
-        const lastCheer = session.data['latest-cheer'];
+        const lastCheer = session['latest-cheer'];
         if (lastCheer) {
+             console.log(`   -> Found Session Cheer: ${lastCheer.name} (${lastCheer.amount})`);
              await processEvent(stats, 'cheer', lastCheer.name, lastCheer.amount, lastCheer.message, `session-cheer-${lastCheer.name}-${lastCheer.amount}`);
         }
 
-        console.log("✅ Session Fallback Processed");
-
     } catch (e) {
-        console.error("Session Fallback Failed:", e.message);
+        console.error("Session Fallback Error:", e.message);
     }
 };
 
@@ -240,24 +248,23 @@ const syncStreamElements = async (stats, limit = 50) => {
 
     try {
         const response = await axios.get(`https://api.streamelements.com/kappa/v2/activities/${SE_CHANNEL_ID}`, {
-            headers: { 'Authorization': `Bearer ${SE_JWT}`, 'User-Agent': 'Mozilla/5.0' },
+            headers: { 'Authorization': `Bearer ${SE_JWT}` },
             params: { limit },
             timeout: 10000
         });
 
         const activities = response.data;
+        
+        // If empty, force session fallback immediately
         if (!activities || activities.length === 0) {
-            console.log(`⚠️ [SE] No activities found for ID: ${SE_CHANNEL_ID}`);
-            // TRIGGER FALLBACK
+            console.log(`⚠️ [SE] Activity Feed Empty for ${SE_CHANNEL_ID}`);
             await syncSessionFallback(stats);
             return false;
         }
 
+        // Sort Oldest -> Newest
         activities.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
         
-        const newest = activities[activities.length - 1];
-        console.log(`📡 [SE] Poll OK. Newest: ${newest.type} by ${newest.data.username}`);
-
         let changesMade = false;
         let newestDate = stats.lastActivityTime;
 
@@ -288,8 +295,6 @@ const syncStreamElements = async (stats, limit = 50) => {
         return changesMade;
     } catch (e) {
         console.error(`❌ [SE] Sync Error: ${e.response?.status || e.message}`);
-        // Try fallback on error too
-        await syncSessionFallback(stats);
         return false;
     }
 };
@@ -471,9 +476,11 @@ if (MONGO_URI) {
             console.log("✅ MongoDB Ready");
             app.listen(PORT, async () => {
                 console.log(`✅ Server on ${PORT}`);
-                // Resolve ID before starting sync loops
+                
+                // 1. Resolve ID
                 await resolveChannelId();
                 
+                // 2. Deep Sync
                 console.log("🚀 Startup Deep Sync...");
                 await runSync(true);
                 setInterval(() => runSync(false), 30000);
