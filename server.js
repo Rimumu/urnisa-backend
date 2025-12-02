@@ -17,7 +17,6 @@ const MONGO_URI = process.env.MONGO_URI;
 let SE_JWT = process.env.STREAMELEMENTS_JWT || "";
 SE_JWT = SE_JWT.replace(/^Bearer\s+/i, "").replace(/["']/g, "").trim();
 
-// We will try this ID, and also auto-resolve 'urnisa_'
 let ENV_CHANNEL_ID = process.env.STREAMELEMENTS_CHANNEL_ID || "";
 ENV_CHANNEL_ID = ENV_CHANNEL_ID.replace(/["']/g, "").trim();
 
@@ -110,7 +109,6 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
     if (['subscriber', 'sub', 'resub', 'subscription'].includes(type)) {
         // Skip Gift Recipients
         if (!isManual && (message.includes('gift') || amount === 0)) {
-             // console.log(`⏩ Skipping recipient event for ${user} (Gift Receiver)`);
              return 0; 
         }
 
@@ -184,6 +182,7 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
         { upsert: true, new: true }
     );
 
+    // Wheel Logic
     if (isNewEvent && earnedNisaballs >= 5) {
         const spins = Math.floor(earnedNisaballs / 5);
         console.log(`🎡 Queueing ${spins} spins for ${user}`);
@@ -225,7 +224,6 @@ const connectSocket = () => {
         if (!data || !data.type) return;
         if (!['subscriber', 'tip', 'cheer', 'follower', 'follow'].includes(data.type)) return;
 
-        console.log(`⚡ [Socket] New Event: ${data.type}`);
         try {
             const stats = await NisathonStats.findOne({ key: 'main' });
             if (!stats) return;
@@ -238,16 +236,7 @@ const connectSocket = () => {
             if (type === 'subscriber') {
                 tier = info.tier || '1000';
                 amount = info.amount || 1; 
-                if (info.gifted) {
-                    // For Socket, 'gifted' usually means it's the recipient event.
-                    // The bulk 'gift' event might come separately as a 'subscriber' event with bulk flag?
-                    // Actually SE socket sends individual 'subscriber' events for recipients.
-                    // We skip recipients here too to avoid double counting if we process the bulk event.
-                    // BUT socket might NOT send a bulk event.
-                    // Safe bet: Skip recipients if we trust REST history, but for realtime, we might miss it if we skip.
-                    // Let's skip for consistency with REST logic.
-                    return;
-                }
+                if (info.gifted) { return; } 
             } else if (type === 'tip' || type === 'cheer') {
                 amount = info.amount;
             } else if (type === 'follow') {
@@ -303,8 +292,6 @@ const fetchAndProcess = async (channelId, label, stats, limit = 25, offset = 0) 
 
         if (!activities || activities.length === 0) return [];
 
-        // If we are polling (offset 0), we sort Oldest -> Newest to update stats correctly.
-        // If we are rebuilding (bulk), we just return the list to be processed later.
         if (offset === 0) {
             activities.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
             let changes = false;
@@ -312,12 +299,12 @@ const fetchAndProcess = async (channelId, label, stats, limit = 25, offset = 0) 
                 let amt = 0;
                 let tier = '1000';
                 let type = act.type;
-                let username = act.data.username; // Default
+                let username = act.data.username; 
                 
                 if (['subscriber','sub','resub'].includes(act.type)) { 
                     amt = 1; 
                     tier = act.data.tier || '1000';
-                    if (act.data.gifted) username = act.data.sender; // Attribute to sender
+                    if (act.data.gifted) username = act.data.sender; 
                 }
                 else if (act.type === 'gift') {
                     amt = act.data.amount || 1; 
@@ -345,102 +332,67 @@ const fetchAndProcess = async (channelId, label, stats, limit = 25, offset = 0) 
 };
 
 // ==========================================
-// 3. REBUILD LOGIC (THE FIX)
+// 3. REBUILD LOGIC
 // ==========================================
 const rebuildEverything = async () => {
-    const resolvedId = await resolveChannelId();
-    if (!resolvedId && !ENV_CHANNEL_ID) {
-        console.error("❌ Cannot Rebuild: No ID");
-        return;
-    }
-    const targetId = resolvedId || ENV_CHANNEL_ID;
+    const resolvedId = await resolveChannelId() || ENV_CHANNEL_ID;
+    if (!resolvedId) return;
+    console.log(`🔥 STARTING REBUILD for ${resolvedId}...`);
 
-    console.log(`🔥 STARTING FULL REBUILD for ID: ${targetId}`);
-
-    // 1. Wipe DB
     await NisathonEvent.deleteMany({});
     await SpinQueue.deleteMany({});
     await SpinHistory.deleteMany({});
     
-    // 2. Reset Stats
     let stats = await NisathonStats.findOne({ key: 'main' });
     if (!stats) stats = await NisathonStats.create({ key: 'main' });
-    
-    stats.currentSubs = 0;
-    stats.currentBits = 0;
-    stats.currentDonations = 0;
-    stats.totalNisaballs = 0;
-    stats.remainingTimeMs = 0;
-    stats.isPaused = false;
-    stats.timerEndTime = new Date(Date.now() + 3 * 60 * 60 * 1000); // Default 3h
+    stats.currentSubs = 0; stats.currentBits = 0; stats.currentDonations = 0; stats.totalNisaballs = 0;
+    stats.remainingTimeMs = 0; stats.isPaused = false;
+    stats.timerEndTime = new Date(Date.now() + 3 * 60 * 60 * 1000);
     stats.lastActivityTime = new Date(0).toISOString(); 
     await stats.save();
 
-    // 3. Fetch History (1000 items)
     let allActivities = [];
     const limit = 100; 
     const pagesToFetch = 10; 
 
     for (let i = 0; i < pagesToFetch; i++) {
-        const offset = i * limit;
-        console.log(`   -> Fetching Page ${i+1} (Offset ${offset})...`);
-        // Re-use fetch logic but just get array back
-        const acts = await fetchAndProcess(targetId, "REBUILD", null, limit, offset);
-        
-        if (Array.isArray(acts) && acts.length > 0) {
-            allActivities = allActivities.concat(acts);
-        } else {
-            break; 
-        }
+        const acts = await fetchAndProcess(resolvedId, "REBUILD", null, limit, i * limit);
+        if (Array.isArray(acts) && acts.length > 0) allActivities = allActivities.concat(acts);
+        else break;
     }
 
     console.log(`   -> Processing ${allActivities.length} historical events...`);
-
-    // 4. Process Chronologically (Oldest First)
     allActivities.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
 
     for (const act of allActivities) {
-        let amt = 0;
-        let tier = '1000';
-        let type = act.type;
-        let username = act.data.username; // Default
-        
+        let amt = 0, tier = '1000', type = act.type, user = act.data.username;
         if (['subscriber','sub','resub'].includes(act.type)) { 
-            amt = 1; 
-            tier = act.data.tier || '1000';
-            if (act.data.gifted) username = act.data.sender; // Attribute to sender
+            amt = 1; tier = act.data.tier || '1000';
+            if (act.data.gifted) user = act.data.sender;
         }
         else if (act.type === 'gift') amt = act.data.amount || 1;
         else if (['cheer','tip'].includes(act.type)) amt = act.data.amount;
         else if (act.type === 'follow') { type = 'follower'; amt = 0; }
         else continue;
 
-        await processEvent(stats, type, username, amt, act.data.message, act._id, tier);
+        await processEvent(stats, type, user, amt, act.data.message, act._id, tier);
     }
-
-    // 5. Update Cursor & Save
     stats.lastActivityTime = new Date().toISOString();
     await stats.save();
     console.log("✅ REBUILD COMPLETE.");
 };
 
-
-// --- MAIN LOOP ---
 const runSync = async () => {
     if (mongoose.connection.readyState !== 1 || !SE_JWT) return;
-
     try {
         let stats = await NisathonStats.findOne({ key: 'main' });
         if (!stats) stats = await NisathonStats.create({ key: 'main', timerEndTime: new Date(Date.now() + 3*3600000) });
-
         let resolvedId = await resolveChannelId();
         
         let c1 = false, c2 = false;
-        if (resolvedId) c1 = await fetchAndProcess(resolvedId, "AUTO-ID", stats);
-        if (ENV_CHANNEL_ID && ENV_CHANNEL_ID !== resolvedId) c2 = await fetchAndProcess(ENV_CHANNEL_ID, "ENV-ID", stats);
-
+        if (resolvedId) c1 = await fetchAndProcess(resolvedId, "AUTO", stats);
+        if (ENV_CHANNEL_ID && ENV_CHANNEL_ID !== resolvedId) c2 = await fetchAndProcess(ENV_CHANNEL_ID, "ENV", stats);
         if (c1 || c2) await stats.save();
-
     } catch (e) { console.error("Loop Error:", e); }
 };
 
@@ -489,8 +441,9 @@ app.get('/api/nisathon/leaderboard', async (req, res) => {
     } catch { res.json([]); }
 });
 
-app.get('/api/nisathon/recent', async (req, res) => res.json(await NisathonEvent.find().sort({ createdAt: -1 }).limit(10)));
+app.get('/api/nisathon/recent', async (req, res) => res.json(await NisathonEvent.find().sort({ createdAt: -1 }).limit(50))); // Increased limit for admin log
 
+// MANUAL & TEST EVENTS
 app.post('/api/nisathon/test-event', auth, async (req, res) => {
     const stats = await NisathonStats.findOne({ key: 'main' });
     await processEvent(stats, req.body.type, req.body.user, parseFloat(req.body.amount), "Manual", null, req.body.tier, true);
@@ -498,6 +451,44 @@ app.post('/api/nisathon/test-event', auth, async (req, res) => {
     res.json({ success: true });
 });
 
+// DELETE EVENT (NEW)
+app.post('/api/nisathon/delete-event', auth, async (req, res) => {
+    const { id, revert } = req.body;
+    try {
+        const event = await NisathonEvent.findById(id);
+        if (!event) return res.status(404).json({ error: "Not Found" });
+
+        if (revert) {
+            const stats = await NisathonStats.findOne({ key: 'main' });
+            if (stats) {
+                // Revert counts roughly
+                if (event.type === 'sub') stats.currentSubs -= 1;
+                else if (event.type === 'gift') stats.currentSubs -= (event.nisaballAmount * 2); 
+                else if (event.type === 'bits') stats.currentBits -= (event.nisaballAmount * 500);
+                else if (event.type === 'donation') stats.currentDonations -= (event.nisaballAmount * 5);
+
+                stats.totalNisaballs = Math.max(0, roundOneDecimal(stats.totalNisaballs - event.nisaballAmount));
+                
+                // Revert Timer
+                const msToRemove = event.nisaballAmount * 10 * 60 * 1000;
+                if (stats.isPaused) {
+                    stats.remainingTimeMs = Math.max(0, stats.remainingTimeMs - msToRemove);
+                } else {
+                    const currentEnd = new Date(stats.timerEndTime).getTime();
+                    stats.timerEndTime = new Date(currentEnd - msToRemove);
+                }
+                await stats.save();
+            }
+        }
+
+        await SpinQueue.deleteMany({ sourceEventId: id });
+        await NisathonEvent.findByIdAndDelete(id);
+        
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// CONTROLS
 app.post('/api/nisathon/timer/set', auth, async (req, res) => {
     const stats = await NisathonStats.findOne({ key: 'main' });
     const ms = (req.body.hours*3600 + req.body.minutes*60 + req.body.seconds)*1000;
@@ -534,13 +525,11 @@ app.post('/api/nisathon/reset', auth, async (req, res) => {
     res.json({ success: true });
 });
 app.post('/api/nisathon/sync', auth, async (req, res) => {
-    await runSync();
+    await runSync(true);
     res.json({ success: true });
 });
-
-// REBUILD ENDPOINT
 app.post('/api/nisathon/rebuild', auth, async (req, res) => {
-    rebuildEverything(); // Background process
+    rebuildEverything();
     res.json({ success: true, message: "Rebuild Started" });
 });
 
@@ -632,16 +621,12 @@ if (MONGO_URI) {
             app.listen(PORT, async () => {
                 console.log(`✅ Server on ${PORT}`);
                 
-                const resolvedId = await resolveChannelId();
-                if (resolvedId) {
-                    connectSocket();
-                    console.log("🚀 Startup Deep Sync...");
-                    await runSync(); // Normal sync on start
-                    setInterval(() => runSync(), 30000);
-                } else {
-                    console.error("❌ CRITICAL: Could not resolve Channel ID. Sync disabled.");
-                }
+                await resolveChannelId();
+                connectSocket();
                 
+                console.log("🚀 Startup Deep Sync...");
+                await runSync(true);
+                setInterval(() => runSync(false), 30000);
                 setInterval(() => { axios.get('https://urnisa-backend.onrender.com').catch(()=>{}) }, 300000);
             });
         })
