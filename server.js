@@ -107,14 +107,9 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
     let eventType = type;
 
     // --- RULESET ---
-    
-    // SUBSCRIPTIONS
     if (['subscriber', 'sub', 'resub', 'subscription'].includes(type)) {
-        // CRITICAL FIX: Ignore "received gift" events IF we are not in manual mode.
-        // This prevents double counting because the 'gift' bulk event handles the credit.
-        // StreamElements sends individual 'subscriber' events for gift recipients. We want to skip those.
+        // Skip Recipient Events (trust bulk 'gift' event) unless manual
         if (!isManual && (message.includes('gift') || amount === 0)) {
-             // console.log(`⏩ Skipping recipient event for ${user}`);
              return 0; 
         }
 
@@ -130,28 +125,23 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
         eventType = 'sub';
         if (isNewEvent) stats.currentSubs += 1;
     } 
-    // GIFT SUBS (The Gifter)
     else if (type === 'gift') {
-        // amount here is number of gifts (e.g. 5, 10)
-        earnedNisaballs = 0.5 * amount; 
+        earnedNisaballs = 0.5 * amount;
         amountDisplay = `${amount} Gift Subs`;
         if (isNewEvent) stats.currentSubs += amount;
     } 
-    // BITS
     else if (['cheer', 'bits'].includes(type)) {
         earnedNisaballs = amount * 0.002;
         amountDisplay = `${amount} Bits`;
         eventType = 'bits';
         if (isNewEvent) stats.currentBits += amount;
     } 
-    // TIPS
     else if (['tip', 'donation'].includes(type)) {
         earnedNisaballs = amount * 0.2;
         amountDisplay = `$${amount.toFixed(2)}`;
         eventType = 'donation';
         if (isNewEvent) stats.currentDonations += amount;
     }
-    // FOLLOWERS
     else if (['follower', 'follow'].includes(type)) {
         earnedNisaballs = 0;
         amountDisplay = "New Follower";
@@ -193,7 +183,8 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
         { upsert: true, new: true }
     );
 
-    // Wheel Logic (Followers don't get spins)
+    // Wheel Logic (Single Transaction >= 5 NB)
+    // REMOVED CUMULATIVE LOGIC AS REQUESTED
     if (isNewEvent && earnedNisaballs >= 5) {
         const spins = Math.floor(earnedNisaballs / 5);
         console.log(`🎡 Queueing ${spins} spins for ${user}`);
@@ -216,6 +207,7 @@ const connectSocket = () => {
     
     console.log("🔌 [Socket] Connecting...");
     
+    // StreamElements uses Socket.IO v2. 
     socket = io('https://realtime.streamelements.com', { 
         transports: ['websocket'],
         forceNew: true,
@@ -238,8 +230,6 @@ const connectSocket = () => {
 
     socket.on('event', async (data) => {
         if (!data || !data.type) return;
-        
-        // Filter relevant events
         if (!['subscriber', 'tip', 'cheer', 'follower', 'follow'].includes(data.type)) return;
 
         console.log(`⚡ [Socket] New Event: ${data.type}`);
@@ -251,19 +241,16 @@ const connectSocket = () => {
             let amount = 1;
             let tier = '1000';
             let type = data.type; 
+            let username = info.username;
 
             if (type === 'subscriber') {
                 tier = info.tier || '1000';
                 amount = info.amount || 1; 
-                
-                // GIFT LOGIC:
-                // If 'gifted' is true in socket data, it means this is a recipient event.
-                // We want to SKIP this to avoid double counting, assuming a BULK GIFT event fires separately.
-                // OR if SE doesn't fire bulk events via socket, we might need to process these but attribute to sender.
-                // SAFEST: For now, skip socket recipients. rely on REST to catch bulk gifts correctly.
+                // Convert gifted to 'gift' type and sender
                 if (info.gifted) {
-                    // console.log("⏩ Skipping socket event (Gift Recipient)");
-                    return; 
+                     type = 'gift';
+                     username = info.sender;
+                     amount = 1; 
                 }
             } else if (type === 'tip' || type === 'cheer') {
                 amount = info.amount;
@@ -273,21 +260,38 @@ const connectSocket = () => {
             }
 
             const providerId = data._id || `sock-${Date.now()}-${Math.random()}`;
-            await processEvent(stats, type, info.username, amount, info.message||"", providerId, tier);
+            await processEvent(stats, type, username, amount, info.message||"", providerId, tier);
             await stats.save();
         } catch (e) { console.error("Socket Error:", e); }
     });
 };
 
 // ==========================================
-// 2. REST POLLING (METHOD 2)
+// 2. REST POLLING & RESOLVER
 // ==========================================
+const resolveChannelId = async () => {
+    if (!SE_JWT) return null;
+    try {
+        const res = await axios.get(`https://api.streamelements.com/kappa/v2/channels/${TARGET_USERNAME}`, {
+             headers: { 'User-Agent': 'Mozilla/5.0' }
+        });
+        if (res.data && res.data._id) {
+            return res.data._id;
+        }
+    } catch (e) { }
+    try {
+        const me = await axios.get('https://api.streamelements.com/kappa/v2/channels/me', {
+            headers: { 'Authorization': `Bearer ${SE_JWT}` }
+        });
+        return me.data._id;
+    } catch (e) { return null; }
+};
+
 const fetchAndProcess = async (channelId, label, stats, limit = 25, offset = 0) => {
-    if (!channelId) return false;
+    if (!channelId) return [];
     
     try {
         const url = `https://api.streamelements.com/kappa/v2/activities/${channelId}`;
-        
         const { data: activities } = await axios.get(url, {
             headers: { 
                 'Authorization': `Bearer ${SE_JWT}`,
@@ -298,94 +302,44 @@ const fetchAndProcess = async (channelId, label, stats, limit = 25, offset = 0) 
             timeout: 10000
         });
 
-        if (!activities || activities.length === 0) {
-            return false;
-        }
+        if (!activities || activities.length === 0) return [];
 
-        activities.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
-        
-        let changes = false;
-        for (const act of activities) {
-            let amt = 0;
-            let tier = '1000';
-            let type = act.type;
-            
-            if (['subscriber','sub','resub'].includes(act.type)) { 
-                amt = 1; 
-                tier = act.data.tier || '1000';
+        if (offset === 0) {
+            activities.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+            let changes = false;
+            for (const act of activities) {
+                let amt = 0;
+                let tier = '1000';
+                let type = act.type;
+                let username = act.data.username; 
                 
-                // GIFT LOGIC:
-                // If act.data.gifted is true, this is a recipient event.
-                // However, SE REST API often *doesn't* show a separate "bulk gift" event.
-                // It shows 10 separate "subscriber" events with gifted=true.
-                // TO FIX THIS: We must attribute these to the SENDER.
-                // And ensure we process them as +0.5 each.
-                if (act.data.gifted) {
-                    // Override user to be the sender
-                    // This effectively turns "UserB received gift" into "UserA gifted 1 sub"
-                    const sender = act.data.sender;
-                    if (sender) {
-                        // We change the type to 'gift' for our system so it processes as +0.5
-                        type = 'gift'; 
-                        amt = 1; // 1 gift
-                        // We need to use a unique ID for this 'gift instance' so we don't dedupe it against other gifts in the same batch
-                        // Luckily, each recipient event has a unique ID.
-                        // So we process this as: "Sender gifted 1 sub (ID: xyz)"
-                        // This results in 10 separate "Gift" events for the sender in the DB.
-                        // While verbose in the list, the MATH is correct (10 * 0.5 = 5).
-                        // And the wheel queue will get 10 entries of 0.5 (total 5).
-                        // We pass the sender as the user.
-                        await processEvent(stats, type, sender, amt, `Gift for ${act.data.username}`, act._id, tier);
-                        changes = true;
-                        continue; // Skip the default call at bottom
+                if (['subscriber','sub','resub'].includes(act.type)) { 
+                    amt = 1; 
+                    tier = act.data.tier || '1000';
+                    if (act.data.gifted) {
+                        username = act.data.sender;
+                        type = 'gift';
                     }
                 }
-            }
-            else if (act.type === 'gift') {
-                // If SE *does* send a bulk event, we process it.
-                amt = act.data.amount || 1; 
-            }
-            else if (['cheer','tip'].includes(act.type)) {
-                amt = act.data.amount; 
-            }
-            else if (act.type === 'follow') { 
-                type = 'follower'; 
-                amt = 0; 
-            }
-            else continue;
+                else if (act.type === 'gift') {
+                    amt = act.data.amount || 1; 
+                }
+                else if (['cheer','tip'].includes(act.type)) {
+                    amt = act.data.amount; 
+                }
+                else if (act.type === 'follow') { 
+                    type = 'follower'; 
+                    amt = 0; 
+                }
+                else continue;
 
-            const added = await processEvent(stats, type, act.data.username, amt, act.data.message, act._id, tier);
-            if (added > 0 || type === 'follower') changes = true;
+                const added = await processEvent(stats, type, username, amt, act.data.message, act._id, tier);
+                if (added > 0 || type === 'follower') changes = true;
+            }
+            return changes;
         }
-        return changes;
-
-    } catch (e) {
-        if (e.response?.status === 401) console.error(`❌ [${label}] 401 Unauthorized.`);
-        else console.error(`❌ [${label}] Error: ${e.message}`);
-        return false;
-    }
-};
-
-// Resolve correct ID for 'urnisa_'
-const resolveChannelId = async () => {
-    if (!SE_JWT) return null;
-    try {
-        const res = await axios.get(`https://api.streamelements.com/kappa/v2/channels/${TARGET_USERNAME}`, {
-             headers: { 'User-Agent': 'Mozilla/5.0' }
-        });
-        if (res.data && res.data._id) {
-            return res.data._id;
-        }
-    } catch (e) { 
-        console.log("⚠️ Could not resolve alias. Using Token Owner."); 
-    }
-    // Fallback to token owner
-    try {
-        const me = await axios.get('https://api.streamelements.com/kappa/v2/channels/me', {
-            headers: { 'Authorization': `Bearer ${SE_JWT}` }
-        });
-        return me.data._id;
-    } catch (e) { return null; }
+        return activities;
+    } catch (e) { return []; }
 };
 
 const syncSessionFallback = async (channelId, stats) => {
@@ -399,8 +353,13 @@ const syncSessionFallback = async (channelId, stats) => {
         let changes = false;
         const lastSub = session.data['latest-subscriber'];
         if (lastSub) {
-            // Session data is tricky for gifts. Safest to treat as regular sub if we can't distinguish.
-            await processEvent(stats, 'subscriber', lastSub.name, 1, "", `session-sub-${lastSub.name}`, lastSub.tier);
+            let username = lastSub.name;
+            let type = 'subscriber';
+            if (lastSub.gifted) {
+                 username = lastSub.sender;
+                 type = 'gift';
+            }
+            await processEvent(stats, type, username, 1, "", `session-sub-${username}`, lastSub.tier);
             changes = true;
         }
         
@@ -416,9 +375,7 @@ const syncSessionFallback = async (channelId, stats) => {
              changes = true;
         }
         if (changes) console.log("✅ Session Sync Processed");
-    } catch (e) {
-        // Silent fail is ok for fallback
-    }
+    } catch (e) { }
 };
 
 const runSync = async (forceDeep = false) => {
@@ -434,11 +391,8 @@ const runSync = async (forceDeep = false) => {
 
         if (resolvedId) {
             const limit = forceDeep ? 100 : 25;
-            if (forceDeep) console.log(`🚀 Deep Syncing 100 items from ${resolvedId}...`);
-            
             const c1 = await fetchAndProcess(resolvedId, "AUTO-ID", stats, limit);
             if (!c1 && forceDeep) await syncSessionFallback(resolvedId, stats);
-            
             if (c1 || forceDeep) await stats.save();
         }
     } catch (e) { console.error("Loop Error:", e); }
@@ -473,55 +427,31 @@ const rebuildEverything = async () => {
         if (Array.isArray(acts) && acts.length > 0) allActivities = allActivities.concat(acts);
         else break;
     }
-    
-    // Logic inside fetchAndProcess (above) already handles the attribution.
-    // But fetchAndProcess in "rebuild mode" (returning array) isn't fully implemented in the helper.
-    // The helper updates the DB directly.
-    // So for Rebuild, we actually just want to call fetchAndProcess in a loop? 
-    // No, fetchAndProcess updates stats live. That works for us.
-    // BUT we need to make sure we process them in order.
-    // Since fetchAndProcess does sort, we are good, BUT we need to do it page by page in reverse?
-    // Actually, simpler strategy: fetch ALL raw data first, then process.
-    
-    // Redo Rebuild Fetch properly:
-    try {
-        let rawActs = [];
-        for(let i=0; i<10; i++) {
-            const { data } = await axios.get(`https://api.streamelements.com/kappa/v2/activities/${resolvedId}`, {
-                headers: { 'Authorization': `Bearer ${SE_JWT}` },
-                params: { limit: 100, offset: i*100 }
-            });
-            if(data && data.length > 0) rawActs = rawActs.concat(data);
-            else break;
-        }
+
+    console.log(`   -> Processing ${allActivities.length} historical events...`);
+    allActivities.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+
+    for (const act of allActivities) {
+        let amt = 0, tier = '1000', type = act.type, user = act.data.username;
         
-        console.log(`   -> Processing ${rawActs.length} historical events...`);
-        rawActs.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
-
-        for (const act of rawActs) {
-            let amt = 0;
-            let tier = '1000';
-            let type = act.type;
-            let username = act.data.username;
-            
-            if (['subscriber','sub','resub'].includes(act.type)) { 
-                amt = 1; 
-                tier = act.data.tier || '1000';
-                if (act.data.gifted) {
-                    username = act.data.sender; 
-                    type = 'gift'; // Force gift type for calc
-                }
+        if (['subscriber','sub','resub'].includes(act.type)) { 
+            amt = 1; 
+            tier = act.data.tier || '1000';
+            if (act.data.gifted) {
+                user = act.data.sender; 
+                type = 'gift';
             }
-            else if (act.type === 'gift') amt = act.data.amount || 1;
-            else if (['cheer','tip'].includes(act.type)) amt = act.data.amount;
-            else if (act.type === 'follow') { type = 'follower'; amt = 0; }
-            else continue;
-
-            await processEvent(stats, type, username, amt, act.data.message, act._id, tier);
         }
-        await stats.save();
-        console.log("✅ REBUILD COMPLETE.");
-    } catch(e) { console.error("Rebuild Error", e); }
+        else if (act.type === 'gift') amt = act.data.amount || 1;
+        else if (['cheer','tip'].includes(act.type)) amt = act.data.amount;
+        else if (act.type === 'follow') { type = 'follower'; amt = 0; }
+        else continue;
+
+        await processEvent(stats, type, user, amt, act.data.message, act._id, tier);
+    }
+    stats.lastActivityTime = new Date().toISOString();
+    await stats.save();
+    console.log("✅ REBUILD COMPLETE.");
 };
 
 
@@ -548,7 +478,6 @@ app.get('/api/debug/se-latest', async (req, res) => {
     } catch (e) { res.json({ error: e.message }); }
 });
 
-// AUTH
 const auth = (req, res, next) => {
     if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).json({ error: 'Unauthorized' });
     next();
