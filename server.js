@@ -1,4 +1,3 @@
-
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
@@ -6,90 +5,77 @@ const mongoose = require('mongoose');
 const crypto = require('crypto');
 require('dotenv').config();
 
-// ==========================================
-// CONFIGURATION & SETUP
-// ==========================================
+// --- CONFIGURATION ---
 const PORT = process.env.PORT || 3001;
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "admin";
 const MONGO_URI = process.env.MONGO_URI;
 
-// StreamElements Config
+// StreamElements Config (Sanitized)
 let SE_JWT = process.env.STREAMELEMENTS_JWT || "";
-// aggressive cleanup: remove 'Bearer ', quotes, spaces
 SE_JWT = SE_JWT.replace(/^Bearer\s+/i, "").replace(/["']/g, "").trim();
 
 let SE_CHANNEL_ID = process.env.STREAMELEMENTS_CHANNEL_ID || "";
 SE_CHANNEL_ID = SE_CHANNEL_ID.replace(/["']/g, "").trim();
 
-// Cloudinary
 const CLOUDINARY_CLOUD_NAME = process.env.CLOUDINARY_CLOUD_NAME;
 const CLOUDINARY_API_KEY = process.env.CLOUDINARY_API_KEY;
 const CLOUDINARY_API_SECRET = process.env.CLOUDINARY_API_SECRET;
 const IMGBB_API_KEY = process.env.IMGBB_API_KEY || process.env.VITE_IMGBB_API_KEY;
-
 const DEFAULT_SCHEDULE_URL = 'https://cdn.discordapp.com/attachments/1338254150479118347/1439859590152978443/3_am_17.png';
 
+// --- APP SETUP ---
 const app = express();
 app.use(express.json({ limit: '50mb' }));
 app.use(cors({ origin: '*' }));
 
-console.log("--- URNISA BACKEND REBOOTING ---");
-console.log(`🔑 JWT Loaded: ${SE_JWT ? "Yes" : "No"} (Length: ${SE_JWT.length})`);
-console.log(`🆔 Channel ID: ${SE_CHANNEL_ID || "Not Set"}`);
+console.log("--- URNISA BACKEND INITIALIZING ---");
 
-// ==========================================
-// DATABASE SCHEMAS
-// ==========================================
-if (MONGO_URI) {
-    mongoose.set('strictQuery', false);
-    mongoose.connect(MONGO_URI)
-        .then(() => console.log("✅ MongoDB Connected"))
-        .catch(e => console.error("❌ MongoDB Error:", e));
-}
+// --- SCHEMAS ---
+const SettingSchema = new mongoose.Schema({ key: { type: String, unique: true }, value: mongoose.Schema.Types.Mixed });
+const Setting = mongoose.model('Setting', SettingSchema);
 
-const Setting = mongoose.model('Setting', new mongoose.Schema({ key: { type: String, unique: true }, value: mongoose.Schema.Types.Mixed }));
-
-const NisathonStats = mongoose.model('NisathonStats', new mongoose.Schema({
+const NisathonStatsSchema = new mongoose.Schema({
     key: { type: String, default: 'main', unique: true },
     currentSubs: { type: Number, default: 0 },
     currentBits: { type: Number, default: 0 },
     currentDonations: { type: Number, default: 0 },
-    totalNisaballs: { type: Number, default: 0 },
+    totalNisaballs: { type: Number, default: 0 }, 
     timerEndTime: { type: Date, default: Date.now },
     remainingTimeMs: { type: Number, default: 0 },
     isPaused: { type: Boolean, default: false },
     activeEvent: { type: String, default: null },
     lastActivityTime: { type: String, default: new Date().toISOString() }
-}));
+});
+const NisathonStats = mongoose.model('NisathonStats', NisathonStatsSchema);
 
-const NisathonEvent = mongoose.model('NisathonEvent', new mongoose.Schema({
+const NisathonEventSchema = new mongoose.Schema({
     providerId: { type: String, unique: true },
     user: { type: String, required: true },
-    type: { type: String, required: true }, // sub, gift, bits, donation
+    type: { type: String, required: true },
     amountDisplay: { type: String, required: true },
     message: String,
     nisaballAmount: { type: Number, default: 0 },
     createdAt: { type: Date, default: Date.now }
-}));
+});
+const NisathonEvent = mongoose.model('NisathonEvent', NisathonEventSchema);
 
-const SpinQueue = mongoose.model('SpinQueue', new mongoose.Schema({
+const SpinQueueSchema = new mongoose.Schema({
     user: String, sourceEventId: String, nisaballs: Number, createdAt: { type: Date, default: Date.now }
-}));
+});
+const SpinQueue = mongoose.model('SpinQueue', SpinQueueSchema);
 
-const SpinHistory = mongoose.model('SpinHistory', new mongoose.Schema({
+const SpinHistorySchema = new mongoose.Schema({
     user: String, reward: String, timestamp: { type: Date, default: Date.now }
-}));
+});
+const SpinHistory = mongoose.model('SpinHistory', SpinHistorySchema);
 
 const roundOneDecimal = (num) => Math.round(num * 10) / 10;
 
-// ==========================================
-// CORE LOGIC (Process & Calculate)
-// ==========================================
-
+// --- EVENT PROCESSOR ---
 const processEvent = async (stats, type, user, amount, message, providerId, tier = '1000', isManual = false) => {
     let isNewEvent = true;
 
-    // Check duplicates (unless manual override)
+    // Deduplicate
     if (providerId && !isManual) {
         const existing = await NisathonEvent.findOne({ providerId });
         if (existing) isNewEvent = false;
@@ -99,14 +85,13 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
     let amountDisplay = "";
     let eventType = type;
 
-    // --- RULESET ---
-    // Subs
+    // Rules
     if (['subscriber', 'sub', 'resub', 'subscription'].includes(type)) {
         let tVal = 0.5;
         let tLbl = "Tier 1";
         const tStr = String(tier).toLowerCase();
-        if (tStr.includes('3000') || tStr.includes('tier 3')) { tVal = 2.0; tLbl = "Tier 3"; }
-        else if (tStr.includes('2000') || tStr.includes('tier 2')) { tVal = 1.0; tLbl = "Tier 2"; }
+        if (tStr.includes('3000') || tStr === '3') { tVal = 2.0; tLbl = "Tier 3"; }
+        else if (tStr.includes('2000') || tStr === '2') { tVal = 1.0; tLbl = "Tier 2"; }
         else if (tStr.includes('prime')) { tVal = 0.5; tLbl = "Prime"; }
         
         earnedNisaballs = tVal;
@@ -114,20 +99,17 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
         eventType = 'sub';
         if (isNewEvent) stats.currentSubs += 1;
     } 
-    // Gifts
     else if (type === 'gift') {
         earnedNisaballs = 0.5 * amount;
         amountDisplay = `${amount} Gift Subs`;
         if (isNewEvent) stats.currentSubs += amount;
     } 
-    // Bits
     else if (['cheer', 'bits'].includes(type)) {
         earnedNisaballs = amount * 0.002;
         amountDisplay = `${amount} Bits`;
         eventType = 'bits';
         if (isNewEvent) stats.currentBits += amount;
     } 
-    // Donations
     else if (['tip', 'donation'].includes(type)) {
         earnedNisaballs = amount * 0.2;
         amountDisplay = `$${amount.toFixed(2)}`;
@@ -135,7 +117,7 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
         if (isNewEvent) stats.currentDonations += amount;
     }
 
-    // --- UPDATE STATS ---
+    // Update Stats
     if (isNewEvent) {
         stats.totalNisaballs = roundOneDecimal(stats.totalNisaballs + earnedNisaballs);
         const mult = stats.activeEvent === 'DOUBLE_TIMER' ? 2 : 1;
@@ -144,14 +126,13 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
         if (!stats.isPaused) {
             const now = Date.now();
             const curEnd = new Date(stats.timerEndTime).getTime();
-            // If timer expired, start from now. Else extend.
             stats.timerEndTime = new Date(Math.max(now, curEnd) + msAdd);
         } else {
             stats.remainingTimeMs += msAdd;
         }
     }
 
-    // --- DB UPSERT ---
+    // DB Upsert
     const eventData = {
         providerId: providerId || `sim-${Date.now()}`,
         user: user || 'Anonymous',
@@ -161,7 +142,7 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
         nisaballAmount: earnedNisaballs,
         createdAt: isNewEvent ? new Date() : undefined
     };
-    // Remove undefineds
+    // Clean undefineds
     Object.keys(eventData).forEach(k => eventData[k] === undefined && delete eventData[k]);
 
     const res = await NisathonEvent.findOneAndUpdate(
@@ -170,52 +151,53 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
         { upsert: true, new: true }
     );
 
-    // --- WHEEL QUEUE ---
+    // Wheel Queue
     if (isNewEvent && earnedNisaballs >= 5) {
         const spins = Math.floor(earnedNisaballs / 5);
         console.log(`🎡 Queueing ${spins} spins for ${user}`);
         for (let i = 0; i < spins; i++) {
-            await SpinQueue.create({ 
-                user: user||'Anon', 
-                sourceEventId: res._id, 
-                nisaballs: earnedNisaballs 
-            });
+            await SpinQueue.create({ user: user||'Anon', sourceEventId: res._id, nisaballs: earnedNisaballs });
         }
     }
+    
     return earnedNisaballs;
 };
 
-// ==========================================
-// PROVIDER: STREAMELEMENTS
-// ==========================================
+// --- STREAMELEMENTS SYNC ---
 const syncStreamElements = async (stats, limit = 50) => {
     if (!SE_JWT || !SE_CHANNEL_ID) return false;
 
     try {
-        const config = {
-            headers: { 'Authorization': `Bearer ${SE_JWT}`, 'Accept': 'application/json' },
+        const response = await axios.get(`https://api.streamelements.com/kappa/v2/activities/${SE_CHANNEL_ID}`, {
+            headers: { 'Authorization': `Bearer ${SE_JWT}` },
             params: { limit },
             timeout: 10000
-        };
+        });
 
-        const url = `https://api.streamelements.com/kappa/v2/activities/${SE_CHANNEL_ID}`;
-        const response = await axios.get(url, config);
         const activities = response.data;
-
-        if (!activities || activities.length === 0) return false;
+        if (!activities || activities.length === 0) {
+            console.log(`⚠️ [SE] No activities found. Check ID: ${SE_CHANNEL_ID}`);
+            return false;
+        }
 
         // Sort Oldest -> Newest
         activities.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
         
+        // LOG THE NEWEST ACTIVITY FOR DEBUGGING
+        const newest = activities[activities.length - 1];
+        console.log(`📡 [SE] Poll: ${activities.length} events. Newest: ${newest.type} by ${newest.data.username} at ${newest.createdAt}`);
+
         let changesMade = false;
         let newestDate = stats.lastActivityTime;
 
         for (const act of activities) {
             newestDate = act.createdAt;
-
+            
+            // Normalized Fields
             let amount = 0;
             let tier = '1000';
             const type = act.type;
+            const user = act.data.username;
 
             if (['subscriber', 'sub', 'resub', 'subscription'].includes(type)) {
                 amount = 1;
@@ -228,23 +210,19 @@ const syncStreamElements = async (stats, limit = 50) => {
                 continue;
             }
 
-            const added = await processEvent(stats, type, act.data.username, amount, act.data.message, act._id, tier);
+            const added = await processEvent(stats, type, user, amount, act.data.message, act._id, tier);
             if (added > 0) changesMade = true;
         }
 
         stats.lastActivityTime = newestDate;
         return changesMade;
-
     } catch (e) {
-        console.error(`❌ SE Sync Failed: ${e.message}`);
-        if (e.response?.status === 401) console.error("   -> Unauthorized. Check JWT.");
+        console.error(`❌ [SE] Sync Error: ${e.response?.status || e.message}`);
         return false;
     }
 };
 
-// ==========================================
-// MAIN LOOP
-// ==========================================
+// --- MAIN LOOP ---
 const runSync = async (forceDeep = false) => {
     if (mongoose.connection.readyState !== 1) return;
 
@@ -252,45 +230,42 @@ const runSync = async (forceDeep = false) => {
         let stats = await NisathonStats.findOne({ key: 'main' });
         if (!stats) stats = await NisathonStats.create({ key: 'main', timerEndTime: new Date(Date.now() + 3*3600000) });
 
-        if (forceDeep) console.log("🚀 Running Deep Sync (500 items)...");
+        if (forceDeep) console.log("🚀 Running Deep Sync...");
 
-        const seChanged = await syncStreamElements(stats, forceDeep ? 500 : 50);
+        const changes = await syncStreamElements(stats, forceDeep ? 100 : 25);
 
-        if (seChanged || forceDeep) {
+        if (changes || forceDeep) {
             await stats.save();
-            if (seChanged) console.log("✅ Stats Updated from Sync");
+            if (changes) console.log("✅ Stats Saved.");
         }
     } catch (e) {
-        console.error("Main Loop Error:", e);
+        console.error("Sync Loop Error:", e);
     }
 };
 
-
-// ==========================================
-// API ROUTES
-// ==========================================
+// --- ROUTES ---
 app.get('/', (req, res) => res.send('Urnisa Backend Active'));
 
-// DEBUG
+// Debug
 app.get('/api/debug/se-latest', async (req, res) => {
     if (!SE_JWT || !SE_CHANNEL_ID) return res.json({ error: "Missing Config" });
     try {
         const response = await axios.get(`https://api.streamelements.com/kappa/v2/activities/${SE_CHANNEL_ID}`, {
             headers: { Authorization: `Bearer ${SE_JWT}` },
-            params: { limit: 25 }
+            params: { limit: 20 }
         });
-        res.json({ configId: SE_CHANNEL_ID, data: response.data });
-    } catch (e) { res.json({ error: e.message, status: e.response?.status }); }
+        res.json(response.data);
+    } catch (e) { res.json({ error: e.message }); }
 });
 
-// AUTH
+// Auth
 const auth = (req, res, next) => {
     if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).json({ error: 'Unauthorized' });
     next();
 };
 app.post('/api/verify', (req, res) => res.json(req.body.password === ADMIN_PASSWORD ? {success:true} : {error:'Invalid'}));
 
-// NISATHON
+// Nisathon Read
 app.get('/api/nisathon/stats', async (req, res) => {
     if (mongoose.connection.readyState !== 1) return res.json({});
     let stats = await NisathonStats.findOne({ key: 'main' });
@@ -305,15 +280,15 @@ app.get('/api/nisathon/leaderboard', async (req, res) => {
 });
 app.get('/api/nisathon/recent', async (req, res) => res.json(await NisathonEvent.find().sort({ createdAt: -1 }).limit(10)));
 
-// MANUAL & TEST EVENTS
+// Manual Event
 app.post('/api/nisathon/test-event', auth, async (req, res) => {
     const stats = await NisathonStats.findOne({ key: 'main' });
-    await processEvent(stats, req.body.type, req.body.user, parseFloat(req.body.amount), "Manual Entry", null, req.body.tier, true);
+    await processEvent(stats, req.body.type, req.body.user, parseFloat(req.body.amount), "Manual", null, req.body.tier, true);
     await stats.save();
     res.json({ success: true });
 });
 
-// CONTROLS
+// Controls
 app.post('/api/nisathon/timer/set', auth, async (req, res) => {
     const stats = await NisathonStats.findOne({ key: 'main' });
     const ms = (req.body.hours*3600 + req.body.minutes*60 + req.body.seconds)*1000;
@@ -354,7 +329,7 @@ app.post('/api/nisathon/sync', auth, async (req, res) => {
     res.json({ success: true });
 });
 
-// WHEEL
+// Wheel
 app.get('/api/wheel/queue', async (req, res) => res.json(await SpinQueue.find().sort({ createdAt: 1 })));
 app.get('/api/wheel/history', async (req, res) => res.json(await SpinHistory.find().sort({ timestamp: -1 })));
 app.post('/api/wheel/spin-result', auth, async (req, res) => {
@@ -363,7 +338,7 @@ app.post('/api/wheel/spin-result', auth, async (req, res) => {
     res.json({ success: true });
 });
 
-// CONTENT
+// Content
 app.get('/api/goals', async (req, res) => res.json({ goals: (await Setting.findOne({ key: 'nisathon_goals' }))?.value }));
 app.post('/api/goals', auth, async (req, res) => {
     await Setting.findOneAndUpdate({ key: 'nisathon_goals' }, { value: req.body.goals }, { upsert: true });
@@ -398,7 +373,6 @@ app.get('/api/stream-status', async (req, res) => {
     res.json({ override: s?.value || 'auto' });
 });
 
-// UPLOAD
 app.post('/api/upload', async (req, res) => {
     const { image } = req.body;
     if (!image) return res.status(400).send();
@@ -414,10 +388,28 @@ app.post('/api/upload', async (req, res) => {
     return res.status(500).send();
 });
 
-// START
-app.listen(PORT, () => {
-    console.log(`✅ Server on ${PORT}`);
-    setTimeout(() => runSync(true), 5000);
-    setInterval(() => runSync(false), 30000);
-    setInterval(() => { axios.get('https://urnisa-backend.onrender.com').catch(()=>{}) }, 300000);
-});
+// --- BOOT ---
+if (MONGO_URI) {
+    mongoose.set('strictQuery', false);
+    mongoose.connect(MONGO_URI)
+        .then(() => {
+            console.log("✅ MongoDB Ready");
+            // START SERVER ONLY AFTER DB CONNECT
+            app.listen(PORT, () => {
+                console.log(`✅ Server on ${PORT}`);
+                console.log(`ℹ️ Channel ID: ${SE_CHANNEL_ID}`);
+                
+                // Startup Deep Sync
+                setTimeout(() => runSync(true), 5000); 
+                
+                // Loop
+                setInterval(() => runSync(false), 30000);
+                
+                // Ping
+                setInterval(() => { axios.get('https://urnisa-backend.onrender.com').catch(()=>{}) }, 300000);
+            });
+        })
+        .catch(e => console.error("❌ DB Fail:", e));
+} else {
+    console.error("❌ MONGO_URI Missing");
+}
