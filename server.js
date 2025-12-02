@@ -17,6 +17,7 @@ const MONGO_URI = process.env.MONGO_URI;
 let SE_JWT = process.env.STREAMELEMENTS_JWT || "";
 SE_JWT = SE_JWT.replace(/^Bearer\s+/i, "").replace(/["']/g, "").trim();
 
+// We will try this ID, and also auto-resolve 'urnisa_'
 let ENV_CHANNEL_ID = process.env.STREAMELEMENTS_CHANNEL_ID || "";
 ENV_CHANNEL_ID = ENV_CHANNEL_ID.replace(/["']/g, "").trim();
 
@@ -61,6 +62,14 @@ const NisathonStats = mongoose.model('NisathonStats', new mongoose.Schema({
     lastActivityTime: { type: String, default: new Date().toISOString() }
 }));
 
+// NEW: Standalone Countdown Schema
+const CountdownStats = mongoose.model('CountdownStats', new mongoose.Schema({
+    key: { type: String, default: 'main', unique: true },
+    timerEndTime: { type: Date, default: Date.now },
+    remainingTimeMs: { type: Number, default: 0 },
+    isPaused: { type: Boolean, default: true } // Paused by default
+}));
+
 const NisathonEvent = mongoose.model('NisathonEvent', new mongoose.Schema({
     providerId: { type: String, unique: true },
     user: { type: String, required: true },
@@ -82,7 +91,7 @@ const SpinHistory = mongoose.model('SpinHistory', new mongoose.Schema({
 const roundOneDecimal = (num) => Math.round(num * 10) / 10;
 
 // ==========================================
-// CORE LOGIC
+// CORE LOGIC (Nisathon)
 // ==========================================
 
 const processEvent = async (stats, type, user, amount, message, providerId, tier = '1000', isManual = false) => {
@@ -142,12 +151,14 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
         const mult = stats.activeEvent === 'DOUBLE_TIMER' ? 2 : 1;
         const msAdd = earnedNisaballs * 10 * mult * 60000;
         
-        if (!stats.isPaused) {
-            const now = Date.now();
-            const curEnd = new Date(stats.timerEndTime).getTime();
-            stats.timerEndTime = new Date(Math.max(now, curEnd) + msAdd);
-        } else {
-            stats.remainingTimeMs += msAdd;
+        if (earnedNisaballs > 0) {
+             if (!stats.isPaused) {
+                const now = Date.now();
+                const curEnd = new Date(stats.timerEndTime).getTime();
+                stats.timerEndTime = new Date(Math.max(now, curEnd) + msAdd);
+            } else {
+                stats.remainingTimeMs += msAdd;
+            }
         }
     }
 
@@ -207,14 +218,12 @@ const connectSocket = () => {
     });
 
     socket.on('event', async (data) => {
-        // LOG RAW DATA FOR DEBUGGING
-        console.log('🔥 [Socket] RAW:', data);
-
         if (!data || !data.type) return;
         
-        // Accept 'follow' (SE name) and 'follower'
+        // Added 'follower' to the filter list
         if (!['subscriber', 'tip', 'cheer', 'follower', 'follow'].includes(data.type)) return;
 
+        console.log(`⚡ [Socket] New Event: ${data.type}`);
         try {
             const stats = await NisathonStats.findOne({ key: 'main' });
             if (!stats) return;
@@ -379,29 +388,14 @@ const runSync = async () => {
 // ==========================================
 app.get('/', (req, res) => res.send('Backend OK'));
 
-app.get('/api/debug/se-latest', async (req, res) => {
-    if (!SE_JWT || !ENV_CHANNEL_ID) return res.json({ error: "Missing Config" });
-    let targetId = ENV_CHANNEL_ID;
-    try {
-        const r = await axios.get(`https://api.streamelements.com/kappa/v2/channels/${TARGET_USERNAME}`, { headers: { 'Authorization': `Bearer ${SE_JWT}` } });
-        targetId = r.data._id;
-    } catch(e){}
-
-    try {
-        const response = await axios.get(`https://api.streamelements.com/kappa/v2/activities/${targetId}`, {
-            headers: { Authorization: `Bearer ${SE_JWT}` },
-            params: { limit: 25 }
-        });
-        res.json({ configId: targetId, data: response.data });
-    } catch (e) { res.json({ error: e.message }); }
-});
-
+// AUTH
 const auth = (req, res, next) => {
     if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).json({ error: 'Unauthorized' });
     next();
 };
 app.post('/api/verify', (req, res) => res.json(req.body.password === ADMIN_PASSWORD ? {success:true} : {error:'Invalid'}));
 
+// NISATHON
 app.get('/api/nisathon/stats', async (req, res) => {
     if (mongoose.connection.readyState !== 1) return res.json({});
     let stats = await NisathonStats.findOne({ key: 'main' });
@@ -465,6 +459,7 @@ app.post('/api/nisathon/sync', auth, async (req, res) => {
     res.json({ success: true });
 });
 
+// Wheel
 app.get('/api/wheel/queue', async (req, res) => res.json(await SpinQueue.find().sort({ createdAt: 1 })));
 app.get('/api/wheel/history', async (req, res) => res.json(await SpinHistory.find().sort({ timestamp: -1 })));
 app.post('/api/wheel/spin-result', auth, async (req, res) => {
@@ -473,6 +468,50 @@ app.post('/api/wheel/spin-result', auth, async (req, res) => {
     res.json({ success: true });
 });
 
+// NEW: COUNTDOWN API (STANDALONE)
+app.get('/api/countdown/stats', async (req, res) => {
+    if (mongoose.connection.readyState !== 1) return res.json({});
+    let stats = await mongoose.model('CountdownStats').findOne({ key: 'main' });
+    if (!stats) stats = await mongoose.model('CountdownStats').create({ key: 'main' });
+    res.json(stats);
+});
+
+app.post('/api/countdown/set', auth, async (req, res) => {
+    const stats = await mongoose.model('CountdownStats').findOne({ key: 'main' });
+    const ms = (req.body.hours*3600 + req.body.minutes*60 + req.body.seconds)*1000;
+    if (stats.isPaused) stats.remainingTimeMs = ms; else stats.timerEndTime = new Date(Date.now() + ms);
+    await stats.save();
+    res.json({ success: true });
+});
+
+app.post('/api/countdown/add', auth, async (req, res) => {
+    const stats = await mongoose.model('CountdownStats').findOne({ key: 'main' });
+    const ms = req.body.minutes * 60000;
+    if (stats.isPaused) stats.remainingTimeMs += ms;
+    else stats.timerEndTime = new Date(Math.max(Date.now(), new Date(stats.timerEndTime).getTime()) + ms);
+    await stats.save();
+    res.json({ success: true });
+});
+
+app.post('/api/countdown/pause', auth, async (req, res) => {
+    const stats = await mongoose.model('CountdownStats').findOne({ key: 'main' });
+    const now = Date.now();
+    if (stats.isPaused) {
+        stats.isPaused = false; stats.timerEndTime = new Date(now + stats.remainingTimeMs); stats.remainingTimeMs = 0;
+    } else {
+        stats.isPaused = true; stats.remainingTimeMs = Math.max(0, new Date(stats.timerEndTime).getTime() - now);
+    }
+    await stats.save();
+    res.json({ success: true, isPaused: stats.isPaused });
+});
+
+app.post('/api/countdown/reset', auth, async (req, res) => {
+    await mongoose.model('CountdownStats').findOneAndUpdate({ key: 'main' }, { remainingTimeMs: 0, isPaused: true, timerEndTime: new Date() });
+    res.json({ success: true });
+});
+
+
+// Content
 app.get('/api/goals', async (req, res) => res.json({ goals: (await Setting.findOne({ key: 'nisathon_goals' }))?.value }));
 app.post('/api/goals', auth, async (req, res) => { await Setting.findOneAndUpdate({ key: 'nisathon_goals' }, { value: req.body.goals }, { upsert: true }); res.json({ success: true }); });
 app.get('/api/wheel', async (req, res) => res.json({ items: (await Setting.findOne({ key: 'wheel_items' }))?.value }));
