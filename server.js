@@ -13,15 +13,12 @@ const PORT = process.env.PORT || 3001;
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "admin";
 const MONGO_URI = process.env.MONGO_URI;
 
-// 1. CLEAN JWT (Aggressive)
-let rawJwt = process.env.STREAMELEMENTS_JWT || "";
-// Remove "Bearer", quotes, spaces
-let SE_JWT = rawJwt.replace(/Bearer/gi, "").replace(/["']/g, "").trim();
+// StreamElements Config
+let SE_JWT = process.env.STREAMELEMENTS_JWT || "";
+SE_JWT = SE_JWT.replace(/^Bearer\s+/i, "").replace(/["']/g, "").trim();
 
-// 2. CLEAN ID
-let ENV_CHANNEL_ID = process.env.STREAMELEMENTS_CHANNEL_ID || "";
-ENV_CHANNEL_ID = ENV_CHANNEL_ID.replace(/["']/g, "").trim();
-
+// We will overwrite this with the auto-resolved ID
+let SE_CHANNEL_ID = process.env.STREAMELEMENTS_CHANNEL_ID || "";
 const TARGET_USERNAME = 'urnisa_';
 
 // Image Hosting
@@ -35,11 +32,10 @@ const app = express();
 app.use(express.json({ limit: '50mb' }));
 app.use(cors({ origin: '*' }));
 
-console.log("--- URNISA HYBRID BACKEND STARTING ---");
-console.log(`🔑 JWT Loaded: ${SE_JWT ? "Yes" : "No"} (Length: ${SE_JWT.length})`);
+console.log("--- URNISA BACKEND REBOOTING ---");
 
 // ==========================================
-// DATABASE
+// DATABASE SCHEMAS
 // ==========================================
 if (MONGO_URI) {
     mongoose.set('strictQuery', false);
@@ -88,15 +84,18 @@ const roundOneDecimal = (num) => Math.round(num * 10) / 10;
 // ==========================================
 const processEvent = async (stats, type, user, amount, message, providerId, tier = '1000', isManual = false) => {
     let isNewEvent = true;
+
+    // Check duplicates
     if (providerId && !isManual) {
-        if (await NisathonEvent.findOne({ providerId })) isNewEvent = false;
+        const existing = await NisathonEvent.findOne({ providerId });
+        if (existing) isNewEvent = false;
     }
 
     let earnedNisaballs = 0;
     let amountDisplay = "";
     let eventType = type;
 
-    // Rules
+    // --- RULESET ---
     if (['subscriber', 'sub', 'resub', 'subscription'].includes(type)) {
         let tVal = 0.5;
         let tLbl = "Tier 1";
@@ -128,6 +127,7 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
         if (isNewEvent) stats.currentDonations += amount;
     }
 
+    // Update Stats & Timer
     if (isNewEvent) {
         stats.totalNisaballs = roundOneDecimal(stats.totalNisaballs + earnedNisaballs);
         const mult = stats.activeEvent === 'DOUBLE_TIMER' ? 2 : 1;
@@ -142,6 +142,7 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
         }
     }
 
+    // Save Event
     const eventData = {
         providerId: providerId || `sim-${Date.now()}`,
         user: user || 'Anonymous',
@@ -159,6 +160,7 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
         { upsert: true, new: true }
     );
 
+    // Wheel Logic
     if (isNewEvent && earnedNisaballs >= 5) {
         const spins = Math.floor(earnedNisaballs / 5);
         console.log(`🎡 Queueing ${spins} spins for ${user}`);
@@ -172,13 +174,15 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
 };
 
 // ==========================================
-// 1. REAL-TIME SOCKET (METHOD 1)
+// 1. REAL-TIME SOCKET
 // ==========================================
+let socket = null;
+
 const connectSocket = () => {
     if (!SE_JWT) { console.log("❌ [Socket] No JWT"); return; }
     
     console.log("🔌 [Socket] Connecting...");
-    const socket = io('https://realtime.streamelements.com', { transports: ['websocket'] });
+    socket = io('https://realtime.streamelements.com', { transports: ['websocket'] });
 
     socket.on('connect', () => {
         console.log('🔌 [Socket] Connected. Authenticating...');
@@ -187,10 +191,6 @@ const connectSocket = () => {
 
     socket.on('authenticated', (data) => {
         console.log(`✅ [Socket] Authenticated! (Channel: ${data.channelId})`);
-    });
-
-    socket.on('unauthorized', (data) => {
-        console.error('❌ [Socket] Auth Failed:', data);
     });
 
     socket.on('event', async (data) => {
@@ -223,34 +223,81 @@ const connectSocket = () => {
 };
 
 // ==========================================
-// 2. REST POLLING (METHOD 2)
+// 2. REST POLLING & HELPERS
 // ==========================================
-const fetchAndProcess = async (channelId, label, stats) => {
-    if (!channelId) return false;
-    
+
+// Resolve ID
+const resolveChannelId = async () => {
+    if (!SE_JWT) { console.error("❌ NO JWT"); return false; }
     try {
-        const url = `https://api.streamelements.com/kappa/v2/activities/${channelId}`;
-        // console.log(`📡 [${label}] Checking ${channelId}...`);
+        console.log(`🔍 Resolving ID for username: '${TARGET_USERNAME}'...`);
+        const response = await axios.get(`https://api.streamelements.com/kappa/v2/channels/${TARGET_USERNAME}`, {
+             headers: { 'User-Agent': 'Mozilla/5.0' }
+        });
+        if (response.data && response.data._id) {
+            SE_CHANNEL_ID = response.data._id;
+            console.log(`✅ RESOLVED ID: ${SE_CHANNEL_ID}`);
+            return true;
+        }
+    } catch (e) {
+        console.error(`❌ Resolve Failed: ${e.message}`);
+    }
+    return false;
+};
+
+// Fallback to session data (Latest Sub/Tip)
+const syncSessionFallback = async (stats) => {
+    try {
+        // console.log(`⚡ Checking Session Data...`);
+        const { data: session } = await axios.get(`https://api.streamelements.com/kappa/v2/sessions/${SE_CHANNEL_ID}`, {
+             headers: { 'Authorization': `Bearer ${SE_JWT}` }
+        });
         
-        const { data: activities } = await axios.get(url, {
-            headers: { 
-                'Authorization': `Bearer ${SE_JWT}`,
-                'Accept': 'application/json',
-                'User-Agent': 'UrnisaBot/1.0' // Fix 403/401 on some endpoints
-            },
-            params: { limit: 25 },
+        if (!session || !session.data) return;
+        
+        let changes = false;
+        const lastSub = session.data['latest-subscriber'];
+        if (lastSub) {
+            await processEvent(stats, 'subscriber', lastSub.name, 1, "", `session-sub-${lastSub.name}`, lastSub.tier);
+            changes = true;
+        }
+        
+        const lastTip = session.data['latest-tip'];
+        if (lastTip) {
+             await processEvent(stats, 'tip', lastTip.name, lastTip.amount, lastTip.message, `session-tip-${lastTip.name}-${lastTip.amount}`);
+             changes = true;
+        }
+
+        const lastCheer = session.data['latest-cheer'];
+        if (lastCheer) {
+             await processEvent(stats, 'cheer', lastCheer.name, lastCheer.amount, lastCheer.message, `session-cheer-${lastCheer.name}-${lastCheer.amount}`);
+             changes = true;
+        }
+        if (changes) console.log("✅ Session Sync Processed");
+    } catch (e) {
+        // Silent fail is ok for fallback
+    }
+};
+
+const syncActivities = async (stats, limit = 50) => {
+    try {
+        const { data: activities } = await axios.get(`https://api.streamelements.com/kappa/v2/activities/${SE_CHANNEL_ID}`, {
+            headers: { 'Authorization': `Bearer ${SE_JWT}` },
+            params: { limit },
             timeout: 10000
         });
 
         if (!activities || activities.length === 0) {
-            // console.log(`⚠️ [${label}] 0 activities.`);
+            console.log(`⚠️ [SE] 0 activities found.`);
             return false;
         }
 
         activities.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
-        
         let changes = false;
+        let newestDate = stats.lastActivityTime;
+
         for (const act of activities) {
+            newestDate = act.createdAt;
             let amt = 0;
             let tier = '1000';
             if (['subscriber','sub','resub'].includes(act.type)) { amt = 1; tier = act.data.tier || '1000'; }
@@ -261,82 +308,70 @@ const fetchAndProcess = async (channelId, label, stats) => {
             const added = await processEvent(stats, act.type, act.data.username, amt, act.data.message, act._id, tier);
             if (added > 0) changes = true;
         }
-        return changes;
 
+        stats.lastActivityTime = newestDate;
+        return changes;
     } catch (e) {
-        if (e.response?.status === 401) console.error(`❌ [${label}] 401 Unauthorized. Check JWT!`);
-        else console.error(`❌ [${label}] Error: ${e.message}`);
+        console.error(`❌ [SE] Activity Sync Error: ${e.response?.status || e.message}`);
         return false;
     }
 };
 
-// Resolve correct ID for 'urnisa_'
-const resolveChannelId = async () => {
-    if (!SE_JWT) return null;
-    try {
-        const res = await axios.get(`https://api.streamelements.com/kappa/v2/channels/${TARGET_USERNAME}`, {
-             headers: { 'User-Agent': 'Mozilla/5.0' }
-        });
-        if (res.data && res.data._id) {
-            console.log(`🔍 Resolved '${TARGET_USERNAME}' to ID: ${res.data._id}`);
-            return res.data._id;
-        }
-    } catch (e) { 
-        console.log("⚠️ Could not resolve alias. Using Token Owner."); 
+// --- MAIN LOOP ---
+const runSync = async (forceBackfill = false) => {
+    // GUARD CLAUSES - LOG WHY WE STOP
+    if (mongoose.connection.readyState !== 1) {
+        console.log("❌ Sync Skipped: DB Not Ready");
+        return;
     }
-    // Fallback to token owner
-    try {
-        const me = await axios.get('https://api.streamelements.com/kappa/v2/channels/me', {
-            headers: { 'Authorization': `Bearer ${SE_JWT}` }
-        });
-        return me.data._id;
-    } catch (e) { return null; }
-};
-
-const runSync = async () => {
-    if (mongoose.connection.readyState !== 1 || !SE_JWT) return;
+    if (!SE_JWT) {
+        console.log("❌ Sync Skipped: No JWT");
+        return;
+    }
+    if (!SE_CHANNEL_ID) {
+        console.log("❌ Sync Skipped: No Channel ID");
+        return;
+    }
 
     try {
         let stats = await NisathonStats.findOne({ key: 'main' });
         if (!stats) stats = await NisathonStats.create({ key: 'main', timerEndTime: new Date(Date.now() + 3*3600000) });
 
-        // 1. Get Target ID
-        const targetId = await resolveChannelId();
-        
-        // 2. Try to fetch from Resolved ID
-        let changes = false;
-        if (targetId) {
-            changes = await fetchAndProcess(targetId, "AUTO", stats);
-        } 
-        // 3. If configured ID is different, try that too (just in case)
-        if (ENV_CHANNEL_ID && ENV_CHANNEL_ID !== targetId) {
-            const c2 = await fetchAndProcess(ENV_CHANNEL_ID, "ENV", stats);
-            if (c2) changes = true;
+        if (forceBackfill) console.log(`📡 Force Syncing (Channel: ${SE_CHANNEL_ID})...`);
+
+        // Run Activity Sync AND Session Sync in parallel
+        const [actChanged] = await Promise.all([
+            syncActivities(stats, forceBackfill ? 100 : 25),
+            syncSessionFallback(stats)
+        ]);
+
+        if (actChanged || forceBackfill) {
+            await stats.save();
+            if (actChanged) console.log("✅ Stats Updated.");
         }
-
-        if (changes) await stats.save();
-
-    } catch (e) { console.error("Loop Error:", e); }
+    } catch (e) {
+        console.error("Loop Error:", e);
+    }
 };
 
 // ==========================================
 // API ROUTES
 // ==========================================
-app.get('/', (req, res) => res.send('Backend OK'));
+app.get('/', (req, res) => res.send('Backend Online'));
 
 // DEBUG
 app.get('/api/debug/se-latest', async (req, res) => {
-    if (!SE_JWT) return res.json({ error: "No JWT" });
-    const targetId = await resolveChannelId() || ENV_CHANNEL_ID;
+    if (!SE_JWT || !SE_CHANNEL_ID) return res.json({ error: "Config Missing" });
     try {
-        const { data } = await axios.get(`https://api.streamelements.com/kappa/v2/activities/${targetId}`, {
+        const response = await axios.get(`https://api.streamelements.com/kappa/v2/activities/${SE_CHANNEL_ID}`, {
             headers: { Authorization: `Bearer ${SE_JWT}` },
-            params: { limit: 10 }
+            params: { limit: 25 }
         });
-        res.json({ id: targetId, data });
+        res.json(response.data);
     } catch (e) { res.json({ error: e.message }); }
 });
 
+// AUTH
 const auth = (req, res, next) => {
     if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).json({ error: 'Unauthorized' });
     next();
@@ -400,7 +435,7 @@ app.post('/api/nisathon/reset', auth, async (req, res) => {
     res.json({ success: true });
 });
 app.post('/api/nisathon/sync', auth, async (req, res) => {
-    await runSync();
+    await runSync(true);
     res.json({ success: true });
 });
 
@@ -449,11 +484,12 @@ if (MONGO_URI) {
             app.listen(PORT, async () => {
                 console.log(`✅ Server on ${PORT}`);
                 
-                connectSocket(); // Start Realtime
+                await resolveChannelId();
+                connectSocket();
                 
                 console.log("🚀 Initial Sync...");
-                await runSync();
-                setInterval(runSync, 30000);
+                await runSync(true);
+                setInterval(() => runSync(false), 30000);
                 
                 setInterval(() => { axios.get('https://urnisa-backend.onrender.com').catch(()=>{}) }, 300000);
             });
