@@ -106,7 +106,18 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
     let eventType = type;
 
     // --- RULESET ---
+    
+    // SUBSCRIPTIONS
     if (['subscriber', 'sub', 'resub', 'subscription'].includes(type)) {
+        // CRITICAL FIX: Ignore "received gift" events
+        // If this event represents a user receiving a gift, we skip adding stats
+        // because the 'gift' event (from the gifter) handles the credit.
+        // Note: manual entry might not have these flags, so we trust manual.
+        if (!isManual && (message.includes('gift') || amount === 0)) {
+             console.log(`⏩ Skipping recipient event for ${user} (Gift Receiver)`);
+             return 0; 
+        }
+
         let tVal = 0.5;
         let tLbl = "Tier 1";
         const tStr = String(tier).toLowerCase();
@@ -117,26 +128,31 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
         earnedNisaballs = tVal;
         amountDisplay = `${tLbl} Sub`;
         eventType = 'sub';
+        
         if (isNewEvent) stats.currentSubs += 1;
     } 
+    // GIFT SUBS (The Gifter)
     else if (type === 'gift') {
-        earnedNisaballs = 0.5 * amount;
+        // amount here is number of gifts (e.g. 5, 10)
+        earnedNisaballs = 0.5 * amount; 
         amountDisplay = `${amount} Gift Subs`;
         if (isNewEvent) stats.currentSubs += amount;
     } 
+    // BITS
     else if (['cheer', 'bits'].includes(type)) {
         earnedNisaballs = amount * 0.002;
         amountDisplay = `${amount} Bits`;
         eventType = 'bits';
         if (isNewEvent) stats.currentBits += amount;
     } 
+    // TIPS
     else if (['tip', 'donation'].includes(type)) {
         earnedNisaballs = amount * 0.2;
         amountDisplay = `$${amount.toFixed(2)}`;
         eventType = 'donation';
         if (isNewEvent) stats.currentDonations += amount;
     }
-    // FOLLOWER LOGIC
+    // FOLLOWERS
     else if (['follower', 'follow'].includes(type)) {
         earnedNisaballs = 0;
         amountDisplay = "New Follower";
@@ -146,11 +162,10 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
     // Update Stats & Timer
     if (isNewEvent) {
         stats.totalNisaballs = roundOneDecimal(stats.totalNisaballs + earnedNisaballs);
+        const mult = stats.activeEvent === 'DOUBLE_TIMER' ? 2 : 1;
+        const msAdd = earnedNisaballs * 10 * mult * 60000;
         
         if (earnedNisaballs > 0) {
-            const mult = stats.activeEvent === 'DOUBLE_TIMER' ? 2 : 1;
-            const msAdd = earnedNisaballs * 10 * mult * 60000;
-            
             if (!stats.isPaused) {
                 const now = Date.now();
                 const curEnd = new Date(stats.timerEndTime).getTime();
@@ -242,7 +257,11 @@ const connectSocket = () => {
             if (type === 'subscriber') {
                 tier = info.tier || '1000';
                 amount = info.amount || 1; 
-                if (info.gifted) type = 'gift'; 
+                // Check for 'gifted' flag in socket data to skip recipients
+                if (info.gifted) {
+                    console.log("⏩ Skipping socket event (Gift Recipient)");
+                    return; 
+                }
             } else if (type === 'tip' || type === 'cheer') {
                 amount = info.amount;
             } else if (type === 'follow') {
@@ -265,7 +284,6 @@ const fetchAndProcess = async (channelId, label, stats, limit = 25) => {
     
     try {
         const url = `https://api.streamelements.com/kappa/v2/activities/${channelId}`;
-        if (limit > 25) console.log(`📡 [${label}] Backfilling ${limit} events...`);
         
         const { data: activities } = await axios.get(url, {
             headers: { 
@@ -288,12 +306,27 @@ const fetchAndProcess = async (channelId, label, stats, limit = 25) => {
             let amt = 0;
             let tier = '1000';
             let type = act.type;
+            let isRecipient = false;
             
-            if (['subscriber','sub','resub'].includes(act.type)) { amt = 1; tier = act.data.tier || '1000'; }
-            else if (act.type === 'gift') amt = act.data.amount || 1;
-            else if (['cheer','tip'].includes(act.type)) amt = act.data.amount;
-            else if (act.type === 'follow') { type = 'follower'; amt = 0; }
+            if (['subscriber','sub','resub'].includes(act.type)) { 
+                amt = 1; 
+                tier = act.data.tier || '1000';
+                // Check if this is a gift recipient event
+                if (act.data.gifted) isRecipient = true;
+            }
+            else if (act.type === 'gift') {
+                amt = act.data.amount || 1; 
+            }
+            else if (['cheer','tip'].includes(act.type)) {
+                amt = act.data.amount; 
+            }
+            else if (act.type === 'follow') { 
+                type = 'follower'; 
+                amt = 0; 
+            }
             else continue;
+
+            if (isRecipient) continue; // Skip
 
             const added = await processEvent(stats, type, act.data.username, amt, act.data.message, act._id, tier);
             if (added > 0 || type === 'follower') changes = true;
@@ -340,7 +373,7 @@ const syncSessionFallback = async (channelId, stats) => {
         
         let changes = false;
         const lastSub = session.data['latest-subscriber'];
-        if (lastSub) {
+        if (lastSub && !lastSub.gifted) { // Ensure not a gift recipient
             await processEvent(stats, 'subscriber', lastSub.name, 1, "", `session-sub-${lastSub.name}`, lastSub.tier);
             changes = true;
         }
@@ -396,6 +429,24 @@ const runSync = async (forceDeep = false) => {
 // API ROUTES
 // ==========================================
 app.get('/', (req, res) => res.send('Backend OK'));
+
+// DEBUG
+app.get('/api/debug/se-latest', async (req, res) => {
+    if (!SE_JWT || !ENV_CHANNEL_ID) return res.json({ error: "Missing Config" });
+    let targetId = ENV_CHANNEL_ID;
+    try {
+        const r = await axios.get(`https://api.streamelements.com/kappa/v2/channels/${TARGET_USERNAME}`, { headers: { 'Authorization': `Bearer ${SE_JWT}` } });
+        targetId = r.data._id;
+    } catch(e){}
+
+    try {
+        const response = await axios.get(`https://api.streamelements.com/kappa/v2/activities/${targetId}`, {
+            headers: { Authorization: `Bearer ${SE_JWT}` },
+            params: { limit: 25 }
+        });
+        res.json({ configId: targetId, data: response.data });
+    } catch (e) { res.json({ error: e.message }); }
+});
 
 // AUTH
 const auth = (req, res, next) => {
