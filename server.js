@@ -90,6 +90,42 @@ const SpinHistory = mongoose.model('SpinHistory', new mongoose.Schema({
 const roundOneDecimal = (num) => Math.round(num * 10) / 10;
 
 // ==========================================
+// GIFT BATCHING BUFFER
+// ==========================================
+// Stores pending gift events: { "SenderName": { count: 5, tier: '1000', timer: Timeout } }
+const giftBuffer = {};
+
+const processBufferedGift = async (sender, data) => {
+    console.log(`🎁 Processing Bulk Gift: ${sender} gifted ${data.count} subs!`);
+    
+    try {
+        const stats = await NisathonStats.findOne({ key: 'main' });
+        if (!stats) return;
+
+        // Generate a unique ID for this bulk event
+        const providerId = `bulk-gift-${Date.now()}-${sender}`;
+        
+        // Process as a single 'gift' event with amount = count
+        await processEvent(
+            stats, 
+            'gift', 
+            sender, 
+            data.count, 
+            `Gifted ${data.count} subs`, 
+            providerId, 
+            data.tier
+        );
+        
+        await stats.save();
+    } catch (e) {
+        console.error("Gift Buffer Error:", e);
+    }
+    
+    // Cleanup
+    delete giftBuffer[sender];
+};
+
+// ==========================================
 // CORE LOGIC
 // ==========================================
 
@@ -108,7 +144,7 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
 
     // --- RULESET ---
     if (['subscriber', 'sub', 'resub', 'subscription'].includes(type)) {
-        // Skip Recipient Events (trust bulk 'gift' event) unless manual
+        // Skip Recipient Events (trust bulk 'gift' event logic) unless manual
         if (!isManual && (message.includes('gift') || amount === 0)) {
              return 0; 
         }
@@ -126,8 +162,8 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
         if (isNewEvent) stats.currentSubs += 1;
     } 
     else if (type === 'gift') {
-        earnedNisaballs = 0.5 * amount;
-        amountDisplay = `${amount} Gift Subs`;
+        earnedNisaballs = 0.5 * amount; // 0.5 NB per gift sub
+        amountDisplay = `${amount} Gift Sub${amount > 1 ? 's' : ''}`;
         if (isNewEvent) stats.currentSubs += amount;
     } 
     else if (['cheer', 'bits'].includes(type)) {
@@ -184,7 +220,6 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
     );
 
     // Wheel Logic (Single Transaction >= 5 NB)
-    // REMOVED CUMULATIVE LOGIC AS REQUESTED
     if (isNewEvent && earnedNisaballs >= 5) {
         const spins = Math.floor(earnedNisaballs / 5);
         console.log(`🎡 Queueing ${spins} spins for ${user}`);
@@ -224,15 +259,10 @@ const connectSocket = () => {
         console.log(`✅ [Socket] Authenticated! (Channel: ${data.channelId})`);
     });
 
-    socket.on('unauthorized', (data) => {
-        console.error('❌ [Socket] Auth Failed:', data);
-    });
-
     socket.on('event', async (data) => {
         if (!data || !data.type) return;
         if (!['subscriber', 'tip', 'cheer', 'follower', 'follow'].includes(data.type)) return;
 
-        console.log(`⚡ [Socket] New Event: ${data.type}`);
         try {
             const stats = await NisathonStats.findOne({ key: 'main' });
             if (!stats) return;
@@ -243,15 +273,30 @@ const connectSocket = () => {
             let type = data.type; 
             let username = info.username;
 
+            // GIFT BUFFERING LOGIC
+            if (type === 'subscriber' && info.gifted) {
+                const sender = info.sender;
+                // If we have a pending buffer for this sender, clear its timeout
+                if (giftBuffer[sender]) {
+                    clearTimeout(giftBuffer[sender].timer);
+                    giftBuffer[sender].count += 1;
+                } else {
+                    // Start new buffer
+                    giftBuffer[sender] = { count: 1, tier: info.tier || '1000', timer: null };
+                }
+                
+                // Set/Reset timeout to process the batch after 2 seconds of silence
+                giftBuffer[sender].timer = setTimeout(() => {
+                    processBufferedGift(sender, giftBuffer[sender]);
+                }, 2000);
+                
+                return; // Stop processing this individual event
+            }
+            
+            // Normal Processing
             if (type === 'subscriber') {
                 tier = info.tier || '1000';
                 amount = info.amount || 1; 
-                // Convert gifted to 'gift' type and sender
-                if (info.gifted) {
-                     type = 'gift';
-                     username = info.sender;
-                     amount = 1; 
-                }
             } else if (type === 'tip' || type === 'cheer') {
                 amount = info.amount;
             } else if (type === 'follow') {
@@ -298,7 +343,7 @@ const fetchAndProcess = async (channelId, label, stats, limit = 25, offset = 0) 
                 'Accept': 'application/json',
                 'User-Agent': 'UrnisaBot/1.0' 
             },
-            params: { limit, offset },
+            params: { limit, offset, types: 'subscriber,tip,cheer,follow' },
             timeout: 10000
         });
 
@@ -313,6 +358,13 @@ const fetchAndProcess = async (channelId, label, stats, limit = 25, offset = 0) 
                 let type = act.type;
                 let username = act.data.username; 
                 
+                // Handle Gifts in REST (Similar to Socket but no buffer needed as REST is snapshot)
+                // BUT if SE provides 'gift' events separately, we use those.
+                // If SE only provides recipients, we have to aggregate or count individually.
+                // Since REST is polling, buffering is harder. 
+                // STRATEGY: If we see a gifted sub here, convert to single 'gift' of 1 from sender.
+                // The frontend/admin logs will show many '1 Gift Sub' entries.
+                // This is acceptable for historical backfill/polling, as accurate math > grouping visuals.
                 if (['subscriber','sub','resub'].includes(act.type)) { 
                     amt = 1; 
                     tier = act.data.tier || '1000';
