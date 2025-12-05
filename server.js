@@ -112,7 +112,8 @@ const InventoryItemSchema = new mongoose.Schema({
     claimedAt: Date,
     createdAt: { type: Date, default: Date.now }
 });
-const InventoryItem = mongoose.model('InventoryItem', InventoryItemSchema);
+// Use existing or create new model
+const InventoryItem = mongoose.models.InventoryItem || mongoose.model('InventoryItem', InventoryItemSchema);
 
 const MinecraftLinkSchema = new mongoose.Schema({
     discordId: { type: String, required: true, unique: true },
@@ -121,6 +122,7 @@ const MinecraftLinkSchema = new mongoose.Schema({
     minecraftUsername: { type: String, required: true, unique: true },
     linkedAt: { type: Date, default: Date.now }
 });
+// Use existing or create new model
 const MinecraftLink = mongoose.models.MinecraftLink || mongoose.model('MinecraftLink', MinecraftLinkSchema);
 
 const roundOneDecimal = (num) => Math.round(num * 10) / 10;
@@ -216,7 +218,6 @@ const getRconCommand = (username, item) => {
         if (cleanName.includes("shiny upgrade")) itemId = "cobblemon:shiny_charm"; 
         if (cleanName.includes("tm choice")) itemId = "cobblemon:tm_normal"; 
         
-        // IV Caps logic (using vitamins as proxies as defined in Gacha.tsx)
         if (cleanName.includes("hp iv cap")) itemId = "cobblemon:hp_up";
         if (cleanName.includes("atk iv cap")) itemId = "cobblemon:protein";
         if (cleanName.includes("def iv cap")) itemId = "cobblemon:iron";
@@ -739,12 +740,15 @@ app.post('/api/upload', async (req, res) => {
     return res.status(500).send();
 });
 
-// --- INVENTORY API ---
+// --- INVENTORY API ROUTES ---
 
 // Save Gacha Pulls
 app.post('/api/gacha/save', async (req, res) => {
     const { discordId, cards } = req.body;
-    if (!discordId || !cards || !Array.isArray(cards)) return res.status(400).json({ error: "Invalid data" });
+    
+    if (!discordId || !cards || !Array.isArray(cards)) {
+        return res.status(400).json({ error: "Invalid data" });
+    }
 
     try {
         const items = cards.map(card => ({
@@ -757,6 +761,7 @@ app.post('/api/gacha/save', async (req, res) => {
             subType: card.subType,
             claimed: false
         }));
+
         await InventoryItem.insertMany(items);
         res.json({ success: true, count: items.length });
     } catch (e) {
@@ -778,15 +783,23 @@ app.get('/api/inventory/:discordId', async (req, res) => {
 // Claim Item
 app.post('/api/inventory/claim', async (req, res) => {
     const { discordId, itemId } = req.body;
+
     try {
+        // 1. Find Item
         const item = await InventoryItem.findOne({ _id: itemId, discordId });
         if (!item) return res.status(404).json({ error: "Item not found" });
         if (item.claimed) return res.status(400).json({ error: "Already claimed" });
 
+        // 2. Find Linked Minecraft Account
         const link = await MinecraftLink.findOne({ discordId });
-        if (!link || !link.minecraftUsername) return res.status(400).json({ error: "No Minecraft account linked!" });
+        if (!link || !link.minecraftUsername) {
+            return res.status(400).json({ error: "No Minecraft account linked!" });
+        }
 
+        // 3. Generate RCON Command
         const command = getRconCommand(link.minecraftUsername, item);
+
+        // 4. Send Command
         const success = await sendRconCommand(command);
 
         if (success) {
@@ -795,9 +808,11 @@ app.post('/api/inventory/claim', async (req, res) => {
             await item.save();
             res.json({ success: true, message: `Sent ${item.name} to ${link.minecraftUsername}` });
         } else {
-            res.status(500).json({ error: "RCON Failed. Server offline?" });
+            res.status(500).json({ error: "RCON Connection Failed. Server might be offline." });
         }
+
     } catch (e) {
+        console.error("Claim Error:", e);
         res.status(500).json({ error: e.message });
     }
 });
