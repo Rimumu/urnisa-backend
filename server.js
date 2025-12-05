@@ -1,9 +1,16 @@
+
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
 const mongoose = require('mongoose');
 const crypto = require('crypto');
 const io = require('socket.io-client');
+let Rcon;
+try {
+    Rcon = require('rcon-client').Rcon;
+} catch (e) {
+    console.warn("⚠️ 'rcon-client' not installed. RCON commands will be simulated in logs.");
+}
 require('dotenv').config();
 
 // ==========================================
@@ -12,6 +19,11 @@ require('dotenv').config();
 const PORT = process.env.PORT || 3001;
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "admin";
 const MONGO_URI = process.env.MONGO_URI;
+
+// RCON Config
+const RCON_HOST = process.env.RCON_HOST;
+const RCON_PORT = parseInt(process.env.RCON_PORT || '25575');
+const RCON_PASSWORD = process.env.RCON_PASSWORD;
 
 // StreamElements Config
 let SE_JWT = process.env.STREAMELEMENTS_JWT || "";
@@ -87,52 +99,156 @@ const SpinHistory = mongoose.model('SpinHistory', new mongoose.Schema({
     user: String, reward: String, timestamp: { type: Date, default: Date.now }
 }));
 
+// --- INVENTORY & MC SCHEMAS ---
+const InventoryItemSchema = new mongoose.Schema({
+    discordId: { type: String, required: true },
+    cardId: Number,
+    name: String,
+    rarity: String,
+    image: String,
+    type: String, // 'Pokemon' or 'Item'
+    subType: String,
+    claimed: { type: Boolean, default: false },
+    claimedAt: Date,
+    createdAt: { type: Date, default: Date.now }
+});
+const InventoryItem = mongoose.model('InventoryItem', InventoryItemSchema);
+
+const MinecraftLinkSchema = new mongoose.Schema({
+    discordId: { type: String, required: true, unique: true },
+    discordUsername: String,
+    discordAvatar: String,
+    minecraftUsername: { type: String, required: true, unique: true },
+    linkedAt: { type: Date, default: Date.now }
+});
+const MinecraftLink = mongoose.models.MinecraftLink || mongoose.model('MinecraftLink', MinecraftLinkSchema);
+
 const roundOneDecimal = (num) => Math.round(num * 10) / 10;
+
+// ==========================================
+// RCON HELPER
+// ==========================================
+const sendRconCommand = async (command) => {
+    if (!Rcon || !RCON_HOST || !RCON_PASSWORD) {
+        console.log(`🔔 [RCON SIMULATION] ${command}`);
+        return true; // Simulate success
+    }
+
+    const rcon = new Rcon({
+        host: RCON_HOST,
+        port: RCON_PORT,
+        password: RCON_PASSWORD,
+        timeout: 5000
+    });
+
+    try {
+        await rcon.connect();
+        const response = await rcon.send(command);
+        console.log(`✅ [RCON] ${command} => ${response}`);
+        await rcon.end();
+        return true;
+    } catch (error) {
+        console.error(`❌ [RCON ERROR] ${command}: ${error.message}`);
+        return false;
+    }
+};
+
+const getRconCommand = (username, item) => {
+    // Sanitize
+    const safeUser = username.replace(/[^a-zA-Z0-9_]/g, '');
+    
+    if (item.type === 'Pokemon') {
+        // Example: pokesgive <player> <pokemon> [args]
+        const pokeName = item.name.toLowerCase().replace(/[^a-z0-9]/g, '');
+        let args = "";
+        if (item.rarity === 'Legendary' || item.rarity === 'Mythical') {
+            args = "lvl=50"; 
+        } else {
+            args = "lvl=15";
+        }
+        return `pokesgive ${safeUser} ${pokeName} ${args}`;
+    } 
+    else if (item.type === 'Item') {
+        let count = 1;
+        let cleanName = item.name.toLowerCase();
+        
+        // Extract count if present (e.g. "5x ")
+        const countMatch = cleanName.match(/^(\d+)x\s/);
+        if (countMatch) {
+            count = parseInt(countMatch[1]);
+            cleanName = cleanName.replace(/^\d+x\s/, '');
+        }
+
+        // Map names to IDs
+        let itemId = "minecraft:stone"; // Fallback
+        
+        if (cleanName.includes("coin")) itemId = "cobblemon:relic_coin";
+        if (cleanName.includes("bronze coin")) itemId = "cobblemon:copper_nugget"; 
+        if (cleanName.includes("silver coin")) itemId = "cobblemon:iron_nugget"; 
+        if (cleanName.includes("gold coin")) itemId = "cobblemon:gold_nugget"; 
+        
+        if (cleanName.includes("exp. candy")) {
+            if (cleanName.includes("xs")) itemId = "cobblemon:exp_candy_xs";
+            else if (cleanName.includes("s")) itemId = "cobblemon:exp_candy_s";
+            else if (cleanName.includes("m")) itemId = "cobblemon:exp_candy_m";
+            else if (cleanName.includes("l")) itemId = "cobblemon:exp_candy_l";
+            else if (cleanName.includes("xl")) itemId = "cobblemon:exp_candy_xl";
+        }
+        
+        if (cleanName.includes("potion")) itemId = "cobblemon:potion";
+        if (cleanName.includes("super potion")) itemId = "cobblemon:super_potion";
+        if (cleanName.includes("hyper potion")) itemId = "cobblemon:hyper_potion";
+        if (cleanName.includes("max potion")) itemId = "cobblemon:max_potion";
+        if (cleanName.includes("full restore")) itemId = "cobblemon:full_restore";
+        if (cleanName.includes("full heal")) itemId = "cobblemon:full_heal";
+        if (cleanName.includes("max ether")) itemId = "cobblemon:max_ether";
+        if (cleanName.includes("max elixir")) itemId = "cobblemon:max_elixir";
+        if (cleanName.includes("ether")) itemId = "cobblemon:ether";
+        if (cleanName.includes("elixir")) itemId = "cobblemon:elixir";
+        if (cleanName.includes("antidote")) itemId = "cobblemon:antidote";
+        if (cleanName.includes("awakening")) itemId = "cobblemon:awakening";
+        
+        if (cleanName.includes("ball")) {
+            itemId = "cobblemon:" + cleanName.replace(/\s/g, '_');
+        }
+        
+        if (cleanName.includes("rare candy")) itemId = "cobblemon:rare_candy";
+        if (cleanName.includes("shiny upgrade")) itemId = "cobblemon:shiny_charm"; 
+        if (cleanName.includes("tm choice")) itemId = "cobblemon:tm_normal"; 
+        
+        // IV Caps logic (using vitamins as proxies as defined in Gacha.tsx)
+        if (cleanName.includes("hp iv cap")) itemId = "cobblemon:hp_up";
+        if (cleanName.includes("atk iv cap")) itemId = "cobblemon:protein";
+        if (cleanName.includes("def iv cap")) itemId = "cobblemon:iron";
+        if (cleanName.includes("sp. atk iv cap")) itemId = "cobblemon:calcium";
+        if (cleanName.includes("sp. def iv cap")) itemId = "cobblemon:zinc";
+        if (cleanName.includes("speed iv cap")) itemId = "cobblemon:carbos";
+
+        return `give ${safeUser} ${itemId} ${count}`;
+    }
+    
+    return `say User ${safeUser} claimed ${item.name} but command failed logic.`;
+};
 
 // ==========================================
 // GIFT BATCHING BUFFER
 // ==========================================
-// Stores pending gift events: { "SenderName": { count: 5, tier: '1000', timer: Timeout } }
 const giftBuffer = {};
 
 const processBufferedGift = async (sender, data) => {
     console.log(`🎁 Processing Bulk Gift: ${sender} gifted ${data.count} subs!`);
-    
     try {
         const stats = await NisathonStats.findOne({ key: 'main' });
         if (!stats) return;
-
-        // Generate a unique ID for this bulk event
         const providerId = `bulk-gift-${Date.now()}-${sender}`;
-        
-        // Process as a single 'gift' event with amount = count
-        await processEvent(
-            stats, 
-            'gift', 
-            sender, 
-            data.count, 
-            `Gifted ${data.count} subs`, 
-            providerId, 
-            data.tier
-        );
-        
+        await processEvent(stats, 'gift', sender, data.count, `Gifted ${data.count} subs`, providerId, data.tier);
         await stats.save();
-    } catch (e) {
-        console.error("Gift Buffer Error:", e);
-    }
-    
-    // Cleanup
+    } catch (e) { console.error("Gift Buffer Error:", e); }
     delete giftBuffer[sender];
 };
 
-// ==========================================
-// CORE LOGIC
-// ==========================================
-
 const processEvent = async (stats, type, user, amount, message, providerId, tier = '1000', isManual = false) => {
     let isNewEvent = true;
-
-    // Check duplicates
     if (providerId && !isManual) {
         const existing = await NisathonEvent.findOne({ providerId });
         if (existing) isNewEvent = false;
@@ -142,27 +258,21 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
     let amountDisplay = "";
     let eventType = type;
 
-    // --- RULESET ---
     if (['subscriber', 'sub', 'resub', 'subscription'].includes(type)) {
-        // Skip Recipient Events (trust bulk 'gift' event logic) unless manual
-        if (!isManual && (message.includes('gift') || amount === 0)) {
-             return 0; 
-        }
-
+        if (!isManual && (message.includes('gift') || amount === 0)) return 0; 
         let tVal = 0.5;
         let tLbl = "Tier 1";
         const tStr = String(tier).toLowerCase();
         if (tStr.includes('3000') || tStr === '3') { tVal = 2.0; tLbl = "Tier 3"; }
         else if (tStr.includes('2000') || tStr === '2') { tVal = 1.0; tLbl = "Tier 2"; }
         else if (tStr.includes('prime')) { tVal = 0.5; tLbl = "Prime"; }
-        
         earnedNisaballs = tVal;
         amountDisplay = `${tLbl} Sub`;
         eventType = 'sub';
         if (isNewEvent) stats.currentSubs += 1;
     } 
     else if (type === 'gift') {
-        earnedNisaballs = 0.5 * amount; // 0.5 NB per gift sub
+        earnedNisaballs = 0.5 * amount;
         amountDisplay = `${amount} Gift Sub${amount > 1 ? 's' : ''}`;
         if (isNewEvent) stats.currentSubs += amount;
     } 
@@ -184,7 +294,6 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
         eventType = 'follower';
     }
 
-    // Update Stats & Timer
     if (isNewEvent) {
         stats.totalNisaballs = roundOneDecimal(stats.totalNisaballs + earnedNisaballs);
         const mult = stats.activeEvent === 'DOUBLE_TIMER' ? 2 : 1;
@@ -201,7 +310,6 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
         }
     }
 
-    // Save Event
     const eventData = {
         providerId: providerId || `sim-${Date.now()}`,
         user: user || 'Anonymous',
@@ -219,7 +327,6 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
         { upsert: true, new: true }
     );
 
-    // Wheel Logic (Single Transaction >= 5 NB)
     if (isNewEvent && earnedNisaballs >= 5) {
         const spins = Math.floor(earnedNisaballs / 5);
         console.log(`🎡 Queueing ${spins} spins for ${user}`);
@@ -233,7 +340,7 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
 };
 
 // ==========================================
-// 1. REAL-TIME SOCKET (METHOD 1)
+// 1. REAL-TIME SOCKET
 // ==========================================
 let socket = null;
 
@@ -241,8 +348,6 @@ const connectSocket = () => {
     if (!SE_JWT) { console.log("❌ [Socket] No JWT"); return; }
     
     console.log("🔌 [Socket] Connecting...");
-    
-    // StreamElements uses Socket.IO v2. 
     socket = io('https://realtime.streamelements.com', { 
         transports: ['websocket'],
         forceNew: true,
@@ -273,27 +378,20 @@ const connectSocket = () => {
             let type = data.type; 
             let username = info.username;
 
-            // GIFT BUFFERING LOGIC
             if (type === 'subscriber' && info.gifted) {
                 const sender = info.sender;
-                // If we have a pending buffer for this sender, clear its timeout
                 if (giftBuffer[sender]) {
                     clearTimeout(giftBuffer[sender].timer);
                     giftBuffer[sender].count += 1;
                 } else {
-                    // Start new buffer
                     giftBuffer[sender] = { count: 1, tier: info.tier || '1000', timer: null };
                 }
-                
-                // Set/Reset timeout to process the batch after 2 seconds of silence
                 giftBuffer[sender].timer = setTimeout(() => {
                     processBufferedGift(sender, giftBuffer[sender]);
                 }, 2000);
-                
-                return; // Stop processing this individual event
+                return;
             }
             
-            // Normal Processing
             if (type === 'subscriber') {
                 tier = info.tier || '1000';
                 amount = info.amount || 1; 
@@ -312,37 +410,26 @@ const connectSocket = () => {
 };
 
 // ==========================================
-// 2. REST POLLING & RESOLVER
+// 2. REST POLLING
 // ==========================================
 const resolveChannelId = async () => {
     if (!SE_JWT) return null;
     try {
-        const res = await axios.get(`https://api.streamelements.com/kappa/v2/channels/${TARGET_USERNAME}`, {
-             headers: { 'User-Agent': 'Mozilla/5.0' }
-        });
-        if (res.data && res.data._id) {
-            return res.data._id;
-        }
+        const res = await axios.get(`https://api.streamelements.com/kappa/v2/channels/${TARGET_USERNAME}`, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+        if (res.data && res.data._id) return res.data._id;
     } catch (e) { }
     try {
-        const me = await axios.get('https://api.streamelements.com/kappa/v2/channels/me', {
-            headers: { 'Authorization': `Bearer ${SE_JWT}` }
-        });
+        const me = await axios.get('https://api.streamelements.com/kappa/v2/channels/me', { headers: { 'Authorization': `Bearer ${SE_JWT}` } });
         return me.data._id;
     } catch (e) { return null; }
 };
 
 const fetchAndProcess = async (channelId, label, stats, limit = 25, offset = 0) => {
     if (!channelId) return [];
-    
     try {
         const url = `https://api.streamelements.com/kappa/v2/activities/${channelId}`;
         const { data: activities } = await axios.get(url, {
-            headers: { 
-                'Authorization': `Bearer ${SE_JWT}`,
-                'Accept': 'application/json',
-                'User-Agent': 'UrnisaBot/1.0' 
-            },
+            headers: { 'Authorization': `Bearer ${SE_JWT}`, 'Accept': 'application/json', 'User-Agent': 'UrnisaBot/1.0' },
             params: { limit, offset, types: 'subscriber,tip,cheer,follow' },
             timeout: 10000
         });
@@ -358,31 +445,14 @@ const fetchAndProcess = async (channelId, label, stats, limit = 25, offset = 0) 
                 let type = act.type;
                 let username = act.data.username; 
                 
-                // Handle Gifts in REST (Similar to Socket but no buffer needed as REST is snapshot)
-                // BUT if SE provides 'gift' events separately, we use those.
-                // If SE only provides recipients, we have to aggregate or count individually.
-                // Since REST is polling, buffering is harder. 
-                // STRATEGY: If we see a gifted sub here, convert to single 'gift' of 1 from sender.
-                // The frontend/admin logs will show many '1 Gift Sub' entries.
-                // This is acceptable for historical backfill/polling, as accurate math > grouping visuals.
                 if (['subscriber','sub','resub'].includes(act.type)) { 
                     amt = 1; 
                     tier = act.data.tier || '1000';
-                    if (act.data.gifted) {
-                        username = act.data.sender;
-                        type = 'gift';
-                    }
+                    if (act.data.gifted) { username = act.data.sender; type = 'gift'; }
                 }
-                else if (act.type === 'gift') {
-                    amt = act.data.amount || 1; 
-                }
-                else if (['cheer','tip'].includes(act.type)) {
-                    amt = act.data.amount; 
-                }
-                else if (act.type === 'follow') { 
-                    type = 'follower'; 
-                    amt = 0; 
-                }
+                else if (act.type === 'gift') amt = act.data.amount || 1; 
+                else if (['cheer','tip'].includes(act.type)) amt = act.data.amount; 
+                else if (act.type === 'follow') { type = 'follower'; amt = 0; }
                 else continue;
 
                 const added = await processEvent(stats, type, username, amt, act.data.message, act._id, tier);
@@ -399,7 +469,6 @@ const syncSessionFallback = async (channelId, stats) => {
         const { data: session } = await axios.get(`https://api.streamelements.com/kappa/v2/sessions/${channelId}`, {
              headers: { 'Authorization': `Bearer ${SE_JWT}` }
         });
-        
         if (!session || !session.data) return;
         
         let changes = false;
@@ -407,20 +476,15 @@ const syncSessionFallback = async (channelId, stats) => {
         if (lastSub) {
             let username = lastSub.name;
             let type = 'subscriber';
-            if (lastSub.gifted) {
-                 username = lastSub.sender;
-                 type = 'gift';
-            }
+            if (lastSub.gifted) { username = lastSub.sender; type = 'gift'; }
             await processEvent(stats, type, username, 1, "", `session-sub-${username}`, lastSub.tier);
             changes = true;
         }
-        
         const lastTip = session.data['latest-tip'];
         if (lastTip) {
              await processEvent(stats, 'tip', lastTip.name, lastTip.amount, lastTip.message, `session-tip-${lastTip.name}-${lastTip.amount}`);
              changes = true;
         }
-
         const lastCheer = session.data['latest-cheer'];
         if (lastCheer) {
              await processEvent(stats, 'cheer', lastCheer.name, lastCheer.amount, lastCheer.message, `session-cheer-${lastCheer.name}-${lastCheer.amount}`);
@@ -433,14 +497,11 @@ const syncSessionFallback = async (channelId, stats) => {
 const runSync = async (forceDeep = false) => {
     if (mongoose.connection.readyState !== 1) return;
     if (!SE_JWT) return;
-
     try {
         let stats = await NisathonStats.findOne({ key: 'main' });
         if (!stats) stats = await NisathonStats.create({ key: 'main', timerEndTime: new Date(Date.now() + 3*3600000) });
-
         let resolvedId = await resolveChannelId();
         if (!resolvedId) resolvedId = ENV_CHANNEL_ID;
-
         if (resolvedId) {
             const limit = forceDeep ? 100 : 25;
             const c1 = await fetchAndProcess(resolvedId, "AUTO-ID", stats, limit);
@@ -450,14 +511,10 @@ const runSync = async (forceDeep = false) => {
     } catch (e) { console.error("Loop Error:", e); }
 };
 
-// ==========================================
-// REBUILD LOGIC
-// ==========================================
 const rebuildEverything = async () => {
     const resolvedId = await resolveChannelId() || ENV_CHANNEL_ID;
     if (!resolvedId) return;
     console.log(`🔥 STARTING REBUILD for ${resolvedId}...`);
-
     await NisathonEvent.deleteMany({});
     await SpinQueue.deleteMany({});
     await SpinHistory.deleteMany({});
@@ -473,32 +530,23 @@ const rebuildEverything = async () => {
     let allActivities = [];
     const limit = 100; 
     const pagesToFetch = 10; 
-
     for (let i = 0; i < pagesToFetch; i++) {
         const acts = await fetchAndProcess(resolvedId, "REBUILD", null, limit, i * limit);
         if (Array.isArray(acts) && acts.length > 0) allActivities = allActivities.concat(acts);
         else break;
     }
-
     console.log(`   -> Processing ${allActivities.length} historical events...`);
     allActivities.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
-
     for (const act of allActivities) {
         let amt = 0, tier = '1000', type = act.type, user = act.data.username;
-        
         if (['subscriber','sub','resub'].includes(act.type)) { 
-            amt = 1; 
-            tier = act.data.tier || '1000';
-            if (act.data.gifted) {
-                user = act.data.sender; 
-                type = 'gift';
-            }
+            amt = 1; tier = act.data.tier || '1000';
+            if (act.data.gifted) { user = act.data.sender; type = 'gift'; }
         }
         else if (act.type === 'gift') amt = act.data.amount || 1;
         else if (['cheer','tip'].includes(act.type)) amt = act.data.amount;
         else if (act.type === 'follow') { type = 'follower'; amt = 0; }
         else continue;
-
         await processEvent(stats, type, user, amt, act.data.message, act._id, tier);
     }
     stats.lastActivityTime = new Date().toISOString();
@@ -506,13 +554,11 @@ const rebuildEverything = async () => {
     console.log("✅ REBUILD COMPLETE.");
 };
 
-
 // ==========================================
 // API ROUTES
 // ==========================================
 app.get('/', (req, res) => res.send('Backend OK'));
 
-// DEBUG
 app.get('/api/debug/se-latest', async (req, res) => {
     if (!SE_JWT || !ENV_CHANNEL_ID) return res.json({ error: "Missing Config" });
     let targetId = ENV_CHANNEL_ID;
@@ -520,7 +566,6 @@ app.get('/api/debug/se-latest', async (req, res) => {
         const r = await axios.get(`https://api.streamelements.com/kappa/v2/channels/${TARGET_USERNAME}`, { headers: { 'Authorization': `Bearer ${SE_JWT}` } });
         targetId = r.data._id;
     } catch(e){}
-
     try {
         const response = await axios.get(`https://api.streamelements.com/kappa/v2/activities/${targetId}`, {
             headers: { Authorization: `Bearer ${SE_JWT}` },
@@ -536,30 +581,25 @@ const auth = (req, res, next) => {
 };
 app.post('/api/verify', (req, res) => res.json(req.body.password === ADMIN_PASSWORD ? {success:true} : {error:'Invalid'}));
 
-// NISATHON
 app.get('/api/nisathon/stats', async (req, res) => {
     if (mongoose.connection.readyState !== 1) return res.json({});
     let stats = await NisathonStats.findOne({ key: 'main' });
     if (!stats) stats = await NisathonStats.create({ key: 'main' });
     res.json(stats);
 });
-
 app.get('/api/nisathon/leaderboard', async (req, res) => {
     try {
         const lb = await NisathonEvent.aggregate([{ $group: { _id: "$user", total: { $sum: "$nisaballAmount" } } }, { $sort: { total: -1 } }, { $limit: 10 }]);
         res.json(lb.map((x, i) => ({ rank: i+1, user: x._id, totalNisaballs: roundOneDecimal(x.total) })));
     } catch { res.json([]); }
 });
-
 app.get('/api/nisathon/recent', async (req, res) => res.json(await NisathonEvent.find().sort({ createdAt: -1 }).limit(50)));
-
 app.post('/api/nisathon/test-event', auth, async (req, res) => {
     const stats = await NisathonStats.findOne({ key: 'main' });
     await processEvent(stats, req.body.type, req.body.user, parseFloat(req.body.amount), "Manual", null, req.body.tier, true);
     await stats.save();
     res.json({ success: true });
 });
-
 app.post('/api/nisathon/timer/set', auth, async (req, res) => {
     const stats = await NisathonStats.findOne({ key: 'main' });
     const ms = (req.body.hours*3600 + req.body.minutes*60 + req.body.seconds)*1000;
@@ -603,24 +643,19 @@ app.post('/api/nisathon/rebuild', auth, async (req, res) => {
     rebuildEverything();
     res.json({ success: true, message: "Rebuild Started" });
 });
-
 app.post('/api/nisathon/delete-event', auth, async (req, res) => {
     const { id, revert } = req.body;
     try {
         const event = await NisathonEvent.findById(id);
         if (!event) return res.status(404).json({ error: "Not Found" });
-
         if (revert) {
             const stats = await NisathonStats.findOne({ key: 'main' });
             if (stats) {
-                // Approximate Revert
                 if (event.type === 'sub') stats.currentSubs -= 1;
                 else if (event.type === 'gift') stats.currentSubs -= (event.nisaballAmount * 2); 
                 else if (event.type === 'bits') stats.currentBits -= (event.nisaballAmount * 500);
                 else if (event.type === 'donation') stats.currentDonations -= (event.nisaballAmount * 5);
-
                 stats.totalNisaballs = Math.max(0, roundOneDecimal(stats.totalNisaballs - event.nisaballAmount));
-                
                 const msToRemove = event.nisaballAmount * 10 * 60 * 1000;
                 if (stats.isPaused) stats.remainingTimeMs = Math.max(0, stats.remainingTimeMs - msToRemove);
                 else stats.timerEndTime = new Date(new Date(stats.timerEndTime).getTime() - msToRemove);
@@ -633,7 +668,6 @@ app.post('/api/nisathon/delete-event', auth, async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// Wheel
 app.get('/api/wheel/queue', async (req, res) => res.json(await SpinQueue.find().sort({ createdAt: 1 })));
 app.get('/api/wheel/history', async (req, res) => res.json(await SpinHistory.find().sort({ timestamp: -1 })));
 app.post('/api/wheel/spin-result', auth, async (req, res) => {
@@ -642,14 +676,12 @@ app.post('/api/wheel/spin-result', auth, async (req, res) => {
     res.json({ success: true });
 });
 
-// NEW: COUNTDOWN API (STANDALONE)
 app.get('/api/countdown/stats', async (req, res) => {
     if (mongoose.connection.readyState !== 1) return res.json({});
     let stats = await mongoose.model('CountdownStats').findOne({ key: 'main' });
     if (!stats) stats = await mongoose.model('CountdownStats').create({ key: 'main' });
     res.json(stats);
 });
-
 app.post('/api/countdown/set', auth, async (req, res) => {
     const stats = await mongoose.model('CountdownStats').findOne({ key: 'main' });
     const ms = (req.body.hours*3600 + req.body.minutes*60 + req.body.seconds)*1000;
@@ -657,7 +689,6 @@ app.post('/api/countdown/set', auth, async (req, res) => {
     await stats.save();
     res.json({ success: true });
 });
-
 app.post('/api/countdown/add', auth, async (req, res) => {
     const stats = await mongoose.model('CountdownStats').findOne({ key: 'main' });
     const ms = req.body.minutes * 60000;
@@ -666,7 +697,6 @@ app.post('/api/countdown/add', auth, async (req, res) => {
     await stats.save();
     res.json({ success: true });
 });
-
 app.post('/api/countdown/pause', auth, async (req, res) => {
     const stats = await mongoose.model('CountdownStats').findOne({ key: 'main' });
     const now = Date.now();
@@ -678,14 +708,11 @@ app.post('/api/countdown/pause', auth, async (req, res) => {
     await stats.save();
     res.json({ success: true, isPaused: stats.isPaused });
 });
-
 app.post('/api/countdown/reset', auth, async (req, res) => {
     await mongoose.model('CountdownStats').findOneAndUpdate({ key: 'main' }, { remainingTimeMs: 0, isPaused: true, timerEndTime: new Date() });
     res.json({ success: true });
 });
 
-
-// Content
 app.get('/api/goals', async (req, res) => res.json({ goals: (await Setting.findOne({ key: 'nisathon_goals' }))?.value }));
 app.post('/api/goals', auth, async (req, res) => { await Setting.findOneAndUpdate({ key: 'nisathon_goals' }, { value: req.body.goals }, { upsert: true }); res.json({ success: true }); });
 app.get('/api/wheel', async (req, res) => res.json({ items: (await Setting.findOne({ key: 'wheel_items' }))?.value }));
@@ -712,30 +739,81 @@ app.post('/api/upload', async (req, res) => {
     return res.status(500).send();
 });
 
-// NEW: In-Memory Cache for image size checks
-const imageValidationCache = new Map();
+// --- INVENTORY API ---
 
-// NEW: Image Validator for Cobblemon Tools (Optimized with Cache)
-// Checks if file size > 2KB (approx 2048 bytes). Placeholders are usually smaller.
+// Save Gacha Pulls
+app.post('/api/gacha/save', async (req, res) => {
+    const { discordId, cards } = req.body;
+    if (!discordId || !cards || !Array.isArray(cards)) return res.status(400).json({ error: "Invalid data" });
+
+    try {
+        const items = cards.map(card => ({
+            discordId,
+            cardId: card.id,
+            name: card.name,
+            rarity: card.rarity,
+            image: card.image,
+            type: card.type,
+            subType: card.subType,
+            claimed: false
+        }));
+        await InventoryItem.insertMany(items);
+        res.json({ success: true, count: items.length });
+    } catch (e) {
+        console.error("Gacha Save Error:", e);
+        res.status(500).json({ error: "Failed to save inventory" });
+    }
+});
+
+// Get Inventory
+app.get('/api/inventory/:discordId', async (req, res) => {
+    try {
+        const items = await InventoryItem.find({ discordId: req.params.discordId }).sort({ claimed: 1, createdAt: -1 });
+        res.json(items);
+    } catch (e) {
+        res.status(500).json({ error: "Fetch failed" });
+    }
+});
+
+// Claim Item
+app.post('/api/inventory/claim', async (req, res) => {
+    const { discordId, itemId } = req.body;
+    try {
+        const item = await InventoryItem.findOne({ _id: itemId, discordId });
+        if (!item) return res.status(404).json({ error: "Item not found" });
+        if (item.claimed) return res.status(400).json({ error: "Already claimed" });
+
+        const link = await MinecraftLink.findOne({ discordId });
+        if (!link || !link.minecraftUsername) return res.status(400).json({ error: "No Minecraft account linked!" });
+
+        const command = getRconCommand(link.minecraftUsername, item);
+        const success = await sendRconCommand(command);
+
+        if (success) {
+            item.claimed = true;
+            item.claimedAt = new Date();
+            await item.save();
+            res.json({ success: true, message: `Sent ${item.name} to ${link.minecraftUsername}` });
+        } else {
+            res.status(500).json({ error: "RCON Failed. Server offline?" });
+        }
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+const imageValidationCache = new Map();
 app.get('/api/utils/check-image', async (req, res) => {
     const { url } = req.query;
     if (!url) return res.json({ valid: false });
-
-    // Check Cache
-    if (imageValidationCache.has(url)) {
-        return res.json({ valid: imageValidationCache.get(url) });
-    }
-
+    if (imageValidationCache.has(url)) return res.json({ valid: imageValidationCache.get(url) });
     try {
         const response = await axios.head(url, { timeout: 5000 });
         const length = parseInt(response.headers['content-length'] || '0');
-        // Valid if > 2KB (2048 bytes)
         const isValid = length > 2048;
-        
         imageValidationCache.set(url, isValid);
         res.json({ valid: isValid });
     } catch (e) {
-        // Cache negative result too to prevent repeated failing requests
         imageValidationCache.set(url, false);
         res.json({ valid: false });
     }
@@ -749,10 +827,8 @@ if (MONGO_URI) {
             console.log("✅ MongoDB Ready");
             app.listen(PORT, async () => {
                 console.log(`✅ Server on ${PORT}`);
-                
                 await resolveChannelId();
                 connectSocket();
-                
                 console.log("🚀 Startup Deep Sync...");
                 await runSync(true);
                 setInterval(() => runSync(false), 30000);
