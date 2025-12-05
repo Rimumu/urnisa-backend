@@ -712,18 +712,31 @@ app.post('/api/upload', async (req, res) => {
     return res.status(500).send();
 });
 
-// NEW: Image Validator for Cobblemon Tools
+// NEW: In-Memory Cache for image size checks
+const imageValidationCache = new Map();
+
+// NEW: Image Validator for Cobblemon Tools (Optimized with Cache)
 // Checks if file size > 2KB (approx 2048 bytes). Placeholders are usually smaller.
 app.get('/api/utils/check-image', async (req, res) => {
     const { url } = req.query;
     if (!url) return res.json({ valid: false });
+
+    // Check Cache
+    if (imageValidationCache.has(url)) {
+        return res.json({ valid: imageValidationCache.get(url) });
+    }
+
     try {
         const response = await axios.head(url, { timeout: 5000 });
         const length = parseInt(response.headers['content-length'] || '0');
         // Valid if > 2KB (2048 bytes)
-        res.json({ valid: length > 2048 });
+        const isValid = length > 2048;
+        
+        imageValidationCache.set(url, isValid);
+        res.json({ valid: isValid });
     } catch (e) {
-        // 404 or Error -> Invalid
+        // Cache negative result too to prevent repeated failing requests
+        imageValidationCache.set(url, false);
         res.json({ valid: false });
     }
 });
