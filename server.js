@@ -762,6 +762,32 @@ app.post('/api/bingo/delete', async (req, res) => {
     }
 });
 
+// Get Bingo Configuration (Card ID, Win Condition)
+app.get('/api/bingo/config', async (req, res) => {
+    try {
+        const config = await Setting.findOne({ key: 'bingo_config' });
+        // Default fallbacks if not set
+        res.json(config ? config.value : { cardId: 'WEEK1', winCondition: '1 Line' });
+    } catch (e) {
+        res.status(500).json({ error: "Failed to fetch bingo config" });
+    }
+});
+
+// Set Bingo Configuration (Admin)
+app.post('/api/bingo/config', auth, async (req, res) => {
+    const { cardId, winCondition } = req.body;
+    try {
+        await Setting.findOneAndUpdate(
+            { key: 'bingo_config' }, 
+            { value: { cardId, winCondition } }, 
+            { upsert: true }
+        );
+        res.json({ success: true, message: "Bingo config updated" });
+    } catch (e) {
+        res.status(500).json({ error: "Failed to update bingo config" });
+    }
+});
+
 // START
 if (MONGO_URI) {
     mongoose.set('strictQuery', false);
