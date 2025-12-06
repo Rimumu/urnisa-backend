@@ -1,3 +1,4 @@
+
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
@@ -85,6 +86,16 @@ const SpinQueue = mongoose.model('SpinQueue', new mongoose.Schema({
 
 const SpinHistory = mongoose.model('SpinHistory', new mongoose.Schema({
     user: String, reward: String, timestamp: { type: Date, default: Date.now }
+}));
+
+// NEW: Bingo Card Schema
+const BingoCard = mongoose.model('BingoCard', new mongoose.Schema({
+    discordId: { type: String, required: true },
+    name: { type: String, required: true }, // User given name
+    cardId: { type: String, required: true }, // The seed ID
+    gridData: { type: Array, required: true }, // Snapshot of cells to ensure consistency
+    marked: { type: [Boolean], required: true }, // Array of booleans
+    updatedAt: { type: Date, default: Date.now }
 }));
 
 const roundOneDecimal = (num) => Math.round(num * 10) / 10;
@@ -358,13 +369,7 @@ const fetchAndProcess = async (channelId, label, stats, limit = 25, offset = 0) 
                 let type = act.type;
                 let username = act.data.username; 
                 
-                // Handle Gifts in REST (Similar to Socket but no buffer needed as REST is snapshot)
-                // BUT if SE provides 'gift' events separately, we use those.
-                // If SE only provides recipients, we have to aggregate or count individually.
-                // Since REST is polling, buffering is harder. 
-                // STRATEGY: If we see a gifted sub here, convert to single 'gift' of 1 from sender.
-                // The frontend/admin logs will show many '1 Gift Sub' entries.
-                // This is acceptable for historical backfill/polling, as accurate math > grouping visuals.
+                // Handle Gifts in REST
                 if (['subscriber','sub','resub'].includes(act.type)) { 
                     amt = 1; 
                     tier = act.data.tier || '1000';
@@ -696,48 +701,64 @@ app.get('/api/schedule', async (req, res) => res.json({ url: (await Setting.find
 app.post('/api/schedule', auth, async (req, res) => { await Setting.findOneAndUpdate({ key: 'schedule_url' }, { value: req.body.url }, { upsert: true }); res.json({ success: true }); });
 app.post('/api/stream-status', auth, async (req, res) => { await Setting.findOneAndUpdate({ key: 'stream_status_override' }, { value: req.body.override }, { upsert: true }); res.json({ success: true }); });
 app.get('/api/stream-status', async (req, res) => { const s = await Setting.findOne({ key: 'stream_status_override' }); res.json({ override: s?.value || 'auto' }); });
-
-app.post('/api/upload', async (req, res) => {
-    const { image } = req.body;
-    if (!image) return res.status(400).send();
-    if (CLOUDINARY_CLOUD_NAME) {
-        try {
-            const ts = Math.round(new Date().getTime()/1000);
-            const sig = crypto.createHash('sha1').update(`timestamp=${ts}${CLOUDINARY_API_SECRET}`).digest('hex');
-            const f = new FormData(); f.append('file', `data:image/jpeg;base64,${image}`); f.append('api_key', CLOUDINARY_API_KEY); f.append('timestamp', ts); f.append('signature', sig);
-            const r = await axios.post(`https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/image/upload`, f);
-            return res.json({ success: true, data: { url: r.data.secure_url } });
-        } catch (e) { return res.status(500).send(); }
-    }
-    return res.status(500).send();
-});
-
-// NEW: In-Memory Cache for image size checks
+app.post('/api/upload', async (req, res) => { const { image } = req.body; if (!image) return res.status(400).send(); if (CLOUDINARY_CLOUD_NAME) { try { const ts = Math.round(new Date().getTime()/1000); const sig = crypto.createHash('sha1').update(`timestamp=${ts}${CLOUDINARY_API_SECRET}`).digest('hex'); const f = new FormData(); f.append('file', `data:image/jpeg;base64,${image}`); f.append('api_key', CLOUDINARY_API_KEY); f.append('timestamp', ts); f.append('signature', sig); const r = await axios.post(`https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/image/upload`, f); return res.json({ success: true, data: { url: r.data.secure_url } }); } catch (e) { return res.status(500).send(); } } return res.status(500).send(); });
 const imageValidationCache = new Map();
+app.get('/api/utils/check-image', async (req, res) => { const { url } = req.query; if (!url) return res.json({ valid: false }); if (imageValidationCache.has(url)) { return res.json({ valid: imageValidationCache.get(url) }); } try { const response = await axios.head(url, { timeout: 5000 }); const length = parseInt(response.headers['content-length'] || '0'); const isValid = length > 2048; imageValidationCache.set(url, isValid); res.json({ valid: isValid }); } catch (e) { imageValidationCache.set(url, false); res.json({ valid: false }); } });
 
-// NEW: Image Validator for Cobblemon Tools (Optimized with Cache)
-// Checks if file size > 2KB (approx 2048 bytes). Placeholders are usually smaller.
-app.get('/api/utils/check-image', async (req, res) => {
-    const { url } = req.query;
-    if (!url) return res.json({ valid: false });
+// ==========================================
+// NEW BINGO API
+// ==========================================
 
-    // Check Cache
-    if (imageValidationCache.has(url)) {
-        return res.json({ valid: imageValidationCache.get(url) });
+// Save or Update a Bingo Card
+app.post('/api/bingo/save', async (req, res) => {
+    const { discordId, name, cardId, gridData, marked } = req.body;
+    
+    if (!discordId || !name || !cardId || !gridData) {
+        return res.status(400).json({ error: "Missing required data" });
     }
 
     try {
-        const response = await axios.head(url, { timeout: 5000 });
-        const length = parseInt(response.headers['content-length'] || '0');
-        // Valid if > 2KB (2048 bytes)
-        const isValid = length > 2048;
-        
-        imageValidationCache.set(url, isValid);
-        res.json({ valid: isValid });
+        // Check if updating existing by name for this user, or create new
+        const result = await BingoCard.findOneAndUpdate(
+            { discordId, name },
+            { 
+                cardId, 
+                gridData, 
+                marked, 
+                updatedAt: new Date() 
+            },
+            { upsert: true, new: true }
+        );
+        res.json({ success: true, message: "Card saved successfully!" });
     } catch (e) {
-        // Cache negative result too to prevent repeated failing requests
-        imageValidationCache.set(url, false);
-        res.json({ valid: false });
+        console.error("Bingo Save Error:", e);
+        res.status(500).json({ error: "Failed to save card" });
+    }
+});
+
+// List User's Saved Cards
+app.get('/api/bingo/list', async (req, res) => {
+    const { discordId } = req.query;
+    if (!discordId) return res.status(400).json({ error: "Missing Discord ID" });
+
+    try {
+        const cards = await BingoCard.find({ discordId }).sort({ updatedAt: -1 });
+        res.json(cards);
+    } catch (e) {
+        res.status(500).json({ error: "Failed to fetch cards" });
+    }
+});
+
+// Delete a Saved Card
+app.post('/api/bingo/delete', async (req, res) => {
+    const { discordId, name } = req.body;
+    if (!discordId || !name) return res.status(400).json({ error: "Missing data" });
+
+    try {
+        await BingoCard.findOneAndDelete({ discordId, name });
+        res.json({ success: true, message: "Card deleted" });
+    } catch (e) {
+        res.status(500).json({ error: "Failed to delete card" });
     }
 });
 
