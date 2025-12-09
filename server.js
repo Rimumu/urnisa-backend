@@ -647,6 +647,26 @@ app.post('/api/nisathon/delete-event', auth, async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+app.post('/api/nisathon/merge-users', auth, async (req, res) => {
+    const { sourceUser, targetUser } = req.body;
+    if (!sourceUser || !targetUser || sourceUser === targetUser) {
+        return res.status(400).json({ error: "Invalid parameters" });
+    }
+
+    try {
+        const events = await NisathonEvent.updateMany({ user: sourceUser }, { user: targetUser });
+        const spinsQ = await SpinQueue.updateMany({ user: sourceUser }, { user: targetUser });
+        const spinsH = await SpinHistory.updateMany({ user: sourceUser }, { user: targetUser });
+        
+        res.json({ 
+            success: true, 
+            message: `Merged ${events.modifiedCount} events, ${spinsQ.modifiedCount} queued spins, ${spinsH.modifiedCount} history entries.` 
+        });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
 // Wheel
 app.get('/api/wheel/queue', async (req, res) => res.json(await SpinQueue.find().sort({ createdAt: 1 })));
 app.get('/api/wheel/history', async (req, res) => res.json(await SpinHistory.find().sort({ timestamp: -1 })));
