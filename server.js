@@ -649,18 +649,27 @@ app.post('/api/nisathon/delete-event', auth, async (req, res) => {
 
 app.post('/api/nisathon/merge-users', auth, async (req, res) => {
     const { sourceUser, targetUser } = req.body;
-    if (!sourceUser || !targetUser || sourceUser === targetUser) {
-        return res.status(400).json({ error: "Invalid parameters" });
+    if (!sourceUser || !targetUser) return res.status(400).json({ error: "Invalid parameters" });
+
+    // Sanitize
+    const cleanSource = sourceUser.trim();
+    const cleanTarget = targetUser.trim();
+
+    if (cleanSource.toLowerCase() === cleanTarget.toLowerCase()) {
+         return res.status(400).json({ error: "Source and Target cannot be the same" });
     }
 
     try {
-        const events = await NisathonEvent.updateMany({ user: sourceUser }, { user: targetUser });
-        const spinsQ = await SpinQueue.updateMany({ user: sourceUser }, { user: targetUser });
-        const spinsH = await SpinHistory.updateMany({ user: sourceUser }, { user: targetUser });
+        // Use regex for case-insensitive matching of the SOURCE user to catch "anonymous", "Anonymous", "ANONYMOUS"
+        const sourceRegex = new RegExp(`^${cleanSource}$`, 'i');
+
+        const events = await NisathonEvent.updateMany({ user: sourceRegex }, { user: cleanTarget });
+        const spinsQ = await SpinQueue.updateMany({ user: sourceRegex }, { user: cleanTarget });
+        const spinsH = await SpinHistory.updateMany({ user: sourceRegex }, { user: cleanTarget });
         
         res.json({ 
             success: true, 
-            message: `Merged ${events.modifiedCount} events, ${spinsQ.modifiedCount} queued spins, ${spinsH.modifiedCount} history entries.` 
+            message: `Merged ${events.modifiedCount} events, ${spinsQ.modifiedCount} queued spins, ${spinsH.modifiedCount} history entries from "${cleanSource}" into "${cleanTarget}".` 
         });
     } catch (e) {
         res.status(500).json({ error: e.message });
