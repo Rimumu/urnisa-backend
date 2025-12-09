@@ -575,8 +575,17 @@ app.post('/api/nisathon/timer/set', auth, async (req, res) => {
 app.post('/api/nisathon/timer/add', auth, async (req, res) => {
     const stats = await NisathonStats.findOne({ key: 'main' });
     const ms = req.body.minutes * 60000;
-    if (stats.isPaused) stats.remainingTimeMs += ms; 
-    else stats.timerEndTime = new Date(Math.max(Date.now(), new Date(stats.timerEndTime).getTime()) + ms);
+    if (stats.isPaused) {
+        stats.remainingTimeMs += ms;
+        // Clamp to 0 if we removed too much time while paused
+        if (stats.remainingTimeMs < 0) stats.remainingTimeMs = 0;
+    } 
+    else {
+        // Unpaused: modify end time. 
+        // If adding: extend from max(now, endtime). 
+        // If removing: subtract from current endtime.
+        stats.timerEndTime = new Date(Math.max(Date.now(), new Date(stats.timerEndTime).getTime()) + ms);
+    }
     await stats.save();
     res.json({ success: true });
 });
