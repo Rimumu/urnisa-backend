@@ -655,13 +655,15 @@ app.post('/api/nisathon/merge-users', auth, async (req, res) => {
     const cleanSource = sourceUser.trim();
     const cleanTarget = targetUser.trim();
 
-    if (cleanSource.toLowerCase() === cleanTarget.toLowerCase()) {
-         return res.status(400).json({ error: "Source and Target cannot be the same" });
-    }
-
     try {
-        // Use regex for case-insensitive matching of the SOURCE user to catch "anonymous", "Anonymous", "ANONYMOUS"
-        const sourceRegex = new RegExp(`^${cleanSource}$`, 'i');
+        // Use loose regex for finding ALL variations of the SOURCE name (including those with spaces)
+        // Escaping input to be safe for regex
+        const escapedSource = cleanSource.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        // This matches: "name", " name", "name ", " name " etc. case-insensitive
+        const sourceRegex = new RegExp(`^\\s*${escapedSource}\\s*$`, 'i');
+
+        // Note: We intentionally do NOT check if source === target string.
+        // This allows admins to enter "takoz212" -> "takoz212" to clean up "takoz212 " and "Takoz212" into one clean entry.
 
         const events = await NisathonEvent.updateMany({ user: sourceRegex }, { user: cleanTarget });
         const spinsQ = await SpinQueue.updateMany({ user: sourceRegex }, { user: cleanTarget });
@@ -669,7 +671,7 @@ app.post('/api/nisathon/merge-users', auth, async (req, res) => {
         
         res.json({ 
             success: true, 
-            message: `Merged ${events.modifiedCount} events, ${spinsQ.modifiedCount} queued spins, ${spinsH.modifiedCount} history entries from "${cleanSource}" into "${cleanTarget}".` 
+            message: `Merged/Normalized ${events.modifiedCount} events, ${spinsQ.modifiedCount} queued spins, ${spinsH.modifiedCount} history entries into "${cleanTarget}".` 
         });
     } catch (e) {
         res.status(500).json({ error: e.message });
