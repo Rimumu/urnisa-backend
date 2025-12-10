@@ -556,7 +556,10 @@ app.get('/api/nisathon/leaderboard', async (req, res) => {
     } catch { res.json([]); }
 });
 
-app.get('/api/nisathon/recent', async (req, res) => res.json(await NisathonEvent.find().sort({ createdAt: -1 }).limit(50)));
+app.get('/api/nisathon/recent', async (req, res) => {
+    const limit = parseInt(req.query.limit) || 50;
+    res.json(await NisathonEvent.find().sort({ createdAt: -1 }).limit(limit));
+});
 
 app.post('/api/nisathon/test-event', auth, async (req, res) => {
     const stats = await NisathonStats.findOne({ key: 'main' });
