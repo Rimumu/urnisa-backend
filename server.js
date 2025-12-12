@@ -98,6 +98,14 @@ const BingoCard = mongoose.model('BingoCard', new mongoose.Schema({
     updatedAt: { type: Date, default: Date.now }
 }));
 
+// NEW: Bingo Card DEFINITION Schema (Ensures ID -> Same Grid Always)
+const BingoDefinition = mongoose.model('BingoDefinition', new mongoose.Schema({
+    cardId: { type: String, required: true, unique: true },
+    gridData: { type: Array, required: true }, // The definitive layout
+    difficulty: String,
+    createdAt: { type: Date, default: Date.now }
+}));
+
 const roundOneDecimal = (num) => Math.round(num * 10) / 10;
 
 // ==========================================
@@ -828,6 +836,45 @@ app.post('/api/bingo/config', auth, async (req, res) => {
         res.json({ success: true, message: "Bingo config updated" });
     } catch (e) {
         res.status(500).json({ error: "Failed to update bingo config" });
+    }
+});
+
+// --- BINGO DEFINITIONS (PERSISTENT CARDS) ---
+
+// Get Bingo Definition (The locked layout for a given ID)
+app.get('/api/bingo/definition', async (req, res) => {
+    const { id } = req.query;
+    if (!id) return res.status(400).json({ error: "Missing ID" });
+    try {
+        const def = await BingoDefinition.findOne({ cardId: id });
+        if (def) return res.json(def);
+        return res.status(404).json({ error: "Not found" });
+    } catch (e) {
+        return res.status(500).json({ error: "Error" });
+    }
+});
+
+// Save Bingo Definition (Locking a generated layout)
+app.post('/api/bingo/definition', async (req, res) => {
+    const { cardId, gridData, difficulty } = req.body;
+    if (!cardId || !gridData) return res.status(400).json({ error: "Missing data" });
+    
+    try {
+        // Try to create, if exists, return existing (first write wins strategy for consistency)
+        const existing = await BingoDefinition.findOne({ cardId });
+        if (existing) {
+            return res.json({ success: true, data: existing, message: "Definition already exists" });
+        }
+        
+        const newDef = await BingoDefinition.create({ cardId, gridData, difficulty });
+        res.json({ success: true, data: newDef });
+    } catch (e) {
+        // Handle race condition unique constraint error
+        if (e.code === 11000) {
+             const existing = await BingoDefinition.findOne({ cardId });
+             return res.json({ success: true, data: existing });
+        }
+        res.status(500).json({ error: "Error saving definition" });
     }
 });
 
