@@ -897,7 +897,15 @@ app.post('/api/bingo/definition', async (req, res) => {
 app.get('/api/tournament/config', async (req, res) => {
     try {
         const config = await Setting.findOne({ key: 'tournament_config' });
-        res.json(config ? config.value : { lockEnabled: false, status: 'DRAFTING' });
+        // Default to DRAFTING if not present
+        const val = config ? config.value : {};
+        // Use status if present, otherwise infer from legacy lockEnabled
+        const status = val.status || (val.lockEnabled ? 'LOCK_IN' : 'DRAFTING');
+        
+        res.json({ 
+            status, 
+            lockEnabled: status === 'LOCK_IN' // Maintain backward compat
+        });
     } catch (e) {
         res.status(500).json({ error: "Fetch failed" });
     }
@@ -905,11 +913,16 @@ app.get('/api/tournament/config', async (req, res) => {
 
 // Admin: Set Tournament Config
 app.post('/api/admin/tournament/config', auth, async (req, res) => {
-    const { lockEnabled, status } = req.body;
+    // Expect status string: 'DRAFTING', 'LOCK_IN', 'ONGOING'
+    const { status, lockEnabled } = req.body; 
+    
     try {
+        // Determine status from legacy input if new status input missing
+        const newStatus = status || (lockEnabled ? 'LOCK_IN' : 'DRAFTING');
+        
         await Setting.findOneAndUpdate(
             { key: 'tournament_config' }, 
-            { value: { lockEnabled, status } }, 
+            { value: { status: newStatus, lockEnabled: newStatus === 'LOCK_IN' } }, 
             { upsert: true }
         );
         res.json({ success: true });
@@ -942,6 +955,12 @@ app.post('/api/tournament/register', async (req, res) => {
     if (!discordId || !minecraftUsername || !team) return res.status(400).json({ error: "Missing Data" });
 
     try {
+        // Check config for ONGOING status
+        const config = await Setting.findOne({ key: 'tournament_config' });
+        if (config && config.value && config.value.status === 'ONGOING') {
+             return res.status(403).json({ error: "Tournament is ongoing. Registration closed." });
+        }
+
         // Check if locked
         const existing = await TournamentEntry.findOne({ discordId });
         if (existing && existing.isLocked) {
@@ -968,9 +987,11 @@ app.post('/api/tournament/lock', async (req, res) => {
     const { discordId } = req.body;
     if (!discordId) return res.status(400).json({ error: "Missing ID" });
 
-    // Check if locking is enabled
+    // Check if locking is enabled (Status MUST be LOCK_IN)
     const config = await Setting.findOne({ key: 'tournament_config' });
-    if (!config || !config.value || (config.value.status !== 'LOCK_IN' && !config.value.lockEnabled)) {
+    const currentStatus = config?.value?.status || (config?.value?.lockEnabled ? 'LOCK_IN' : 'DRAFTING');
+    
+    if (currentStatus !== 'LOCK_IN') {
         return res.status(403).json({ error: "Lock-ins are currently unavailable." });
     }
 
