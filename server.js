@@ -900,7 +900,12 @@ app.get('/api/tournament/my-team', async (req, res) => {
 
     try {
         const entry = await TournamentEntry.findOne({ discordId });
-        res.json(entry || { team: new Array(6).fill(null), isLocked: false });
+        if (!entry) {
+            // Not registered
+            return res.json({ registered: false, team: new Array(6).fill(null), isLocked: false });
+        }
+        // Registered
+        res.json({ ...entry.toObject(), registered: true });
     } catch (e) {
         res.status(500).json({ error: "Fetch failed" });
     }
@@ -955,11 +960,23 @@ app.post('/api/tournament/lock', async (req, res) => {
     }
 });
 
-// Get All Locked Players (Public)
+// Get All Players (Public - Masked Drafts)
 app.get('/api/tournament/players', async (req, res) => {
     try {
-        const players = await TournamentEntry.find({ isLocked: true }).sort({ updatedAt: -1 });
-        res.json(players);
+        const players = await TournamentEntry.find().sort({ updatedAt: -1 });
+        // Sanitize: If not locked, hide team
+        const sanitized = players.map(p => {
+            if (p.isLocked) return p;
+            return {
+                _id: p._id,
+                discordId: p.discordId,
+                minecraftUsername: p.minecraftUsername,
+                team: new Array(6).fill(null), // Mask team
+                isLocked: false,
+                updatedAt: p.updatedAt
+            };
+        });
+        res.json(sanitized);
     } catch (e) {
         res.status(500).json({ error: "Fetch failed" });
     }
@@ -992,6 +1009,20 @@ app.post('/api/admin/tournament/unlock-team', auth, async (req, res) => {
         );
         if (!result) return res.status(404).json({ error: "Player not found." });
         res.json({ success: true, message: "Team unlocked and reset successfully!" });
+    } catch (e) {
+        res.status(500).json({ error: "Action failed." });
+    }
+});
+
+// Admin: Revoke Registration
+app.post('/api/admin/tournament/revoke-registration', auth, async (req, res) => {
+    const { discordId } = req.body;
+    if (!discordId) return res.status(400).json({ error: "Missing Discord ID" });
+
+    try {
+        const result = await TournamentEntry.findOneAndDelete({ discordId });
+        if (!result) return res.status(404).json({ error: "Player not found." });
+        res.json({ success: true, message: "Registration revoked successfully!" });
     } catch (e) {
         res.status(500).json({ error: "Action failed." });
     }
