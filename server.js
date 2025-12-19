@@ -1094,7 +1094,7 @@ if (MONGO_URI) {
                 console.log("🚀 Startup Deep Sync...");
                 await runSync(true);
                 setInterval(() => runSync(false), 30000);
-                setInterval(() => { axios.get('https://urnisa-backend-3b3m.onrender.com').catch(()=>{}) }, 300000);
+                setInterval(() => { axios.get('https://urnisa-backend-21ls.onrender.com').catch(()=>{}) }, 300000);
             });
         })
         .catch(e => console.error("❌ DB Fail:", e));
