@@ -897,7 +897,7 @@ app.post('/api/bingo/definition', async (req, res) => {
 app.get('/api/tournament/config', async (req, res) => {
     try {
         const config = await Setting.findOne({ key: 'tournament_config' });
-        res.json(config ? config.value : { lockEnabled: false });
+        res.json(config ? config.value : { lockEnabled: false, status: 'DRAFTING' });
     } catch (e) {
         res.status(500).json({ error: "Fetch failed" });
     }
@@ -905,11 +905,11 @@ app.get('/api/tournament/config', async (req, res) => {
 
 // Admin: Set Tournament Config
 app.post('/api/admin/tournament/config', auth, async (req, res) => {
-    const { lockEnabled } = req.body;
+    const { lockEnabled, status } = req.body;
     try {
         await Setting.findOneAndUpdate(
             { key: 'tournament_config' }, 
-            { value: { lockEnabled } }, 
+            { value: { lockEnabled, status } }, 
             { upsert: true }
         );
         res.json({ success: true });
@@ -970,7 +970,7 @@ app.post('/api/tournament/lock', async (req, res) => {
 
     // Check if locking is enabled
     const config = await Setting.findOne({ key: 'tournament_config' });
-    if (!config || !config.value || !config.value.lockEnabled) {
+    if (!config || !config.value || (config.value.status !== 'LOCK_IN' && !config.value.lockEnabled)) {
         return res.status(403).json({ error: "Lock-ins are currently unavailable." });
     }
 
@@ -979,7 +979,6 @@ app.post('/api/tournament/lock', async (req, res) => {
         if (!entry) return res.status(404).json({ error: "No team found to lock." });
         
         // Basic Validation: Ensure team is somewhat valid (not completely empty)
-        // Adjust logic if strict 6 pokemon rule applies
         const validPokemon = entry.team.filter(p => p !== null).length;
         if (validPokemon === 0) return res.status(400).json({ error: "Cannot lock an empty team." });
 
