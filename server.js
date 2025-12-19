@@ -1,4 +1,3 @@
-
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
@@ -956,13 +955,45 @@ app.post('/api/tournament/lock', async (req, res) => {
     }
 });
 
-// Get All Locked Players
+// Get All Locked Players (Public)
 app.get('/api/tournament/players', async (req, res) => {
     try {
         const players = await TournamentEntry.find({ isLocked: true }).sort({ updatedAt: -1 });
         res.json(players);
     } catch (e) {
         res.status(500).json({ error: "Fetch failed" });
+    }
+});
+
+// Admin: Get All Players (Locked and Unlocked)
+app.get('/api/admin/tournament/all-players', auth, async (req, res) => {
+    try {
+        const players = await TournamentEntry.find().sort({ updatedAt: -1 });
+        res.json(players);
+    } catch (e) {
+        res.status(500).json({ error: "Fetch failed" });
+    }
+});
+
+// Admin: Unlock and Reset Team
+app.post('/api/admin/tournament/unlock-team', auth, async (req, res) => {
+    const { discordId } = req.body;
+    if (!discordId) return res.status(400).json({ error: "Missing Discord ID" });
+
+    try {
+        const result = await TournamentEntry.findOneAndUpdate(
+            { discordId },
+            { 
+                isLocked: false, 
+                team: new Array(6).fill(null),
+                updatedAt: new Date()
+            },
+            { new: true }
+        );
+        if (!result) return res.status(404).json({ error: "Player not found." });
+        res.json({ success: true, message: "Team unlocked and reset successfully!" });
+    } catch (e) {
+        res.status(500).json({ error: "Action failed." });
     }
 });
 
