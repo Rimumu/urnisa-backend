@@ -893,6 +893,31 @@ app.post('/api/bingo/definition', async (req, res) => {
 // TOURNAMENT API ROUTES
 // ==========================================
 
+// Get Tournament Config
+app.get('/api/tournament/config', async (req, res) => {
+    try {
+        const config = await Setting.findOne({ key: 'tournament_config' });
+        res.json(config ? config.value : { lockEnabled: false });
+    } catch (e) {
+        res.status(500).json({ error: "Fetch failed" });
+    }
+});
+
+// Admin: Set Tournament Config
+app.post('/api/admin/tournament/config', auth, async (req, res) => {
+    const { lockEnabled } = req.body;
+    try {
+        await Setting.findOneAndUpdate(
+            { key: 'tournament_config' }, 
+            { value: { lockEnabled } }, 
+            { upsert: true }
+        );
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: "Update failed" });
+    }
+});
+
 // Get My Team
 app.get('/api/tournament/my-team', async (req, res) => {
     const { discordId } = req.query;
@@ -942,6 +967,12 @@ app.post('/api/tournament/register', async (req, res) => {
 app.post('/api/tournament/lock', async (req, res) => {
     const { discordId } = req.body;
     if (!discordId) return res.status(400).json({ error: "Missing ID" });
+
+    // Check if locking is enabled
+    const config = await Setting.findOne({ key: 'tournament_config' });
+    if (!config || !config.value || !config.value.lockEnabled) {
+        return res.status(403).json({ error: "Lock-ins are currently unavailable." });
+    }
 
     try {
         const entry = await TournamentEntry.findOne({ discordId });
