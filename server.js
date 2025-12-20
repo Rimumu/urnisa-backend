@@ -1,3 +1,4 @@
+
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
@@ -132,7 +133,7 @@ const TournamentMatchSchema = new mongoose.Schema({
 });
 
 const TournamentBracket = mongoose.model('TournamentBracket', new mongoose.Schema({
-    key: { type: String, default: 'main', unique: true },
+    key: { type: String, default: 'main', unique: true }, // 'production' or 'dev'
     type: { type: String, default: 'SINGLE_ELIMINATION' },
     matches: [TournamentMatchSchema],
     updatedAt: { type: Date, default: Date.now }
@@ -1107,7 +1108,7 @@ app.post('/api/admin/tournament/revoke-registration', auth, async (req, res) => 
 });
 
 // ==========================================
-// TOURNAMENT BRACKET DEV ENDPOINTS
+// TOURNAMENT BRACKET DEV ENDPOINTS (KEY='main')
 // ==========================================
 
 // Get Current Bracket
@@ -1142,7 +1143,7 @@ app.post('/api/dev/tournament/generate', auth, async (req, res) => {
         }
         
         // 2. Clear existing bracket
-        await TournamentBracket.deleteMany({});
+        await TournamentBracket.deleteMany({ key: 'main' });
         
         // 3. Generate Single Elimination Structure
         const matches = [];
@@ -1313,7 +1314,7 @@ app.post('/api/dev/tournament/match/update', auth, async (req, res) => {
 // Clear Bracket
 app.post('/api/dev/tournament/clear', auth, async (req, res) => {
     try {
-        await TournamentBracket.deleteMany({});
+        await TournamentBracket.deleteMany({ key: 'main' });
         res.json({ success: true });
     } catch(e) {
         res.status(500).json({ error: "Failed" });
@@ -1338,6 +1339,184 @@ app.post('/api/dev/tournament/inject-players', auth, async (req, res) => {
         }
         await TournamentEntry.insertMany(dummies);
         res.json({ success: true, count: dummies.length });
+    } catch(e) {
+        res.status(500).json({ error: "Failed" });
+    }
+});
+
+// ==========================================
+// TOURNAMENT BRACKET PRODUCTION ENDPOINTS (KEY='production')
+// ==========================================
+
+// Get Current Bracket (Production)
+app.get('/api/tournament/bracket', async (req, res) => {
+    try {
+        let bracket = await TournamentBracket.findOne({ key: 'production' });
+        if (!bracket) {
+            // Return empty structure if not found
+            return res.json({ type: 'SINGLE_ELIMINATION', matches: [] });
+        }
+        res.json(bracket);
+    } catch (e) {
+        res.status(500).json({ error: "Fetch failed" });
+    }
+});
+
+// Generate Bracket (Production)
+app.post('/api/admin/tournament/generate', auth, async (req, res) => {
+    const { type, participants: manualParticipants } = req.body; 
+    
+    try {
+        let participants = [];
+        
+        if (manualParticipants && Array.isArray(manualParticipants)) {
+            participants = manualParticipants;
+        } else {
+            // Fetch locked players from DB
+            let players = await TournamentEntry.find({ isLocked: true });
+            players = players.sort(() => Math.random() - 0.5);
+            participants = players.map(p => p.minecraftUsername);
+        }
+        
+        // 2. Clear existing production bracket
+        await TournamentBracket.deleteMany({ key: 'production' });
+        
+        // 3. Generate Structure (Same Logic)
+        const matches = [];
+        const totalPlayers = participants.length;
+        
+        let size = 2;
+        while (size < totalPlayers) size *= 2;
+        
+        const numRounds = Math.log2(size);
+        let roundMatches = [];
+        
+        for(let i=0; i < size/2; i++) {
+            const p1 = participants[i*2] || null;
+            const p2 = participants[i*2+1] || null;
+            
+            let winner = null;
+            let status = 'PENDING';
+            if (p1 && !p2) { winner = p1; status = 'COMPLETED'; } 
+            else if (!p1 && !p2) { status = 'COMPLETED'; } 
+            else if (p1 && p2) { status = 'READY'; }
+
+            roundMatches.push({
+                id: `R1-M${i+1}`,
+                round: 1,
+                matchIndex: i,
+                player1: p1,
+                player2: p2,
+                winner: winner,
+                status: status,
+                score: "",
+                nextMatchId: null
+            });
+        }
+        matches.push(...roundMatches);
+        
+        let prevRoundMatches = roundMatches;
+        
+        for (let r=2; r <= numRounds; r++) {
+            let currentRoundMatches = [];
+            const numMatchesInRound = size / Math.pow(2, r);
+            
+            for(let i=0; i < numMatchesInRound; i++) {
+                const matchId = `R${r}-M${i+1}`;
+                const prev1 = prevRoundMatches[i*2];
+                const prev2 = prevRoundMatches[i*2+1];
+                
+                prev1.nextMatchId = matchId;
+                prev2.nextMatchId = matchId;
+                
+                let p1 = prev1.winner;
+                let p2 = prev2.winner;
+                let status = 'PENDING';
+                
+                if (p1 && p2) status = 'READY';
+                else if ((p1 && !prev2.player1 && !prev2.player2) || (p2 && !prev1.player1 && !prev1.player2)) {}
+
+                currentRoundMatches.push({
+                    id: matchId,
+                    round: r,
+                    matchIndex: i,
+                    player1: p1,
+                    player2: p2,
+                    winner: null,
+                    status: status,
+                    score: "",
+                    nextMatchId: null
+                });
+            }
+            matches.push(...currentRoundMatches);
+            prevRoundMatches = currentRoundMatches;
+        }
+        
+        await TournamentBracket.create({
+            key: 'production',
+            type: type || 'SINGLE_ELIMINATION',
+            matches: matches
+        });
+        
+        res.json({ success: true, message: `Production bracket generated with ${totalPlayers} players.` });
+        
+    } catch (e) {
+        console.error(e);
+        res.status(500).json({ error: "Generation failed" });
+    }
+});
+
+// Update Match Result (Production)
+app.post('/api/admin/tournament/match/update', auth, async (req, res) => {
+    const { matchId, winner, score, player1, player2 } = req.body;
+    
+    try {
+        const bracket = await TournamentBracket.findOne({ key: 'production' });
+        if (!bracket) return res.status(404).json({ error: "No bracket found" });
+        
+        const matchIndex = bracket.matches.findIndex(m => m.id === matchId);
+        if (matchIndex === -1) return res.status(404).json({ error: "Match not found" });
+        
+        const match = bracket.matches[matchIndex];
+        
+        if (player1 !== undefined) match.player1 = player1;
+        if (player2 !== undefined) match.player2 = player2;
+        if (winner !== undefined) match.winner = winner;
+        if (score !== undefined) match.score = score;
+        
+        if (match.player1 && match.player2 && match.status === 'PENDING') {
+             match.status = 'READY';
+        }
+        if (match.winner) match.status = 'COMPLETED';
+        
+        if (match.nextMatchId) {
+            const nextMatch = bracket.matches.find(m => m.id === match.nextMatchId);
+            if (nextMatch) {
+                const isPlayerOneSlot = (match.matchIndex % 2) === 0;
+                if (match.winner) {
+                    if (isPlayerOneSlot) nextMatch.player1 = match.winner;
+                    else nextMatch.player2 = match.winner;
+                    
+                    if (nextMatch.player1 && nextMatch.player2) nextMatch.status = 'READY';
+                }
+            }
+        }
+        
+        bracket.markModified('matches'); 
+        await bracket.save();
+        
+        res.json({ success: true });
+    } catch (e) {
+        console.error(e);
+        res.status(500).json({ error: "Update failed" });
+    }
+});
+
+// Clear Bracket (Production)
+app.post('/api/admin/tournament/clear', auth, async (req, res) => {
+    try {
+        await TournamentBracket.deleteMany({ key: 'production' });
+        res.json({ success: true });
     } catch(e) {
         res.status(500).json({ error: "Failed" });
     }
