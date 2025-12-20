@@ -1126,15 +1126,20 @@ app.get('/api/dev/tournament/bracket', async (req, res) => {
 
 // Generate Bracket from Locked Players (Simple Single Elim)
 app.post('/api/dev/tournament/generate', auth, async (req, res) => {
-    const { type } = req.body; // 'SINGLE' or 'DOUBLE'
+    const { type, participants: manualParticipants } = req.body; 
     
     try {
-        // 1. Fetch Players
-        let players = await TournamentEntry.find({ isLocked: true });
-        // Shuffle for randomness
-        players = players.sort(() => Math.random() - 0.5);
+        let participants = [];
         
-        const participants = players.map(p => p.minecraftUsername);
+        if (manualParticipants && Array.isArray(manualParticipants)) {
+            // Use manually provided list if available
+            participants = manualParticipants;
+        } else {
+            // Legacy/Fallback behavior: Fetch locked players from DB and shuffle
+            let players = await TournamentEntry.find({ isLocked: true });
+            players = players.sort(() => Math.random() - 0.5);
+            participants = players.map(p => p.minecraftUsername);
+        }
         
         // 2. Clear existing bracket
         await TournamentBracket.deleteMany({});
@@ -1152,11 +1157,7 @@ app.post('/api/dev/tournament/generate', auth, async (req, res) => {
         
         // Create Round 1 Matches
         // Round 1 will have 'size/2' matches
-        // But we only have 'totalPlayers'. Some might be BYEs.
-        // Simplified Logic: 
-        // Create slot structure first.
         
-        let matchCounter = 1;
         let roundMatches = [];
         
         // Generate leaf matches (Round 1)
@@ -1253,7 +1254,7 @@ app.post('/api/dev/tournament/generate', auth, async (req, res) => {
 
 // Update Match Result
 app.post('/api/dev/tournament/match/update', auth, async (req, res) => {
-    const { matchId, winner, score } = req.body;
+    const { matchId, winner, score, player1, player2 } = req.body;
     
     try {
         const bracket = await TournamentBracket.findOne({ key: 'main' });
@@ -1263,9 +1264,20 @@ app.post('/api/dev/tournament/match/update', auth, async (req, res) => {
         if (matchIndex === -1) return res.status(404).json({ error: "Match not found" });
         
         const match = bracket.matches[matchIndex];
-        match.winner = winner;
-        match.score = score;
-        match.status = 'COMPLETED';
+        
+        // Update fields if provided
+        if (player1 !== undefined) match.player1 = player1;
+        if (player2 !== undefined) match.player2 = player2;
+        if (winner !== undefined) match.winner = winner;
+        if (score !== undefined) match.score = score;
+        
+        // Auto status update if players set
+        if (match.player1 && match.player2 && match.status === 'PENDING') {
+             match.status = 'READY';
+        }
+        
+        // If winner set, mark completed
+        if (match.winner) match.status = 'COMPLETED';
         
         // Propagate to next match
         if (match.nextMatchId) {
@@ -1277,10 +1289,13 @@ app.post('/api/dev/tournament/match/update', auth, async (req, res) => {
                 // R1-M2 -> R2-M1 (p2)
                 const isPlayerOneSlot = (match.matchIndex % 2) === 0;
                 
-                if (isPlayerOneSlot) nextMatch.player1 = winner;
-                else nextMatch.player2 = winner;
-                
-                if (nextMatch.player1 && nextMatch.player2) nextMatch.status = 'READY';
+                // Only propagate winner if set
+                if (match.winner) {
+                    if (isPlayerOneSlot) nextMatch.player1 = match.winner;
+                    else nextMatch.player2 = match.winner;
+                    
+                    if (nextMatch.player1 && nextMatch.player2) nextMatch.status = 'READY';
+                }
             }
         }
         
