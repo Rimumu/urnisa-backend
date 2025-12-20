@@ -114,6 +114,7 @@ const TournamentEntry = mongoose.model('TournamentEntry', new mongoose.Schema({
         name: String
     }],
     isLocked: { type: Boolean, default: false },
+    isDev: { type: Boolean, default: false }, // Flag for dummy players
     updatedAt: { type: Date, default: Date.now }
 }));
 
@@ -1032,9 +1033,14 @@ app.post('/api/tournament/lock', async (req, res) => {
 });
 
 // Get All Players (Public - Masked Drafts)
+// Updated to filter out Dev players by default unless specified
 app.get('/api/tournament/players', async (req, res) => {
+    const { dev } = req.query;
+    // If ?dev=true is NOT present, we filter out isDev: true players
+    const filter = dev === 'true' ? {} : { isDev: { $ne: true } };
+    
     try {
-        const players = await TournamentEntry.find().sort({ updatedAt: -1 });
+        const players = await TournamentEntry.find(filter).sort({ updatedAt: -1 });
         // Sanitize: If not locked, hide team
         const sanitized = players.map(p => {
             if (p.isLocked) return p;
@@ -1044,6 +1050,7 @@ app.get('/api/tournament/players', async (req, res) => {
                 minecraftUsername: p.minecraftUsername,
                 team: new Array(6).fill(null), // Mask team
                 isLocked: false,
+                isDev: p.isDev, // Include for dev tools if needed
                 updatedAt: p.updatedAt
             };
         });
@@ -1310,6 +1317,7 @@ app.post('/api/dev/tournament/inject-players', auth, async (req, res) => {
                 minecraftUsername: `Player_${Math.floor(Math.random()*1000)}`,
                 team: new Array(6).fill(null), // Empty team is fine for bracket testing logic
                 isLocked: true, // Auto-lock to be eligible
+                isDev: true, // Marked as Dev Player
                 updatedAt: new Date()
             });
         }
