@@ -117,6 +117,26 @@ const TournamentEntry = mongoose.model('TournamentEntry', new mongoose.Schema({
     updatedAt: { type: Date, default: Date.now }
 }));
 
+// NEW: Tournament Bracket Schema
+const TournamentMatchSchema = new mongoose.Schema({
+    id: String,
+    round: Number, // 1 = First Round, etc.
+    matchIndex: Number, // Position in round (0 = top, 1 = next down)
+    player1: { type: String, default: null }, // Minecraft Username
+    player2: { type: String, default: null }, // Minecraft Username
+    winner: { type: String, default: null }, // Minecraft Username
+    score: { type: String, default: "" },
+    nextMatchId: String, // ID of the match the winner advances to
+    status: { type: String, default: "PENDING" } // PENDING, READY, COMPLETED
+});
+
+const TournamentBracket = mongoose.model('TournamentBracket', new mongoose.Schema({
+    key: { type: String, default: 'main', unique: true },
+    type: { type: String, default: 'SINGLE_ELIMINATION' },
+    matches: [TournamentMatchSchema],
+    updatedAt: { type: Date, default: Date.now }
+}));
+
 const roundOneDecimal = (num) => Math.round(num * 10) / 10;
 
 // ==========================================
@@ -1076,6 +1096,227 @@ app.post('/api/admin/tournament/revoke-registration', auth, async (req, res) => 
         res.json({ success: true, message: "Registration revoked successfully!" });
     } catch (e) {
         res.status(500).json({ error: "Action failed." });
+    }
+});
+
+// ==========================================
+// TOURNAMENT BRACKET DEV ENDPOINTS
+// ==========================================
+
+// Get Current Bracket
+app.get('/api/dev/tournament/bracket', async (req, res) => {
+    try {
+        let bracket = await TournamentBracket.findOne({ key: 'main' });
+        if (!bracket) {
+            // Return empty structure if not found
+            return res.json({ type: 'SINGLE_ELIMINATION', matches: [] });
+        }
+        res.json(bracket);
+    } catch (e) {
+        res.status(500).json({ error: "Fetch failed" });
+    }
+});
+
+// Generate Bracket from Locked Players (Simple Single Elim)
+app.post('/api/dev/tournament/generate', auth, async (req, res) => {
+    const { type } = req.body; // 'SINGLE' or 'DOUBLE'
+    
+    try {
+        // 1. Fetch Players
+        let players = await TournamentEntry.find({ isLocked: true });
+        // Shuffle for randomness
+        players = players.sort(() => Math.random() - 0.5);
+        
+        const participants = players.map(p => p.minecraftUsername);
+        
+        // 2. Clear existing bracket
+        await TournamentBracket.deleteMany({});
+        
+        // 3. Generate Single Elimination Structure
+        const matches = [];
+        const totalPlayers = participants.length;
+        
+        // Determine bracket size (next power of 2)
+        let size = 2;
+        while (size < totalPlayers) size *= 2;
+        
+        // Number of rounds = log2(size)
+        const numRounds = Math.log2(size);
+        
+        // Create Round 1 Matches
+        // Round 1 will have 'size/2' matches
+        // But we only have 'totalPlayers'. Some might be BYEs.
+        // Simplified Logic: 
+        // Create slot structure first.
+        
+        let matchCounter = 1;
+        let roundMatches = [];
+        
+        // Generate leaf matches (Round 1)
+        for(let i=0; i < size/2; i++) {
+            const p1 = participants[i*2] || null; // Player 1
+            const p2 = participants[i*2+1] || null; // Player 2 (might be null if odd/bye)
+            
+            // Auto-advance if p2 is null (Bye)
+            let winner = null;
+            let status = 'PENDING';
+            if (p1 && !p2) {
+                winner = p1;
+                status = 'COMPLETED';
+            } else if (!p1 && !p2) {
+                // Empty slot (shouldn't happen with correct sizing logic but safety)
+                status = 'COMPLETED'; 
+            } else if (p1 && p2) {
+                status = 'READY';
+            }
+
+            roundMatches.push({
+                id: `R1-M${i+1}`,
+                round: 1,
+                matchIndex: i,
+                player1: p1,
+                player2: p2,
+                winner: winner,
+                status: status,
+                score: "",
+                nextMatchId: null // To be linked
+            });
+        }
+        matches.push(...roundMatches);
+        
+        let prevRoundMatches = roundMatches;
+        
+        // Generate subsequent rounds
+        for (let r=2; r <= numRounds; r++) {
+            let currentRoundMatches = [];
+            const numMatchesInRound = size / Math.pow(2, r);
+            
+            for(let i=0; i < numMatchesInRound; i++) {
+                const matchId = `R${r}-M${i+1}`;
+                
+                // Link previous round matches to this one
+                // Match i in this round comes from Match 2*i and 2*i+1 in prev round
+                const prev1 = prevRoundMatches[i*2];
+                const prev2 = prevRoundMatches[i*2+1];
+                
+                prev1.nextMatchId = matchId;
+                prev2.nextMatchId = matchId;
+                
+                // Pre-fill if prev rounds were auto-byes
+                let p1 = prev1.winner;
+                let p2 = prev2.winner;
+                let status = 'PENDING';
+                
+                // Propagate Byes immediately
+                if (p1 && p2) status = 'READY';
+                else if ((p1 && !prev2.player1 && !prev2.player2) || (p2 && !prev1.player1 && !prev1.player2)) {
+                     // Advanced logic needed for bubbling up empty branches, simplified here:
+                     // If a match is waiting on a winner, it stays pending.
+                }
+
+                currentRoundMatches.push({
+                    id: matchId,
+                    round: r,
+                    matchIndex: i,
+                    player1: p1,
+                    player2: p2,
+                    winner: null,
+                    status: status,
+                    score: "",
+                    nextMatchId: null
+                });
+            }
+            matches.push(...currentRoundMatches);
+            prevRoundMatches = currentRoundMatches;
+        }
+        
+        await TournamentBracket.create({
+            key: 'main',
+            type: type || 'SINGLE_ELIMINATION',
+            matches: matches
+        });
+        
+        res.json({ success: true, message: `Bracket generated with ${totalPlayers} players.` });
+        
+    } catch (e) {
+        console.error(e);
+        res.status(500).json({ error: "Generation failed" });
+    }
+});
+
+// Update Match Result
+app.post('/api/dev/tournament/match/update', auth, async (req, res) => {
+    const { matchId, winner, score } = req.body;
+    
+    try {
+        const bracket = await TournamentBracket.findOne({ key: 'main' });
+        if (!bracket) return res.status(404).json({ error: "No bracket found" });
+        
+        const matchIndex = bracket.matches.findIndex(m => m.id === matchId);
+        if (matchIndex === -1) return res.status(404).json({ error: "Match not found" });
+        
+        const match = bracket.matches[matchIndex];
+        match.winner = winner;
+        match.score = score;
+        match.status = 'COMPLETED';
+        
+        // Propagate to next match
+        if (match.nextMatchId) {
+            const nextMatch = bracket.matches.find(m => m.id === match.nextMatchId);
+            if (nextMatch) {
+                // Determine if player 1 or 2 slot based on current match index parity
+                // This logic depends on the generation order: even index -> player1, odd -> player2
+                // R1-M1 -> R2-M1 (p1)
+                // R1-M2 -> R2-M1 (p2)
+                const isPlayerOneSlot = (match.matchIndex % 2) === 0;
+                
+                if (isPlayerOneSlot) nextMatch.player1 = winner;
+                else nextMatch.player2 = winner;
+                
+                if (nextMatch.player1 && nextMatch.player2) nextMatch.status = 'READY';
+            }
+        }
+        
+        // Save the *parent* document, not the subdocument directly
+        bracket.markModified('matches'); 
+        await bracket.save();
+        
+        res.json({ success: true });
+    } catch (e) {
+        console.error(e);
+        res.status(500).json({ error: "Update failed" });
+    }
+});
+
+// Clear Bracket
+app.post('/api/dev/tournament/clear', auth, async (req, res) => {
+    try {
+        await TournamentBracket.deleteMany({});
+        res.json({ success: true });
+    } catch(e) {
+        res.status(500).json({ error: "Failed" });
+    }
+});
+
+// Inject Fake Player
+app.post('/api/dev/tournament/inject-players', auth, async (req, res) => {
+    const { count } = req.body;
+    try {
+        const dummies = [];
+        for(let i=0; i<count; i++) {
+            const id = `dummy-${Date.now()}-${i}`;
+            dummies.push({
+                discordId: id,
+                minecraftUsername: `Player_${Math.floor(Math.random()*1000)}`,
+                team: new Array(6).fill(null), // Empty team is fine for bracket testing logic
+                isLocked: true, // Auto-lock to be eligible
+                updatedAt: new Date()
+            });
+        }
+        await TournamentEntry.insertMany(dummies);
+        res.json({ success: true, count: dummies.length });
+    } catch(e) {
+        res.status(500).json({ error: "Failed" });
     }
 });
 
