@@ -122,6 +122,7 @@ const TournamentEntry = mongoose.model('TournamentEntry', new mongoose.Schema({
 // NEW: Tournament Bracket Schema
 const TournamentMatchSchema = new mongoose.Schema({
     id: String,
+    bracketGroup: { type: String, default: 'winners' }, // 'winners', 'losers', 'finals'
     round: Number, // 1 = First Round, etc.
     matchIndex: Number, // Position in round (0 = top, 1 = next down)
     player1: { type: String, default: null }, // Minecraft Username
@@ -129,6 +130,7 @@ const TournamentMatchSchema = new mongoose.Schema({
     winner: { type: String, default: null }, // Minecraft Username
     score: { type: String, default: "" },
     nextMatchId: String, // ID of the match the winner advances to
+    loserNextMatchId: { type: String, default: null }, // ID where the loser goes (Double Elim)
     status: { type: String, default: "PENDING" } // PENDING, READY, COMPLETED
 });
 
@@ -1108,6 +1110,299 @@ app.post('/api/admin/tournament/revoke-registration', auth, async (req, res) => 
 });
 
 // ==========================================
+// TOURNAMENT GENERATOR HELPERS
+// ==========================================
+
+const generateMatches = async (key, type, participants) => {
+    // Clear existing
+    await TournamentBracket.deleteMany({ key });
+
+    const totalPlayers = participants.length;
+    let size = 2;
+    while (size < totalPlayers) size *= 2;
+    
+    // Create Bracket Structure
+    const matches = [];
+
+    // --- SINGLE ELIMINATION GENERATION ---
+    if (type === 'SINGLE_ELIMINATION') {
+        const numRounds = Math.log2(size);
+        let roundMatches = [];
+        
+        // R1 (Leaf Nodes)
+        for(let i=0; i < size/2; i++) {
+            const p1 = participants[i*2] || null;
+            const p2 = participants[i*2+1] || null;
+            
+            let winner = null;
+            let status = 'PENDING';
+            if (p1 && !p2) { winner = p1; status = 'COMPLETED'; } 
+            else if (!p1 && !p2) { status = 'COMPLETED'; } // Bye vs Bye
+            else if (p1 && p2) { status = 'READY'; }
+
+            roundMatches.push({
+                id: `R1-M${i+1}`,
+                bracketGroup: 'winners',
+                round: 1,
+                matchIndex: i,
+                player1: p1,
+                player2: p2,
+                winner: winner,
+                status: status,
+                score: "",
+                nextMatchId: null
+            });
+        }
+        matches.push(...roundMatches);
+        
+        let prevRoundMatches = roundMatches;
+        
+        // Subsequent Rounds
+        for (let r=2; r <= numRounds; r++) {
+            let currentRoundMatches = [];
+            const numMatchesInRound = size / Math.pow(2, r);
+            
+            for(let i=0; i < numMatchesInRound; i++) {
+                const matchId = `R${r}-M${i+1}`;
+                const prev1 = prevRoundMatches[i*2];
+                const prev2 = prevRoundMatches[i*2+1];
+                
+                prev1.nextMatchId = matchId;
+                prev2.nextMatchId = matchId;
+                
+                let p1 = prev1.winner;
+                let p2 = prev2.winner;
+                let status = 'PENDING';
+                
+                if (p1 && p2) status = 'READY';
+
+                currentRoundMatches.push({
+                    id: matchId,
+                    bracketGroup: 'winners',
+                    round: r,
+                    matchIndex: i,
+                    player1: p1,
+                    player2: p2,
+                    winner: null,
+                    status: status,
+                    score: "",
+                    nextMatchId: null
+                });
+            }
+            matches.push(...currentRoundMatches);
+            prevRoundMatches = currentRoundMatches;
+        }
+    } 
+    // --- DOUBLE ELIMINATION GENERATION ---
+    else if (type === 'DOUBLE_ELIMINATION') {
+        // Limitation: Supports up to 16 players for logic simplicity in this implementation
+        // For larger brackets, a more generic algorithm is needed.
+        if (size > 16) throw new Error("Double Elimination currently supports max 16 players.");
+
+        // 1. Generate Winners Bracket (Same as Single Elim basically)
+        const wbMatches = [];
+        const numWbRounds = Math.log2(size);
+        let prevWbRound = [];
+
+        // WB Round 1
+        for(let i=0; i < size/2; i++) {
+            const p1 = participants[i*2] || null;
+            const p2 = participants[i*2+1] || null;
+            
+            let winner = null;
+            let status = 'PENDING';
+            if (p1 && !p2) { winner = p1; status = 'COMPLETED'; } 
+            else if (!p1 && !p2) { status = 'COMPLETED'; } 
+            else if (p1 && p2) { status = 'READY'; }
+
+            const m = {
+                id: `WB-R1-M${i+1}`,
+                bracketGroup: 'winners',
+                round: 1,
+                matchIndex: i,
+                player1: p1,
+                player2: p2,
+                winner: winner,
+                status: status,
+                score: "",
+                nextMatchId: null,
+                loserNextMatchId: null // To be filled
+            };
+            wbMatches.push(m);
+            prevWbRound.push(m);
+        }
+        matches.push(...prevWbRound);
+
+        // WB Rounds 2+
+        for(let r=2; r <= numWbRounds; r++) {
+            let currentWbRound = [];
+            const count = size / Math.pow(2, r);
+            for(let i=0; i < count; i++) {
+                const matchId = `WB-R${r}-M${i+1}`;
+                const prev1 = prevWbRound[i*2];
+                const prev2 = prevWbRound[i*2+1];
+                
+                prev1.nextMatchId = matchId;
+                prev2.nextMatchId = matchId;
+                
+                let p1 = prev1.winner;
+                let p2 = prev2.winner;
+                let status = 'PENDING';
+                if(p1 && p2) status = 'READY';
+
+                const m = {
+                    id: matchId,
+                    bracketGroup: 'winners',
+                    round: r,
+                    matchIndex: i,
+                    player1: p1,
+                    player2: p2,
+                    winner: null,
+                    status: status,
+                    score: "",
+                    nextMatchId: null,
+                    loserNextMatchId: null
+                };
+                currentWbRound.push(m);
+            }
+            matches.push(...currentWbRound);
+            prevWbRound = currentWbRound;
+        }
+
+        // 2. Generate Losers Bracket Logic (Mapped manually for 4, 8, 16 sizes for stability)
+        const lbMatches = [];
+        
+        // Helper to find match by ID
+        const findMatch = (id) => matches.find(m => m.id === id);
+
+        // --- 4 Players ---
+        if (size === 4) {
+            // LB R1 (1 match) - Takes losers from WB R1
+            const lbR1M1 = { id: `LB-R1-M1`, bracketGroup: 'losers', round: 1, matchIndex: 0, player1: null, player2: null, nextMatchId: 'LB-R2-M1' };
+            findMatch('WB-R1-M1').loserNextMatchId = 'LB-R1-M1'; // WB R1 M1 Loser -> LB R1 M1 P1
+            findMatch('WB-R1-M2').loserNextMatchId = 'LB-R1-M1'; // WB R1 M2 Loser -> LB R1 M1 P2
+            
+            // LB R2 (Loser Finals) - Winner of LB R1 vs Loser of WB R2
+            const lbR2M1 = { id: `LB-R2-M1`, bracketGroup: 'losers', round: 2, matchIndex: 0, player1: null, player2: null, nextMatchId: 'GF-M1' };
+            findMatch('WB-R2-M1').loserNextMatchId = 'LB-R2-M1'; // WB Finals Loser -> LB Finals P2
+
+            lbMatches.push(lbR1M1, lbR2M1);
+        }
+        // --- 8 Players ---
+        else if (size === 8) {
+            // LB R1 (2 matches) - Takes losers from WB R1
+            const lbR1 = [
+                { id: 'LB-R1-M1', bracketGroup: 'losers', round: 1, matchIndex: 0, nextMatchId: 'LB-R2-M1' },
+                { id: 'LB-R1-M2', bracketGroup: 'losers', round: 1, matchIndex: 1, nextMatchId: 'LB-R2-M1' }
+            ];
+            findMatch('WB-R1-M1').loserNextMatchId = 'LB-R1-M1';
+            findMatch('WB-R1-M2').loserNextMatchId = 'LB-R1-M1';
+            findMatch('WB-R1-M3').loserNextMatchId = 'LB-R1-M2';
+            findMatch('WB-R1-M4').loserNextMatchId = 'LB-R1-M2';
+
+            // LB R2 (1 match) - Winners of LB R1 fight
+            const lbR2 = [
+                { id: 'LB-R2-M1', bracketGroup: 'losers', round: 2, matchIndex: 0, nextMatchId: 'LB-R3-M1' }
+            ];
+
+            // LB R3 (1 match) - Winner of LB R2 vs Loser of WB R2 (Semis)
+            // Note: Standard double elim usually has more matches. Simplified here: 
+            // WB R2 has 2 matches. Losers drop to LB R2 (or R3).
+            // Let's use standard:
+            // LB R1 (2 matches, 4 players): WB R1 Losers.
+            // LB R2 (2 matches, 4 players): LB R1 Winners vs WB R2 Losers.
+            // LB R3 (1 match, 2 players): LB R2 Winners.
+            // LB R4 (1 match, 2 players): LB R3 Winner vs WB R3 Loser (WB Finals loser).
+
+            // Redoing LB structure for 8 players standard:
+            lbMatches.length = 0; // Clear
+            
+            // Round 1 (WB R1 Losers)
+            lbMatches.push({ id: 'LB-R1-M1', bracketGroup: 'losers', round: 1, matchIndex: 0, nextMatchId: 'LB-R2-M1', player1:null, player2:null });
+            lbMatches.push({ id: 'LB-R1-M2', bracketGroup: 'losers', round: 1, matchIndex: 1, nextMatchId: 'LB-R2-M2', player1:null, player2:null });
+            
+            findMatch('WB-R1-M1').loserNextMatchId = 'LB-R1-M1';
+            findMatch('WB-R1-M2').loserNextMatchId = 'LB-R1-M1';
+            findMatch('WB-R1-M3').loserNextMatchId = 'LB-R1-M2';
+            findMatch('WB-R1-M4').loserNextMatchId = 'LB-R1-M2';
+
+            // Round 2 (LB R1 Winners vs WB R2 Losers)
+            lbMatches.push({ id: 'LB-R2-M1', bracketGroup: 'losers', round: 2, matchIndex: 0, nextMatchId: 'LB-R3-M1', player1:null, player2:null });
+            lbMatches.push({ id: 'LB-R2-M2', bracketGroup: 'losers', round: 2, matchIndex: 1, nextMatchId: 'LB-R3-M1', player1:null, player2:null });
+            
+            findMatch('WB-R2-M1').loserNextMatchId = 'LB-R2-M2'; // Cross seeding or direct
+            findMatch('WB-R2-M2').loserNextMatchId = 'LB-R2-M1';
+
+            // Round 3 (LB R2 Winners fight)
+            lbMatches.push({ id: 'LB-R3-M1', bracketGroup: 'losers', round: 3, matchIndex: 0, nextMatchId: 'LB-R4-M1', player1:null, player2:null });
+
+            // Round 4 (LB R3 Winner vs WB Finals Loser)
+            lbMatches.push({ id: 'LB-R4-M1', bracketGroup: 'losers', round: 4, matchIndex: 0, nextMatchId: 'GF-M1', player1:null, player2:null });
+            findMatch('WB-R3-M1').loserNextMatchId = 'LB-R4-M1';
+        }
+        // --- 16 Players ---
+        else if (size === 16) {
+            // LB R1 (4 matches) - WB R1 Losers
+            for(let i=0; i<4; i++) {
+                lbMatches.push({ id: `LB-R1-M${i+1}`, bracketGroup: 'losers', round: 1, matchIndex: i, nextMatchId: `LB-R2-M${Math.ceil((i+1)/2)}` });
+                // Link WB R1 matches (0,1 -> 0 | 2,3 -> 1...)
+                findMatch(`WB-R1-M${i*2+1}`).loserNextMatchId = `LB-R1-M${i+1}`;
+                findMatch(`WB-R1-M${i*2+2}`).loserNextMatchId = `LB-R1-M${i+1}`;
+            }
+
+            // LB R2 (4 matches) - LB R1 Winners vs WB R2 Losers
+            for(let i=0; i<4; i++) {
+                lbMatches.push({ id: `LB-R2-M${i+1}`, bracketGroup: 'losers', round: 2, matchIndex: i, nextMatchId: `LB-R3-M${Math.ceil((i+1)/2)}` });
+                // Link WB R2 Losers (inverse order usually for seeding, doing direct for simplicity)
+                findMatch(`WB-R2-M${4-i}`).loserNextMatchId = `LB-R2-M${i+1}`; 
+            }
+
+            // LB R3 (2 matches) - LB R2 Winners
+            for(let i=0; i<2; i++) {
+                lbMatches.push({ id: `LB-R3-M${i+1}`, bracketGroup: 'losers', round: 3, matchIndex: i, nextMatchId: `LB-R4-M${i+1}` }); // Direct mapping to R4
+            }
+
+            // LB R4 (2 matches) - LB R3 Winners vs WB R3 Losers (Semis Losers)
+            for(let i=0; i<2; i++) {
+                lbMatches.push({ id: `LB-R4-M${i+1}`, bracketGroup: 'losers', round: 4, matchIndex: i, nextMatchId: `LB-R5-M1` });
+                findMatch(`WB-R3-M${2-i}`).loserNextMatchId = `LB-R4-M${i+1}`;
+            }
+
+            // LB R5 (1 match) - LB R4 Winners
+            lbMatches.push({ id: 'LB-R5-M1', bracketGroup: 'losers', round: 5, matchIndex: 0, nextMatchId: 'LB-R6-M1' });
+
+            // LB R6 (1 match) - LB R5 Winner vs WB Finals Loser
+            lbMatches.push({ id: 'LB-R6-M1', bracketGroup: 'losers', round: 6, matchIndex: 0, nextMatchId: 'GF-M1' });
+            findMatch('WB-R4-M1').loserNextMatchId = 'LB-R6-M1';
+        }
+
+        matches.push(...lbMatches);
+
+        // 3. Grand Finals
+        // WB Winner vs LB Winner
+        const gfMatch = {
+            id: 'GF-M1',
+            bracketGroup: 'finals',
+            round: 1,
+            matchIndex: 0,
+            player1: null, // From WB Finals Winner
+            player2: null, // From LB Finals Winner
+            nextMatchId: null
+        };
+        findMatch(`WB-R${numWbRounds}-M1`).nextMatchId = 'GF-M1';
+        // LB connection is handled in LB logic above (last LB match nextMatchId = GF-M1)
+
+        matches.push(gfMatch);
+    }
+
+    await TournamentBracket.create({
+        key: key,
+        type: type,
+        matches: matches
+    });
+};
+
+// ==========================================
 // TOURNAMENT BRACKET DEV ENDPOINTS (KEY='main')
 // ==========================================
 
@@ -1125,127 +1420,22 @@ app.get('/api/dev/tournament/bracket', async (req, res) => {
     }
 });
 
-// Generate Bracket from Locked Players (Simple Single Elim)
+// Generate Bracket from Locked Players
 app.post('/api/dev/tournament/generate', auth, async (req, res) => {
     const { type, participants: manualParticipants } = req.body; 
     
     try {
         let participants = [];
-        
         if (manualParticipants && Array.isArray(manualParticipants)) {
-            // Use manually provided list if available
             participants = manualParticipants;
         } else {
-            // Legacy/Fallback behavior: Fetch locked players from DB and shuffle
             let players = await TournamentEntry.find({ isLocked: true });
             players = players.sort(() => Math.random() - 0.5);
             participants = players.map(p => p.minecraftUsername);
         }
         
-        // 2. Clear existing bracket
-        await TournamentBracket.deleteMany({ key: 'main' });
-        
-        // 3. Generate Single Elimination Structure
-        const matches = [];
-        const totalPlayers = participants.length;
-        
-        // Determine bracket size (next power of 2)
-        let size = 2;
-        while (size < totalPlayers) size *= 2;
-        
-        // Number of rounds = log2(size)
-        const numRounds = Math.log2(size);
-        
-        // Create Round 1 Matches
-        // Round 1 will have 'size/2' matches
-        
-        let roundMatches = [];
-        
-        // Generate leaf matches (Round 1)
-        for(let i=0; i < size/2; i++) {
-            const p1 = participants[i*2] || null; // Player 1
-            const p2 = participants[i*2+1] || null; // Player 2 (might be null if odd/bye)
-            
-            // Auto-advance if p2 is null (Bye)
-            let winner = null;
-            let status = 'PENDING';
-            if (p1 && !p2) {
-                winner = p1;
-                status = 'COMPLETED';
-            } else if (!p1 && !p2) {
-                // Empty slot (shouldn't happen with correct sizing logic but safety)
-                status = 'COMPLETED'; 
-            } else if (p1 && p2) {
-                status = 'READY';
-            }
-
-            roundMatches.push({
-                id: `R1-M${i+1}`,
-                round: 1,
-                matchIndex: i,
-                player1: p1,
-                player2: p2,
-                winner: winner,
-                status: status,
-                score: "",
-                nextMatchId: null // To be linked
-            });
-        }
-        matches.push(...roundMatches);
-        
-        let prevRoundMatches = roundMatches;
-        
-        // Generate subsequent rounds
-        for (let r=2; r <= numRounds; r++) {
-            let currentRoundMatches = [];
-            const numMatchesInRound = size / Math.pow(2, r);
-            
-            for(let i=0; i < numMatchesInRound; i++) {
-                const matchId = `R${r}-M${i+1}`;
-                
-                // Link previous round matches to this one
-                // Match i in this round comes from Match 2*i and 2*i+1 in prev round
-                const prev1 = prevRoundMatches[i*2];
-                const prev2 = prevRoundMatches[i*2+1];
-                
-                prev1.nextMatchId = matchId;
-                prev2.nextMatchId = matchId;
-                
-                // Pre-fill if prev rounds were auto-byes
-                let p1 = prev1.winner;
-                let p2 = prev2.winner;
-                let status = 'PENDING';
-                
-                // Propagate Byes immediately
-                if (p1 && p2) status = 'READY';
-                else if ((p1 && !prev2.player1 && !prev2.player2) || (p2 && !prev1.player1 && !prev1.player2)) {
-                     // Advanced logic needed for bubbling up empty branches, simplified here:
-                     // If a match is waiting on a winner, it stays pending.
-                }
-
-                currentRoundMatches.push({
-                    id: matchId,
-                    round: r,
-                    matchIndex: i,
-                    player1: p1,
-                    player2: p2,
-                    winner: null,
-                    status: status,
-                    score: "",
-                    nextMatchId: null
-                });
-            }
-            matches.push(...currentRoundMatches);
-            prevRoundMatches = currentRoundMatches;
-        }
-        
-        await TournamentBracket.create({
-            key: 'main',
-            type: type || 'SINGLE_ELIMINATION',
-            matches: matches
-        });
-        
-        res.json({ success: true, message: `Bracket generated with ${totalPlayers} players.` });
+        await generateMatches('main', type || 'SINGLE_ELIMINATION', participants);
+        res.json({ success: true, message: `Bracket generated with ${participants.length} players.` });
         
     } catch (e) {
         console.error(e);
@@ -1280,23 +1470,42 @@ app.post('/api/dev/tournament/match/update', auth, async (req, res) => {
         // If winner set, mark completed
         if (match.winner) match.status = 'COMPLETED';
         
-        // Propagate to next match
+        // Propagate to next matches
+        
+        // 1. Winner Progression
         if (match.nextMatchId) {
             const nextMatch = bracket.matches.find(m => m.id === match.nextMatchId);
             if (nextMatch) {
-                // Determine if player 1 or 2 slot based on current match index parity
-                // This logic depends on the generation order: even index -> player1, odd -> player2
-                // R1-M1 -> R2-M1 (p1)
-                // R1-M2 -> R2-M1 (p2)
-                const isPlayerOneSlot = (match.matchIndex % 2) === 0;
-                
-                // Only propagate winner if set
-                if (match.winner) {
-                    if (isPlayerOneSlot) nextMatch.player1 = match.winner;
+                // If special handling needed for Grand Finals where p1 comes from WB and p2 from LB
+                if (nextMatch.bracketGroup === 'finals') {
+                    if (match.bracketGroup === 'winners') nextMatch.player1 = match.winner;
                     else nextMatch.player2 = match.winner;
-                    
-                    if (nextMatch.player1 && nextMatch.player2) nextMatch.status = 'READY';
+                } else {
+                    // Standard tree progression
+                    const isPlayerOneSlot = (match.matchIndex % 2) === 0;
+                    if (match.winner) {
+                        if (isPlayerOneSlot) nextMatch.player1 = match.winner;
+                        else nextMatch.player2 = match.winner;
+                    }
                 }
+                if (nextMatch.player1 && nextMatch.player2) nextMatch.status = 'READY';
+            }
+        }
+
+        // 2. Loser Progression (Double Elimination)
+        if (match.loserNextMatchId && match.player1 && match.player2 && match.winner) {
+            const loser = match.winner === match.player1 ? match.player2 : match.player1;
+            const loserMatch = bracket.matches.find(m => m.id === match.loserNextMatchId);
+            
+            if (loserMatch) {
+                // Logic to place loser into empty slot. 
+                // Simple logic: fill p1 if empty, else p2.
+                // NOTE: In strict brackets, the slot is deterministic. 
+                // For simplicity here, we fill the first available slot.
+                if (!loserMatch.player1) loserMatch.player1 = loser;
+                else if (!loserMatch.player2) loserMatch.player2 = loser;
+
+                if (loserMatch.player1 && loserMatch.player2) loserMatch.status = 'READY';
             }
         }
         
@@ -1353,7 +1562,6 @@ app.get('/api/tournament/bracket', async (req, res) => {
     try {
         let bracket = await TournamentBracket.findOne({ key: 'production' });
         if (!bracket) {
-            // Return empty structure if not found
             return res.json({ type: 'SINGLE_ELIMINATION', matches: [] });
         }
         res.json(bracket);
@@ -1368,97 +1576,16 @@ app.post('/api/admin/tournament/generate', auth, async (req, res) => {
     
     try {
         let participants = [];
-        
         if (manualParticipants && Array.isArray(manualParticipants)) {
             participants = manualParticipants;
         } else {
-            // Fetch locked players from DB
             let players = await TournamentEntry.find({ isLocked: true });
             players = players.sort(() => Math.random() - 0.5);
             participants = players.map(p => p.minecraftUsername);
         }
         
-        // 2. Clear existing production bracket
-        await TournamentBracket.deleteMany({ key: 'production' });
-        
-        // 3. Generate Structure (Same Logic)
-        const matches = [];
-        const totalPlayers = participants.length;
-        
-        let size = 2;
-        while (size < totalPlayers) size *= 2;
-        
-        const numRounds = Math.log2(size);
-        let roundMatches = [];
-        
-        for(let i=0; i < size/2; i++) {
-            const p1 = participants[i*2] || null;
-            const p2 = participants[i*2+1] || null;
-            
-            let winner = null;
-            let status = 'PENDING';
-            if (p1 && !p2) { winner = p1; status = 'COMPLETED'; } 
-            else if (!p1 && !p2) { status = 'COMPLETED'; } 
-            else if (p1 && p2) { status = 'READY'; }
-
-            roundMatches.push({
-                id: `R1-M${i+1}`,
-                round: 1,
-                matchIndex: i,
-                player1: p1,
-                player2: p2,
-                winner: winner,
-                status: status,
-                score: "",
-                nextMatchId: null
-            });
-        }
-        matches.push(...roundMatches);
-        
-        let prevRoundMatches = roundMatches;
-        
-        for (let r=2; r <= numRounds; r++) {
-            let currentRoundMatches = [];
-            const numMatchesInRound = size / Math.pow(2, r);
-            
-            for(let i=0; i < numMatchesInRound; i++) {
-                const matchId = `R${r}-M${i+1}`;
-                const prev1 = prevRoundMatches[i*2];
-                const prev2 = prevRoundMatches[i*2+1];
-                
-                prev1.nextMatchId = matchId;
-                prev2.nextMatchId = matchId;
-                
-                let p1 = prev1.winner;
-                let p2 = prev2.winner;
-                let status = 'PENDING';
-                
-                if (p1 && p2) status = 'READY';
-                else if ((p1 && !prev2.player1 && !prev2.player2) || (p2 && !prev1.player1 && !prev1.player2)) {}
-
-                currentRoundMatches.push({
-                    id: matchId,
-                    round: r,
-                    matchIndex: i,
-                    player1: p1,
-                    player2: p2,
-                    winner: null,
-                    status: status,
-                    score: "",
-                    nextMatchId: null
-                });
-            }
-            matches.push(...currentRoundMatches);
-            prevRoundMatches = currentRoundMatches;
-        }
-        
-        await TournamentBracket.create({
-            key: 'production',
-            type: type || 'SINGLE_ELIMINATION',
-            matches: matches
-        });
-        
-        res.json({ success: true, message: `Production bracket generated with ${totalPlayers} players.` });
+        await generateMatches('production', type || 'SINGLE_ELIMINATION', participants);
+        res.json({ success: true, message: `Production bracket generated with ${participants.length} players.` });
         
     } catch (e) {
         console.error(e);
@@ -1489,16 +1616,31 @@ app.post('/api/admin/tournament/match/update', auth, async (req, res) => {
         }
         if (match.winner) match.status = 'COMPLETED';
         
+        // Progression Logic
         if (match.nextMatchId) {
             const nextMatch = bracket.matches.find(m => m.id === match.nextMatchId);
             if (nextMatch) {
-                const isPlayerOneSlot = (match.matchIndex % 2) === 0;
-                if (match.winner) {
-                    if (isPlayerOneSlot) nextMatch.player1 = match.winner;
+                if (nextMatch.bracketGroup === 'finals') {
+                    if (match.bracketGroup === 'winners') nextMatch.player1 = match.winner;
                     else nextMatch.player2 = match.winner;
-                    
-                    if (nextMatch.player1 && nextMatch.player2) nextMatch.status = 'READY';
+                } else {
+                    const isPlayerOneSlot = (match.matchIndex % 2) === 0;
+                    if (match.winner) {
+                        if (isPlayerOneSlot) nextMatch.player1 = match.winner;
+                        else nextMatch.player2 = match.winner;
+                    }
                 }
+                if (nextMatch.player1 && nextMatch.player2) nextMatch.status = 'READY';
+            }
+        }
+
+        if (match.loserNextMatchId && match.player1 && match.player2 && match.winner) {
+            const loser = match.winner === match.player1 ? match.player2 : match.player1;
+            const loserMatch = bracket.matches.find(m => m.id === match.loserNextMatchId);
+            if (loserMatch) {
+                if (!loserMatch.player1) loserMatch.player1 = loser;
+                else if (!loserMatch.player2) loserMatch.player2 = loser;
+                if (loserMatch.player1 && loserMatch.player2) loserMatch.status = 'READY';
             }
         }
         
