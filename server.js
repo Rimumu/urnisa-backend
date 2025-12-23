@@ -59,6 +59,7 @@ const NisathonStats = mongoose.model('NisathonStats', new mongoose.Schema({
     timerEndTime: { type: Date, default: Date.now },
     remainingTimeMs: { type: Number, default: 0 },
     isPaused: { type: Boolean, default: false },
+    isEnded: { type: Boolean, default: false }, // New field to track if Nisathon is ended
     activeEvent: { type: String, default: null },
     lastActivityTime: { type: String, default: new Date().toISOString() }
 }));
@@ -155,6 +156,12 @@ const processBufferedGift = async (sender, data) => {
     try {
         const stats = await NisathonStats.findOne({ key: 'main' });
         if (!stats) return;
+        
+        // If ended, do not process
+        if (stats.isEnded) {
+            console.log("🛑 Nisathon Ended - Skipping Gift Buffer");
+            return;
+        }
 
         // Generate a unique ID for this bulk event
         const providerId = `bulk-gift-${Date.now()}-${sender}`;
@@ -184,6 +191,11 @@ const processBufferedGift = async (sender, data) => {
 // ==========================================
 
 const processEvent = async (stats, type, user, amount, message, providerId, tier = '1000', isManual = false) => {
+    // If Nisathon is ended, ignore incoming auto events
+    if (stats.isEnded && !isManual) {
+        return 0;
+    }
+
     let isNewEvent = true;
 
     // Check duplicates
@@ -321,6 +333,12 @@ const connectSocket = () => {
             const stats = await NisathonStats.findOne({ key: 'main' });
             if (!stats) return;
 
+            // --- STOP IF ENDED ---
+            if (stats.isEnded) {
+                console.log("🛑 Nisathon Ended - Ignoring Event");
+                return;
+            }
+
             const info = data.data;
             let amount = 1;
             let tier = '1000';
@@ -389,6 +407,9 @@ const resolveChannelId = async () => {
 const fetchAndProcess = async (channelId, label, stats, limit = 25, offset = 0) => {
     if (!channelId) return [];
     
+    // Check if ended (extra safety for poll loop)
+    if (stats && stats.isEnded) return [];
+
     try {
         const url = `https://api.streamelements.com/kappa/v2/activities/${channelId}`;
         const { data: activities } = await axios.get(url, {
@@ -443,6 +464,9 @@ const fetchAndProcess = async (channelId, label, stats, limit = 25, offset = 0) 
 };
 
 const syncSessionFallback = async (channelId, stats) => {
+    // Check if ended
+    if (stats.isEnded) return;
+
     try {
         const { data: session } = await axios.get(`https://api.streamelements.com/kappa/v2/sessions/${channelId}`, {
              headers: { 'Authorization': `Bearer ${SE_JWT}` }
@@ -486,6 +510,9 @@ const runSync = async (forceDeep = false) => {
         let stats = await NisathonStats.findOne({ key: 'main' });
         if (!stats) stats = await NisathonStats.create({ key: 'main', timerEndTime: new Date(Date.now() + 3*3600000) });
 
+        // If Nisathon is ended, stop fetching activity
+        if (stats.isEnded && !forceDeep) return;
+
         let resolvedId = await resolveChannelId();
         if (!resolvedId) resolvedId = ENV_CHANNEL_ID;
 
@@ -513,7 +540,7 @@ const rebuildEverything = async () => {
     let stats = await NisathonStats.findOne({ key: 'main' });
     if (!stats) stats = await NisathonStats.create({ key: 'main' });
     stats.currentSubs = 0; stats.currentBits = 0; stats.currentDonations = 0; stats.totalNisaballs = 0;
-    stats.remainingTimeMs = 0; stats.isPaused = false;
+    stats.remainingTimeMs = 0; stats.isPaused = false; stats.isEnded = false;
     stats.timerEndTime = new Date(Date.now() + 3 * 60 * 60 * 1000);
     stats.lastActivityTime = new Date(0).toISOString(); 
     await stats.save();
@@ -651,7 +678,7 @@ app.post('/api/nisathon/reset', auth, async (req, res) => {
     await NisathonEvent.deleteMany({}); await SpinQueue.deleteMany({}); await SpinHistory.deleteMany({});
     await NisathonStats.findOneAndUpdate({ key: 'main' }, { 
         currentSubs: 0, currentBits: 0, currentDonations: 0, totalNisaballs: 0, 
-        remainingTimeMs: 0, isPaused: false, activeEvent: null, lastActivityTime: new Date().toISOString() 
+        remainingTimeMs: 0, isPaused: false, isEnded: false, activeEvent: null, lastActivityTime: new Date().toISOString() 
     });
     res.json({ success: true });
 });
@@ -662,6 +689,16 @@ app.post('/api/nisathon/sync', auth, async (req, res) => {
 app.post('/api/nisathon/rebuild', auth, async (req, res) => {
     rebuildEverything();
     res.json({ success: true, message: "Rebuild Started" });
+});
+
+// NEW: END NISATHON ENDPOINT
+app.post('/api/nisathon/end', auth, async (req, res) => {
+    try {
+        await NisathonStats.findOneAndUpdate({ key: 'main' }, { isEnded: true, isPaused: true });
+        res.json({ success: true, message: "Nisathon Ended" });
+    } catch(e) {
+        res.status(500).json({ error: "Failed to end Nisathon" });
+    }
 });
 
 app.post('/api/nisathon/delete-event', auth, async (req, res) => {
