@@ -107,6 +107,16 @@ const BingoDefinition = mongoose.model('BingoDefinition', new mongoose.Schema({
     createdAt: { type: Date, default: Date.now }
 }));
 
+// NEW: Bingo Winner Schema for Leaderboard
+const BingoWinner = mongoose.model('BingoWinner', new mongoose.Schema({
+    discordId: { type: String, required: true },
+    minecraftUsername: { type: String, required: true },
+    discordAvatar: { type: String }, // Optional cached avatar
+    cardId: { type: String, required: true },
+    linesCompleted: { type: Number, required: true },
+    completedAt: { type: Date, default: Date.now }
+}));
+
 // NEW: Tournament Entry Schema
 const TournamentEntry = mongoose.model('TournamentEntry', new mongoose.Schema({
     discordId: { type: String, required: true, unique: true },
@@ -947,6 +957,53 @@ app.post('/api/bingo/definition', async (req, res) => {
              return res.json({ success: true, data: existing });
         }
         res.status(500).json({ error: "Error saving definition" });
+    }
+});
+
+// --- BINGO LEADERBOARD API (NEW) ---
+
+// Get Bingo Winners
+app.get('/api/bingo/winners', async (req, res) => {
+    try {
+        const winners = await BingoWinner.find().sort({ linesCompleted: -1, completedAt: 1 }); // Most lines first, then earliest completion
+        res.json(winners);
+    } catch (e) {
+        res.status(500).json({ error: "Failed to fetch winners" });
+    }
+});
+
+// Add Bingo Winner (Admin)
+app.post('/api/admin/bingo/winner', auth, async (req, res) => {
+    const { discordId, minecraftUsername, cardId, linesCompleted, completedAt } = req.body;
+    
+    if (!discordId || !minecraftUsername || !cardId || linesCompleted === undefined) {
+        return res.status(400).json({ error: "Missing fields" });
+    }
+
+    try {
+        // Create new winner record
+        const winner = await BingoWinner.create({
+            discordId,
+            minecraftUsername,
+            cardId,
+            linesCompleted,
+            completedAt: completedAt ? new Date(completedAt) : new Date()
+        });
+        res.json({ success: true, data: winner });
+    } catch (e) {
+        console.error("Add Winner Error:", e);
+        res.status(500).json({ error: "Failed to add winner" });
+    }
+});
+
+// Delete Bingo Winner (Admin)
+app.post('/api/admin/bingo/winner/delete', auth, async (req, res) => {
+    const { id } = req.body;
+    try {
+        await BingoWinner.findByIdAndDelete(id);
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: "Failed to delete" });
     }
 });
 
