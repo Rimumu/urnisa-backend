@@ -1766,18 +1766,38 @@ app.post('/api/admin/tournament/clear', auth, async (req, res) => {
 const RankedPlayer = mongoose.model('RankedPlayer', new mongoose.Schema({
     uuid: { type: String, required: true, unique: true },
     minecraftName: { type: String, required: true },
+
+    // === COMBINED STATS (ACTIVE - used for current leaderboard) ===
     elo: { type: Number, default: 0 },
     wins: { type: Number, default: 0 },
     losses: { type: Number, default: 0 },
-    tier: { type: String, default: 'DIRT' },
+    tier: { type: String, default: 'UNRANKED' },
     totalKOs: { type: Number, default: 0 },
     totalDeaths: { type: Number, default: 0 },
     winStreak: { type: Number, default: 0 },
     bestWinStreak: { type: Number, default: 0 },
+
+    // === 1v1 STATS (INACTIVE - for future separate leaderboard) ===
+    elo1v1: { type: Number, default: 0 },
+    wins1v1: { type: Number, default: 0 },
+    losses1v1: { type: Number, default: 0 },
+    tier1v1: { type: String, default: 'UNRANKED' },
+    winStreak1v1: { type: Number, default: 0 },
+    bestWinStreak1v1: { type: Number, default: 0 },
+
+    // === 2v2 STATS (INACTIVE - for future separate leaderboard) ===
+    elo2v2: { type: Number, default: 0 },
+    wins2v2: { type: Number, default: 0 },
+    losses2v2: { type: Number, default: 0 },
+    tier2v2: { type: String, default: 'UNRANKED' },
+    winStreak2v2: { type: Number, default: 0 },
+    bestWinStreak2v2: { type: Number, default: 0 },
+
     lastMatchAt: { type: Date, default: null },
     createdAt: { type: Date, default: Date.now },
     updatedAt: { type: Date, default: Date.now }
 }));
+
 
 // Ranked Match Schema
 const RankedMatch = mongoose.model('RankedMatch', new mongoose.Schema({
@@ -2101,7 +2121,10 @@ app.post('/api/ranked/match', async (req, res) => {
         const winnerEloBefore = winner.elo;
         const loserEloBefore = loser.elo;
 
-        // Update winner
+        const format = (battleType || '1v1').toLowerCase().replace('v', 'v');
+        const is1v1 = format === '1v1';
+
+        // Update winner - COMBINED stats (active)
         winner.elo = Math.max(0, winner.elo + finalWinnerChange);
         winner.wins += 1;
         winner.winStreak += 1;
@@ -2112,7 +2135,22 @@ app.post('/api/ranked/match', async (req, res) => {
         winner.lastMatchAt = new Date();
         winner.updatedAt = new Date();
 
-        // Update loser
+        // Update winner - FORMAT-SPECIFIC stats (inactive, for future use)
+        if (is1v1) {
+            winner.elo1v1 = Math.max(0, (winner.elo1v1 || 0) + finalWinnerChange);
+            winner.wins1v1 = (winner.wins1v1 || 0) + 1;
+            winner.winStreak1v1 = (winner.winStreak1v1 || 0) + 1;
+            winner.bestWinStreak1v1 = Math.max(winner.bestWinStreak1v1 || 0, winner.winStreak1v1);
+            winner.tier1v1 = calculateTier(winner.elo1v1, winner.wins1v1);
+        } else {
+            winner.elo2v2 = Math.max(0, (winner.elo2v2 || 0) + finalWinnerChange);
+            winner.wins2v2 = (winner.wins2v2 || 0) + 1;
+            winner.winStreak2v2 = (winner.winStreak2v2 || 0) + 1;
+            winner.bestWinStreak2v2 = Math.max(winner.bestWinStreak2v2 || 0, winner.winStreak2v2);
+            winner.tier2v2 = calculateTier(winner.elo2v2, winner.wins2v2);
+        }
+
+        // Update loser - COMBINED stats (active)
         loser.elo = Math.max(0, loser.elo + finalLoserChange);
         loser.losses += 1;
         loser.winStreak = 0;
@@ -2121,6 +2159,19 @@ app.post('/api/ranked/match', async (req, res) => {
         loser.tier = calculateTier(loser.elo, loser.wins);
         loser.lastMatchAt = new Date();
         loser.updatedAt = new Date();
+
+        // Update loser - FORMAT-SPECIFIC stats (inactive, for future use)
+        if (is1v1) {
+            loser.elo1v1 = Math.max(0, (loser.elo1v1 || 0) + finalLoserChange);
+            loser.losses1v1 = (loser.losses1v1 || 0) + 1;
+            loser.winStreak1v1 = 0;
+            loser.tier1v1 = calculateTier(loser.elo1v1, loser.wins1v1 || 0);
+        } else {
+            loser.elo2v2 = Math.max(0, (loser.elo2v2 || 0) + finalLoserChange);
+            loser.losses2v2 = (loser.losses2v2 || 0) + 1;
+            loser.winStreak2v2 = 0;
+            loser.tier2v2 = calculateTier(loser.elo2v2, loser.wins2v2 || 0);
+        }
 
         await winner.save();
         await loser.save();
