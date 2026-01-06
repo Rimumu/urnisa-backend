@@ -1821,8 +1821,22 @@ const RankedMatch = mongoose.model('RankedMatch', new mongoose.Schema({
     diminishingMultiplier: { type: Number, default: 1.0 },
     uniqueOpponentBonus: { type: Boolean, default: false },
     eloRangeReduced: { type: Boolean, default: false },
+    // Pokemon details for match history
+    winnerPokemon: [{
+        species: { type: String },
+        nickname: { type: String },
+        level: { type: Number, default: 50 },
+        fainted: { type: Boolean, default: false }
+    }],
+    loserPokemon: [{
+        species: { type: String },
+        nickname: { type: String },
+        level: { type: Number, default: 50 },
+        fainted: { type: Boolean, default: false }
+    }],
     createdAt: { type: Date, default: Date.now }
 }));
+
 
 // Opponent History Schema - tracks matches between specific player pairs
 const OpponentHistory = mongoose.model('OpponentHistory', new mongoose.Schema({
@@ -2061,7 +2075,8 @@ app.post('/api/ranked/match', async (req, res) => {
             winnerUuid, winnerName, loserUuid, loserName,
             winnerAlivePokemon, winnerTotalPokemon,
             loserAlivePokemon, loserTotalPokemon,
-            winnerKOs, loserKOs, battleType, endReason
+            winnerKOs, loserKOs, battleType, endReason,
+            winnerPokemon, loserPokemon
         } = req.body;
 
         if (!winnerUuid || !loserUuid) {
@@ -2180,7 +2195,7 @@ app.post('/api/ranked/match', async (req, res) => {
         await updateOpponentHistory(winnerUuid, loserUuid);
         await updateOpponentHistory(loserUuid, winnerUuid);
 
-        // Record match with anti-abuse info
+        // Record match with anti-abuse info and Pokemon data
         const match = await RankedMatch.create({
             winnerUuid, winnerName, loserUuid, loserName,
             winnerAlivePokemon, winnerTotalPokemon,
@@ -2191,7 +2206,9 @@ app.post('/api/ranked/match', async (req, res) => {
             winnerEloBefore, loserEloBefore,
             diminishingMultiplier: winnerDiminishing.multiplier,
             uniqueOpponentBonus: winnerUniqueBonus.bonusApplied,
-            eloRangeReduced: eloRangePenalty.reduced
+            eloRangeReduced: eloRangePenalty.reduced,
+            winnerPokemon: winnerPokemon || [],
+            loserPokemon: loserPokemon || []
         });
 
         // Log with anti-abuse info
@@ -2309,30 +2326,96 @@ app.get('/api/ranked/player/:uuid', async (req, res) => {
 app.get('/api/ranked/player/:uuid/history', async (req, res) => {
     try {
         const limit = Math.min(parseInt(req.query.limit) || 20, 100);
+        const page = parseInt(req.query.page) || 1;
+        const skip = (page - 1) * limit;
 
         const matches = await RankedMatch.find({
             $or: [
                 { winnerUuid: req.params.uuid },
                 { loserUuid: req.params.uuid }
             ]
-        }).sort({ createdAt: -1 }).limit(limit);
+        }).sort({ createdAt: -1 }).skip(skip).limit(limit);
 
-        const history = matches.map(m => ({
-            id: m._id,
-            isWin: m.winnerUuid === req.params.uuid,
-            opponent: m.winnerUuid === req.params.uuid ? m.loserName : m.winnerName,
-            opponentUuid: m.winnerUuid === req.params.uuid ? m.loserUuid : m.winnerUuid,
-            eloChange: m.winnerUuid === req.params.uuid ? m.winnerEloChange : m.loserEloChange,
-            battleType: m.battleType,
-            endReason: m.endReason,
-            date: m.createdAt
-        }));
+        const total = await RankedMatch.countDocuments({
+            $or: [
+                { winnerUuid: req.params.uuid },
+                { loserUuid: req.params.uuid }
+            ]
+        });
 
-        res.json(history);
+        const history = matches.map(m => {
+            const isWin = m.winnerUuid === req.params.uuid;
+            return {
+                id: m._id,
+                isWin,
+                opponent: isWin ? m.loserName : m.winnerName,
+                opponentUuid: isWin ? m.loserUuid : m.winnerUuid,
+                eloChange: isWin ? m.winnerEloChange : m.loserEloChange,
+                eloBefore: isWin ? m.winnerEloBefore : m.loserEloBefore,
+                eloAfter: isWin ? (m.winnerEloBefore + m.winnerEloChange) : (m.loserEloBefore + m.loserEloChange),
+                battleType: m.battleType,
+                endReason: m.endReason,
+                pokemonAlive: isWin ? m.winnerAlivePokemon : m.loserAlivePokemon,
+                pokemonTotal: isWin ? m.winnerTotalPokemon : m.loserTotalPokemon,
+                date: m.createdAt
+            };
+        });
+
+        res.json({
+            matches: history,
+            pagination: {
+                page,
+                limit,
+                total,
+                totalPages: Math.ceil(total / limit)
+            }
+        });
     } catch (e) {
         res.status(500).json({ error: e.message });
     }
 });
+
+// Get Single Match Details
+app.get('/api/ranked/match/:id', async (req, res) => {
+    try {
+        const match = await RankedMatch.findById(req.params.id);
+        if (!match) {
+            return res.status(404).json({ error: 'Match not found' });
+        }
+
+        res.json({
+            id: match._id,
+            winner: {
+                uuid: match.winnerUuid,
+                name: match.winnerName,
+                eloChange: match.winnerEloChange,
+                eloBefore: match.winnerEloBefore,
+                eloAfter: match.winnerEloBefore + match.winnerEloChange,
+                pokemonAlive: match.winnerAlivePokemon,
+                pokemonTotal: match.winnerTotalPokemon,
+                kos: match.winnerKOs,
+                pokemon: match.winnerPokemon || []
+            },
+            loser: {
+                uuid: match.loserUuid,
+                name: match.loserName,
+                eloChange: match.loserEloChange,
+                eloBefore: match.loserEloBefore,
+                eloAfter: match.loserEloBefore + match.loserEloChange,
+                pokemonAlive: match.loserAlivePokemon,
+                pokemonTotal: match.loserTotalPokemon,
+                kos: match.loserKOs,
+                pokemon: match.loserPokemon || []
+            },
+            battleType: match.battleType,
+            endReason: match.endReason,
+            date: match.createdAt
+        });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
 
 // Get Player Rank (for in-game display)
 app.get('/api/ranked/player/:uuid/rank', async (req, res) => {
