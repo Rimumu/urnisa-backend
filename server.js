@@ -1797,8 +1797,161 @@ const RankedMatch = mongoose.model('RankedMatch', new mongoose.Schema({
     loserEloChange: { type: Number, default: 0 },
     winnerEloBefore: { type: Number, default: 0 },
     loserEloBefore: { type: Number, default: 0 },
+    // Anti-abuse tracking
+    diminishingMultiplier: { type: Number, default: 1.0 },
+    uniqueOpponentBonus: { type: Boolean, default: false },
+    eloRangeReduced: { type: Boolean, default: false },
     createdAt: { type: Date, default: Date.now }
 }));
+
+// Opponent History Schema - tracks matches between specific player pairs
+const OpponentHistory = mongoose.model('OpponentHistory', new mongoose.Schema({
+    playerUuid: { type: String, required: true },
+    opponentUuid: { type: String, required: true },
+    matchCount: { type: Number, default: 0 },
+    lastMatchAt: { type: Date, default: null },
+    resetAt: { type: Date, default: null } // 12-hour reset timer
+}));
+
+// Create compound index for efficient lookups
+OpponentHistory.collection.createIndex({ playerUuid: 1, opponentUuid: 1 }, { unique: true });
+
+// Daily Stats Schema - tracks unique opponents per day
+const DailyStats = mongoose.model('DailyStats', new mongoose.Schema({
+    playerUuid: { type: String, required: true },
+    date: { type: String, required: true }, // YYYY-MM-DD format
+    uniqueOpponents: [{ type: String }], // Array of opponent UUIDs
+    matchesPlayed: { type: Number, default: 0 },
+    bonusEarned: { type: Boolean, default: false }
+}));
+
+DailyStats.collection.createIndex({ playerUuid: 1, date: 1 }, { unique: true });
+
+// Anti-Abuse Helper Functions
+
+/**
+ * Get diminishing returns multiplier for same-opponent matches
+ * Match 1: 100%, Match 2: 75%, Match 3: 50%, Match 4+: 25%
+ * Resets after 12 hours
+ */
+const getDiminishingMultiplier = async (playerUuid, opponentUuid) => {
+    const now = new Date();
+    const twelveHoursAgo = new Date(now.getTime() - 12 * 60 * 60 * 1000);
+
+    let history = await OpponentHistory.findOne({ playerUuid, opponentUuid });
+
+    if (!history) {
+        // First match with this opponent
+        return { multiplier: 1.0, matchCount: 0 };
+    }
+
+    // Check if 12-hour reset has passed
+    if (history.lastMatchAt && history.lastMatchAt < twelveHoursAgo) {
+        // Reset the counter
+        history.matchCount = 0;
+        history.resetAt = now;
+        await history.save();
+        return { multiplier: 1.0, matchCount: 0 };
+    }
+
+    // Calculate multiplier based on match count
+    const count = history.matchCount;
+    let multiplier = 1.0;
+    if (count === 1) multiplier = 0.75;
+    else if (count === 2) multiplier = 0.50;
+    else if (count >= 3) multiplier = 0.25;
+
+    return { multiplier, matchCount: count };
+};
+
+/**
+ * Update opponent history after a match
+ */
+const updateOpponentHistory = async (playerUuid, opponentUuid) => {
+    const now = new Date();
+
+    await OpponentHistory.findOneAndUpdate(
+        { playerUuid, opponentUuid },
+        {
+            $inc: { matchCount: 1 },
+            $set: { lastMatchAt: now }
+        },
+        { upsert: true, new: true }
+    );
+};
+
+/**
+ * Check daily unique opponents and return bonus multiplier
+ * Returns bonus of 1.15 (15% extra) if player has fought 3+ unique opponents today
+ */
+const getUniqueOpponentBonus = async (playerUuid, opponentUuid) => {
+    const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+
+    let stats = await DailyStats.findOne({ playerUuid, date: today });
+
+    if (!stats) {
+        stats = await DailyStats.create({
+            playerUuid,
+            date: today,
+            uniqueOpponents: [],
+            matchesPlayed: 0,
+            bonusEarned: false
+        });
+    }
+
+    // Check if this opponent is new for today
+    const isNewOpponent = !stats.uniqueOpponents.includes(opponentUuid);
+
+    // Add opponent to list if new
+    if (isNewOpponent) {
+        stats.uniqueOpponents.push(opponentUuid);
+    }
+    stats.matchesPlayed += 1;
+
+    // Check if bonus threshold reached (3 unique opponents)
+    const uniqueCount = stats.uniqueOpponents.length;
+    let bonusMultiplier = 1.0;
+    let bonusApplied = false;
+
+    if (uniqueCount >= 3 && !stats.bonusEarned) {
+        bonusMultiplier = 1.15; // 15% bonus
+        bonusApplied = true;
+        stats.bonusEarned = true;
+    } else if (uniqueCount >= 3 && stats.bonusEarned) {
+        // Already earned bonus today, still get small bonus for variety
+        bonusMultiplier = 1.05; // 5% ongoing bonus for variety
+    }
+
+    await stats.save();
+
+    return {
+        bonusMultiplier,
+        bonusApplied,
+        uniqueCount,
+        isNewOpponent
+    };
+};
+
+/**
+ * Get ELO range penalty - reduces gains if ELO difference > 500
+ */
+const getEloRangePenalty = (winnerElo, loserElo) => {
+    const eloDiff = Math.abs(winnerElo - loserElo);
+
+    if (eloDiff <= 500) {
+        return { multiplier: 1.0, reduced: false };
+    }
+
+    // Significant reduction for farming lower-ranked players
+    // 500-700 diff: 50%, 700-1000 diff: 25%, 1000+ diff: 10%
+    if (eloDiff <= 700) {
+        return { multiplier: 0.50, reduced: true };
+    } else if (eloDiff <= 1000) {
+        return { multiplier: 0.25, reduced: true };
+    } else {
+        return { multiplier: 0.10, reduced: true };
+    }
+};
 
 // Tier definitions
 const TIERS = {
@@ -1910,8 +2063,21 @@ app.post('/api/ranked/match', async (req, res) => {
         if (winnerName) winner.minecraftName = winnerName;
         if (loserName) loser.minecraftName = loserName;
 
-        // Calculate ELO changes
-        const eloChanges = calculateEloChange(winner.elo, loser.elo, {
+        // === ANTI-ABUSE CHECKS ===
+
+        // 1. Diminishing returns for same opponent (resets after 12 hours)
+        const winnerDiminishing = await getDiminishingMultiplier(winnerUuid, loserUuid);
+        const loserDiminishing = await getDiminishingMultiplier(loserUuid, winnerUuid);
+
+        // 2. ELO range penalty (>500 difference = reduced gains)
+        const eloRangePenalty = getEloRangePenalty(winner.elo, loser.elo);
+
+        // 3. Unique opponent bonus (3+ unique per day)
+        const winnerUniqueBonus = await getUniqueOpponentBonus(winnerUuid, loserUuid);
+        const loserUniqueBonus = await getUniqueOpponentBonus(loserUuid, winnerUuid);
+
+        // Calculate base ELO changes
+        const baseEloChanges = calculateEloChange(winner.elo, loser.elo, {
             winnerAlivePokemon: winnerAlivePokemon || 0,
             winnerTotalPokemon: winnerTotalPokemon || 1,
             loserTotalPokemon: loserTotalPokemon || 1,
@@ -1920,12 +2086,23 @@ app.post('/api/ranked/match', async (req, res) => {
             endReason: endReason || 'normal'
         });
 
+        // Apply anti-abuse modifiers to winner's gains
+        let finalWinnerChange = baseEloChanges.winnerChange;
+        finalWinnerChange *= winnerDiminishing.multiplier;  // Diminishing returns
+        finalWinnerChange *= eloRangePenalty.multiplier;    // ELO range penalty
+        finalWinnerChange *= winnerUniqueBonus.bonusMultiplier; // Unique opponent bonus
+        finalWinnerChange = Math.round(finalWinnerChange);
+
+        // Loser's loss is not affected by winner's modifiers (but can be by their own)
+        let finalLoserChange = baseEloChanges.loserChange;
+        finalLoserChange = Math.round(finalLoserChange);
+
         // Store ELO before changes
         const winnerEloBefore = winner.elo;
         const loserEloBefore = loser.elo;
 
         // Update winner
-        winner.elo = Math.max(0, winner.elo + eloChanges.winnerChange);
+        winner.elo = Math.max(0, winner.elo + finalWinnerChange);
         winner.wins += 1;
         winner.winStreak += 1;
         winner.bestWinStreak = Math.max(winner.bestWinStreak, winner.winStreak);
@@ -1936,7 +2113,7 @@ app.post('/api/ranked/match', async (req, res) => {
         winner.updatedAt = new Date();
 
         // Update loser
-        loser.elo = Math.max(0, loser.elo + eloChanges.loserChange);
+        loser.elo = Math.max(0, loser.elo + finalLoserChange);
         loser.losses += 1;
         loser.winStreak = 0;
         loser.totalKOs += (loserKOs || 0);
@@ -1948,18 +2125,30 @@ app.post('/api/ranked/match', async (req, res) => {
         await winner.save();
         await loser.save();
 
-        // Record match
+        // Update opponent history for both players
+        await updateOpponentHistory(winnerUuid, loserUuid);
+        await updateOpponentHistory(loserUuid, winnerUuid);
+
+        // Record match with anti-abuse info
         const match = await RankedMatch.create({
             winnerUuid, winnerName, loserUuid, loserName,
             winnerAlivePokemon, winnerTotalPokemon,
             loserAlivePokemon, loserTotalPokemon,
             winnerKOs, loserKOs, battleType, endReason,
-            winnerEloChange: eloChanges.winnerChange,
-            loserEloChange: eloChanges.loserChange,
-            winnerEloBefore, loserEloBefore
+            winnerEloChange: finalWinnerChange,
+            loserEloChange: finalLoserChange,
+            winnerEloBefore, loserEloBefore,
+            diminishingMultiplier: winnerDiminishing.multiplier,
+            uniqueOpponentBonus: winnerUniqueBonus.bonusApplied,
+            eloRangeReduced: eloRangePenalty.reduced
         });
 
-        console.log(`🏆 Ranked Match: ${winnerName} (+${eloChanges.winnerChange}) defeated ${loserName} (${eloChanges.loserChange})`);
+        // Log with anti-abuse info
+        let logMsg = `🏆 Ranked Match: ${winnerName} (+${finalWinnerChange}) defeated ${loserName} (${finalLoserChange})`;
+        if (winnerDiminishing.multiplier < 1) logMsg += ` [Diminishing: ${Math.round(winnerDiminishing.multiplier * 100)}%]`;
+        if (eloRangePenalty.reduced) logMsg += ` [ELO Range Penalty]`;
+        if (winnerUniqueBonus.bonusApplied) logMsg += ` [Unique Opponent Bonus!]`;
+        console.log(logMsg);
 
         res.json({
             success: true,
@@ -1967,11 +2156,19 @@ app.post('/api/ranked/match', async (req, res) => {
             loserElo: loser.elo,
             winnerWins: winner.wins,
             loserLosses: loser.losses,
-            winnerEloChange: eloChanges.winnerChange,
-            loserEloChange: eloChanges.loserChange,
+            winnerEloChange: finalWinnerChange,
+            loserEloChange: finalLoserChange,
             winnerTier: winner.tier,
             loserTier: loser.tier,
-            matchId: match._id
+            matchId: match._id,
+            // Anti-abuse info for client display
+            antiAbuse: {
+                diminishingMultiplier: winnerDiminishing.multiplier,
+                sameOpponentCount: winnerDiminishing.matchCount + 1,
+                eloRangeReduced: eloRangePenalty.reduced,
+                uniqueOpponentBonus: winnerUniqueBonus.bonusApplied,
+                uniqueOpponentsToday: winnerUniqueBonus.uniqueCount
+            }
         });
     } catch (e) {
         console.error('Ranked match error:', e);
