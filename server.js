@@ -55,7 +55,7 @@ const NisathonStats = mongoose.model('NisathonStats', new mongoose.Schema({
     currentSubs: { type: Number, default: 0 },
     currentBits: { type: Number, default: 0 },
     currentDonations: { type: Number, default: 0 },
-    totalNisaballs: { type: Number, default: 0 }, 
+    totalNisaballs: { type: Number, default: 0 },
     timerEndTime: { type: Date, default: Date.now },
     remainingTimeMs: { type: Number, default: 0 },
     isPaused: { type: Boolean, default: false },
@@ -162,11 +162,11 @@ const giftBuffer = {};
 
 const processBufferedGift = async (sender, data) => {
     console.log(`🎁 Processing Bulk Gift: ${sender} gifted ${data.count} subs!`);
-    
+
     try {
         const stats = await NisathonStats.findOne({ key: 'main' });
         if (!stats) return;
-        
+
         // If ended, do not process
         if (stats.isEnded) {
             console.log("🛑 Nisathon Ended - Skipping Gift Buffer");
@@ -175,23 +175,23 @@ const processBufferedGift = async (sender, data) => {
 
         // Generate a unique ID for this bulk event
         const providerId = `bulk-gift-${Date.now()}-${sender}`;
-        
+
         // Process as a single 'gift' event with amount = count
         await processEvent(
-            stats, 
-            'gift', 
-            sender, 
-            data.count, 
-            `Gifted ${data.count} subs`, 
-            providerId, 
+            stats,
+            'gift',
+            sender,
+            data.count,
+            `Gifted ${data.count} subs`,
+            providerId,
             data.tier
         );
-        
+
         await stats.save();
     } catch (e) {
         console.error("Gift Buffer Error:", e);
     }
-    
+
     // Cleanup
     delete giftBuffer[sender];
 };
@@ -222,7 +222,7 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
     if (['subscriber', 'sub', 'resub', 'subscription'].includes(type)) {
         // Skip Recipient Events (trust bulk 'gift' event logic) unless manual
         if (!isManual && (message.includes('gift') || amount === 0)) {
-             return 0; 
+            return 0;
         }
 
         let tVal = 0.5;
@@ -231,23 +231,23 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
         if (tStr.includes('3000') || tStr === '3') { tVal = 2.0; tLbl = "Tier 3"; }
         else if (tStr.includes('2000') || tStr === '2') { tVal = 1.0; tLbl = "Tier 2"; }
         else if (tStr.includes('prime')) { tVal = 0.5; tLbl = "Prime"; }
-        
+
         earnedNisaballs = tVal;
         amountDisplay = `${tLbl} Sub`;
         eventType = 'sub';
         if (isNewEvent) stats.currentSubs += 1;
-    } 
+    }
     else if (type === 'gift') {
         earnedNisaballs = 0.5 * amount; // 0.5 NB per gift sub
         amountDisplay = `${amount} Gift Sub${amount > 1 ? 's' : ''}`;
         if (isNewEvent) stats.currentSubs += amount;
-    } 
+    }
     else if (['cheer', 'bits'].includes(type)) {
         earnedNisaballs = amount * 0.002;
         amountDisplay = `${amount} Bits`;
         eventType = 'bits';
         if (isNewEvent) stats.currentBits += amount;
-    } 
+    }
     else if (['tip', 'donation'].includes(type)) {
         earnedNisaballs = amount * 0.2;
         amountDisplay = `$${amount.toFixed(2)}`;
@@ -265,7 +265,7 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
         stats.totalNisaballs = roundOneDecimal(stats.totalNisaballs + earnedNisaballs);
         const mult = stats.activeEvent === 'DOUBLE_TIMER' ? 2 : 1;
         const msAdd = earnedNisaballs * 10 * mult * 60000;
-        
+
         if (earnedNisaballs > 0) {
             if (!stats.isPaused) {
                 const now = Date.now();
@@ -290,8 +290,8 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
     Object.keys(eventData).forEach(k => eventData[k] === undefined && delete eventData[k]);
 
     const res = await NisathonEvent.findOneAndUpdate(
-        { providerId: eventData.providerId }, 
-        eventData, 
+        { providerId: eventData.providerId },
+        eventData,
         { upsert: true, new: true }
     );
 
@@ -300,11 +300,11 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
         const spins = Math.floor(earnedNisaballs / 5);
         console.log(`🎡 Queueing ${spins} spins for ${user}`);
         for (let i = 0; i < spins; i++) {
-            await SpinQueue.create({ user: user||'Anon', sourceEventId: res._id, nisaballs: earnedNisaballs });
+            await SpinQueue.create({ user: user || 'Anon', sourceEventId: res._id, nisaballs: earnedNisaballs });
         }
     }
-    
-    if (isNewEvent) console.log(`✅ [${isManual?'MANUAL':'AUTO'}] ${user} | (${eventType}) | +${earnedNisaballs}NB`);
+
+    if (isNewEvent) console.log(`✅ [${isManual ? 'MANUAL' : 'AUTO'}] ${user} | (${eventType}) | +${earnedNisaballs}NB`);
     return earnedNisaballs;
 };
 
@@ -315,11 +315,11 @@ let socket = null;
 
 const connectSocket = () => {
     if (!SE_JWT) { console.log("❌ [Socket] No JWT"); return; }
-    
+
     console.log("🔌 [Socket] Connecting...");
-    
+
     // StreamElements uses Socket.IO v2. 
-    socket = io('https://realtime.streamelements.com', { 
+    socket = io('https://realtime.streamelements.com', {
         transports: ['websocket'],
         forceNew: true,
         autoConnect: true,
@@ -352,7 +352,7 @@ const connectSocket = () => {
             const info = data.data;
             let amount = 1;
             let tier = '1000';
-            let type = data.type; 
+            let type = data.type;
             let username = info.username;
 
             // GIFT BUFFERING LOGIC
@@ -366,28 +366,28 @@ const connectSocket = () => {
                     // Start new buffer
                     giftBuffer[sender] = { count: 1, tier: info.tier || '1000', timer: null };
                 }
-                
+
                 // Set/Reset timeout to process the batch after 2 seconds of silence
                 giftBuffer[sender].timer = setTimeout(() => {
                     processBufferedGift(sender, giftBuffer[sender]);
                 }, 2000);
-                
+
                 return; // Stop processing this individual event
             }
-            
+
             // Normal Processing
             if (type === 'subscriber') {
                 tier = info.tier || '1000';
-                amount = info.amount || 1; 
+                amount = info.amount || 1;
             } else if (type === 'tip' || type === 'cheer') {
                 amount = info.amount;
             } else if (type === 'follow') {
-                type = 'follower'; 
+                type = 'follower';
                 amount = 0;
             }
 
             const providerId = data._id || `sock-${Date.now()}-${Math.random()}`;
-            await processEvent(stats, type, username, amount, info.message||"", providerId, tier);
+            await processEvent(stats, type, username, amount, info.message || "", providerId, tier);
             await stats.save();
         } catch (e) { console.error("Socket Error:", e); }
     });
@@ -400,7 +400,7 @@ const resolveChannelId = async () => {
     if (!SE_JWT) return null;
     try {
         const res = await axios.get(`https://api.streamelements.com/kappa/v2/channels/${TARGET_USERNAME}`, {
-             headers: { 'User-Agent': 'Mozilla/5.0' }
+            headers: { 'User-Agent': 'Mozilla/5.0' }
         });
         if (res.data && res.data._id) {
             return res.data._id;
@@ -416,17 +416,17 @@ const resolveChannelId = async () => {
 
 const fetchAndProcess = async (channelId, label, stats, limit = 25, offset = 0) => {
     if (!channelId) return [];
-    
+
     // Check if ended (extra safety for poll loop)
     if (stats && stats.isEnded) return [];
 
     try {
         const url = `https://api.streamelements.com/kappa/v2/activities/${channelId}`;
         const { data: activities } = await axios.get(url, {
-            headers: { 
+            headers: {
                 'Authorization': `Bearer ${SE_JWT}`,
                 'Accept': 'application/json',
-                'User-Agent': 'UrnisaBot/1.0' 
+                'User-Agent': 'UrnisaBot/1.0'
             },
             params: { limit, offset, types: 'subscriber,tip,cheer,follow' },
             timeout: 10000
@@ -441,11 +441,11 @@ const fetchAndProcess = async (channelId, label, stats, limit = 25, offset = 0) 
                 let amt = 0;
                 let tier = '1000';
                 let type = act.type;
-                let username = act.data.username; 
-                
+                let username = act.data.username;
+
                 // Handle Gifts in REST
-                if (['subscriber','sub','resub'].includes(act.type)) { 
-                    amt = 1; 
+                if (['subscriber', 'sub', 'resub'].includes(act.type)) {
+                    amt = 1;
                     tier = act.data.tier || '1000';
                     if (act.data.gifted) {
                         username = act.data.sender;
@@ -453,14 +453,14 @@ const fetchAndProcess = async (channelId, label, stats, limit = 25, offset = 0) 
                     }
                 }
                 else if (act.type === 'gift') {
-                    amt = act.data.amount || 1; 
+                    amt = act.data.amount || 1;
                 }
-                else if (['cheer','tip'].includes(act.type)) {
-                    amt = act.data.amount; 
+                else if (['cheer', 'tip'].includes(act.type)) {
+                    amt = act.data.amount;
                 }
-                else if (act.type === 'follow') { 
-                    type = 'follower'; 
-                    amt = 0; 
+                else if (act.type === 'follow') {
+                    type = 'follower';
+                    amt = 0;
                 }
                 else continue;
 
@@ -479,34 +479,34 @@ const syncSessionFallback = async (channelId, stats) => {
 
     try {
         const { data: session } = await axios.get(`https://api.streamelements.com/kappa/v2/sessions/${channelId}`, {
-             headers: { 'Authorization': `Bearer ${SE_JWT}` }
+            headers: { 'Authorization': `Bearer ${SE_JWT}` }
         });
-        
+
         if (!session || !session.data) return;
-        
+
         let changes = false;
         const lastSub = session.data['latest-subscriber'];
         if (lastSub) {
             let username = lastSub.name;
             let type = 'subscriber';
             if (lastSub.gifted) {
-                 username = lastSub.sender;
-                 type = 'gift';
+                username = lastSub.sender;
+                type = 'gift';
             }
             await processEvent(stats, type, username, 1, "", `session-sub-${username}`, lastSub.tier);
             changes = true;
         }
-        
+
         const lastTip = session.data['latest-tip'];
         if (lastTip) {
-             await processEvent(stats, 'tip', lastTip.name, lastTip.amount, lastTip.message, `session-tip-${lastTip.name}-${lastTip.amount}`);
-             changes = true;
+            await processEvent(stats, 'tip', lastTip.name, lastTip.amount, lastTip.message, `session-tip-${lastTip.name}-${lastTip.amount}`);
+            changes = true;
         }
 
         const lastCheer = session.data['latest-cheer'];
         if (lastCheer) {
-             await processEvent(stats, 'cheer', lastCheer.name, lastCheer.amount, lastCheer.message, `session-cheer-${lastCheer.name}-${lastCheer.amount}`);
-             changes = true;
+            await processEvent(stats, 'cheer', lastCheer.name, lastCheer.amount, lastCheer.message, `session-cheer-${lastCheer.name}-${lastCheer.amount}`);
+            changes = true;
         }
         if (changes) console.log("✅ Session Sync Processed");
     } catch (e) { }
@@ -518,7 +518,7 @@ const runSync = async (forceDeep = false) => {
 
     try {
         let stats = await NisathonStats.findOne({ key: 'main' });
-        if (!stats) stats = await NisathonStats.create({ key: 'main', timerEndTime: new Date(Date.now() + 3*3600000) });
+        if (!stats) stats = await NisathonStats.create({ key: 'main', timerEndTime: new Date(Date.now() + 3 * 3600000) });
 
         // If Nisathon is ended, stop fetching activity
         if (stats.isEnded && !forceDeep) return;
@@ -546,18 +546,18 @@ const rebuildEverything = async () => {
     await NisathonEvent.deleteMany({});
     await SpinQueue.deleteMany({});
     await SpinHistory.deleteMany({});
-    
+
     let stats = await NisathonStats.findOne({ key: 'main' });
     if (!stats) stats = await NisathonStats.create({ key: 'main' });
     stats.currentSubs = 0; stats.currentBits = 0; stats.currentDonations = 0; stats.totalNisaballs = 0;
     stats.remainingTimeMs = 0; stats.isPaused = false; stats.isEnded = false;
     stats.timerEndTime = new Date(Date.now() + 3 * 60 * 60 * 1000);
-    stats.lastActivityTime = new Date(0).toISOString(); 
+    stats.lastActivityTime = new Date(0).toISOString();
     await stats.save();
 
     let allActivities = [];
-    const limit = 100; 
-    const pagesToFetch = 10; 
+    const limit = 100;
+    const pagesToFetch = 10;
 
     for (let i = 0; i < pagesToFetch; i++) {
         const acts = await fetchAndProcess(resolvedId, "REBUILD", null, limit, i * limit);
@@ -570,17 +570,17 @@ const rebuildEverything = async () => {
 
     for (const act of allActivities) {
         let amt = 0, tier = '1000', type = act.type, user = act.data.username;
-        
-        if (['subscriber','sub','resub'].includes(act.type)) { 
-            amt = 1; 
+
+        if (['subscriber', 'sub', 'resub'].includes(act.type)) {
+            amt = 1;
             tier = act.data.tier || '1000';
             if (act.data.gifted) {
-                user = act.data.sender; 
+                user = act.data.sender;
                 type = 'gift';
             }
         }
         else if (act.type === 'gift') amt = act.data.amount || 1;
-        else if (['cheer','tip'].includes(act.type)) amt = act.data.amount;
+        else if (['cheer', 'tip'].includes(act.type)) amt = act.data.amount;
         else if (act.type === 'follow') { type = 'follower'; amt = 0; }
         else continue;
 
@@ -604,7 +604,7 @@ app.get('/api/debug/se-latest', async (req, res) => {
     try {
         const r = await axios.get(`https://api.streamelements.com/kappa/v2/channels/${TARGET_USERNAME}`, { headers: { 'Authorization': `Bearer ${SE_JWT}` } });
         targetId = r.data._id;
-    } catch(e){}
+    } catch (e) { }
 
     try {
         const response = await axios.get(`https://api.streamelements.com/kappa/v2/activities/${targetId}`, {
@@ -619,7 +619,7 @@ const auth = (req, res, next) => {
     if (req.headers.authorization !== ADMIN_PASSWORD) return res.status(401).json({ error: 'Unauthorized' });
     next();
 };
-app.post('/api/verify', (req, res) => res.json(req.body.password === ADMIN_PASSWORD ? {success:true} : {error:'Invalid'}));
+app.post('/api/verify', (req, res) => res.json(req.body.password === ADMIN_PASSWORD ? { success: true } : { error: 'Invalid' }));
 
 // NISATHON
 app.get('/api/nisathon/stats', async (req, res) => {
@@ -632,7 +632,7 @@ app.get('/api/nisathon/stats', async (req, res) => {
 app.get('/api/nisathon/leaderboard', async (req, res) => {
     try {
         const lb = await NisathonEvent.aggregate([{ $group: { _id: "$user", total: { $sum: "$nisaballAmount" } } }, { $sort: { total: -1 } }, { $limit: 10 }]);
-        res.json(lb.map((x, i) => ({ rank: i+1, user: x._id, totalNisaballs: roundOneDecimal(x.total) })));
+        res.json(lb.map((x, i) => ({ rank: i + 1, user: x._id, totalNisaballs: roundOneDecimal(x.total) })));
     } catch { res.json([]); }
 });
 
@@ -650,7 +650,7 @@ app.post('/api/nisathon/test-event', auth, async (req, res) => {
 
 app.post('/api/nisathon/timer/set', auth, async (req, res) => {
     const stats = await NisathonStats.findOne({ key: 'main' });
-    const ms = (req.body.hours*3600 + req.body.minutes*60 + req.body.seconds)*1000;
+    const ms = (req.body.hours * 3600 + req.body.minutes * 60 + req.body.seconds) * 1000;
     if (stats.isPaused) stats.remainingTimeMs = ms; else stats.timerEndTime = new Date(Date.now() + ms);
     await stats.save();
     res.json({ success: true });
@@ -662,7 +662,7 @@ app.post('/api/nisathon/timer/add', auth, async (req, res) => {
         stats.remainingTimeMs += ms;
         // Clamp to 0 if we removed too much time while paused
         if (stats.remainingTimeMs < 0) stats.remainingTimeMs = 0;
-    } 
+    }
     else {
         // Unpaused: modify end time. 
         // If adding: extend from max(now, endtime). 
@@ -686,9 +686,9 @@ app.post('/api/nisathon/event', auth, async (req, res) => {
 });
 app.post('/api/nisathon/reset', auth, async (req, res) => {
     await NisathonEvent.deleteMany({}); await SpinQueue.deleteMany({}); await SpinHistory.deleteMany({});
-    await NisathonStats.findOneAndUpdate({ key: 'main' }, { 
-        currentSubs: 0, currentBits: 0, currentDonations: 0, totalNisaballs: 0, 
-        remainingTimeMs: 0, isPaused: false, isEnded: false, activeEvent: null, lastActivityTime: new Date().toISOString() 
+    await NisathonStats.findOneAndUpdate({ key: 'main' }, {
+        currentSubs: 0, currentBits: 0, currentDonations: 0, totalNisaballs: 0,
+        remainingTimeMs: 0, isPaused: false, isEnded: false, activeEvent: null, lastActivityTime: new Date().toISOString()
     });
     res.json({ success: true });
 });
@@ -706,7 +706,7 @@ app.post('/api/nisathon/end', auth, async (req, res) => {
     try {
         await NisathonStats.findOneAndUpdate({ key: 'main' }, { isEnded: true, isPaused: true });
         res.json({ success: true, message: "Nisathon Ended" });
-    } catch(e) {
+    } catch (e) {
         res.status(500).json({ error: "Failed to end Nisathon" });
     }
 });
@@ -722,12 +722,12 @@ app.post('/api/nisathon/delete-event', auth, async (req, res) => {
             if (stats) {
                 // Approximate Revert
                 if (event.type === 'sub') stats.currentSubs -= 1;
-                else if (event.type === 'gift') stats.currentSubs -= (event.nisaballAmount * 2); 
+                else if (event.type === 'gift') stats.currentSubs -= (event.nisaballAmount * 2);
                 else if (event.type === 'bits') stats.currentBits -= (event.nisaballAmount * 500);
                 else if (event.type === 'donation') stats.currentDonations -= (event.nisaballAmount * 5);
 
                 stats.totalNisaballs = Math.max(0, roundOneDecimal(stats.totalNisaballs - event.nisaballAmount));
-                
+
                 const msToRemove = event.nisaballAmount * 10 * 60 * 1000;
                 if (stats.isPaused) stats.remainingTimeMs = Math.max(0, stats.remainingTimeMs - msToRemove);
                 else stats.timerEndTime = new Date(new Date(stats.timerEndTime).getTime() - msToRemove);
@@ -761,10 +761,10 @@ app.post('/api/nisathon/merge-users', auth, async (req, res) => {
         const events = await NisathonEvent.updateMany({ user: sourceRegex }, { user: cleanTarget });
         const spinsQ = await SpinQueue.updateMany({ user: sourceRegex }, { user: cleanTarget });
         const spinsH = await SpinHistory.updateMany({ user: sourceRegex }, { user: cleanTarget });
-        
-        res.json({ 
-            success: true, 
-            message: `Merged/Normalized ${events.modifiedCount} events, ${spinsQ.modifiedCount} queued spins, ${spinsH.modifiedCount} history entries into "${cleanTarget}".` 
+
+        res.json({
+            success: true,
+            message: `Merged/Normalized ${events.modifiedCount} events, ${spinsQ.modifiedCount} queued spins, ${spinsH.modifiedCount} history entries into "${cleanTarget}".`
         });
     } catch (e) {
         res.status(500).json({ error: e.message });
@@ -790,7 +790,7 @@ app.get('/api/countdown/stats', async (req, res) => {
 
 app.post('/api/countdown/set', auth, async (req, res) => {
     const stats = await mongoose.model('CountdownStats').findOne({ key: 'main' });
-    const ms = (req.body.hours*3600 + req.body.minutes*60 + req.body.seconds)*1000;
+    const ms = (req.body.hours * 3600 + req.body.minutes * 60 + req.body.seconds) * 1000;
     if (stats.isPaused) stats.remainingTimeMs = ms; else stats.timerEndTime = new Date(Date.now() + ms);
     await stats.save();
     res.json({ success: true });
@@ -828,13 +828,13 @@ app.get('/api/goals', async (req, res) => res.json({ goals: (await Setting.findO
 app.post('/api/goals', auth, async (req, res) => { await Setting.findOneAndUpdate({ key: 'nisathon_goals' }, { value: req.body.goals }, { upsert: true }); res.json({ success: true }); });
 app.get('/api/wheel', async (req, res) => res.json({ items: (await Setting.findOne({ key: 'wheel_items' }))?.value }));
 app.post('/api/wheel', auth, async (req, res) => { await Setting.findOneAndUpdate({ key: 'wheel_items' }, { value: req.body.items }, { upsert: true }); res.json({ success: true }); });
-app.get('/api/profile', async (req, res) => { const a = await Setting.findOne({ key: 'profile_about' }); const c = await Setting.findOne({ key: 'profile_credits' }); const w = await Setting.findOne({ key: 'profile_artworks' }); res.json({ about: a?.value||[], credits: c?.value||[], artworks: w?.value||[] }); });
+app.get('/api/profile', async (req, res) => { const a = await Setting.findOne({ key: 'profile_about' }); const c = await Setting.findOne({ key: 'profile_credits' }); const w = await Setting.findOne({ key: 'profile_artworks' }); res.json({ about: a?.value || [], credits: c?.value || [], artworks: w?.value || [] }); });
 app.post('/api/profile', auth, async (req, res) => { await Setting.findOneAndUpdate({ key: `profile_${req.body.type}` }, { value: req.body.data }, { upsert: true }); res.json({ success: true }); });
 app.get('/api/schedule', async (req, res) => res.json({ url: (await Setting.findOne({ key: 'schedule_url' }))?.value || DEFAULT_SCHEDULE_URL }));
 app.post('/api/schedule', auth, async (req, res) => { await Setting.findOneAndUpdate({ key: 'schedule_url' }, { value: req.body.url }, { upsert: true }); res.json({ success: true }); });
 app.post('/api/stream-status', auth, async (req, res) => { await Setting.findOneAndUpdate({ key: 'stream_status_override' }, { value: req.body.override }, { upsert: true }); res.json({ success: true }); });
 app.get('/api/stream-status', async (req, res) => { const s = await Setting.findOne({ key: 'stream_status_override' }); res.json({ override: s?.value || 'auto' }); });
-app.post('/api/upload', async (req, res) => { const { image } = req.body; if (!image) return res.status(400).send(); if (CLOUDINARY_CLOUD_NAME) { try { const ts = Math.round(new Date().getTime()/1000); const sig = crypto.createHash('sha1').update(`timestamp=${ts}${CLOUDINARY_API_SECRET}`).digest('hex'); const f = new FormData(); f.append('file', `data:image/jpeg;base64,${image}`); f.append('api_key', CLOUDINARY_API_KEY); f.append('timestamp', ts); f.append('signature', sig); const r = await axios.post(`https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/image/upload`, f); return res.json({ success: true, data: { url: r.data.secure_url } }); } catch (e) { return res.status(500).send(); } } return res.status(500).send(); });
+app.post('/api/upload', async (req, res) => { const { image } = req.body; if (!image) return res.status(400).send(); if (CLOUDINARY_CLOUD_NAME) { try { const ts = Math.round(new Date().getTime() / 1000); const sig = crypto.createHash('sha1').update(`timestamp=${ts}${CLOUDINARY_API_SECRET}`).digest('hex'); const f = new FormData(); f.append('file', `data:image/jpeg;base64,${image}`); f.append('api_key', CLOUDINARY_API_KEY); f.append('timestamp', ts); f.append('signature', sig); const r = await axios.post(`https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/image/upload`, f); return res.json({ success: true, data: { url: r.data.secure_url } }); } catch (e) { return res.status(500).send(); } } return res.status(500).send(); });
 const imageValidationCache = new Map();
 app.get('/api/utils/check-image', async (req, res) => { const { url } = req.query; if (!url) return res.json({ valid: false }); if (imageValidationCache.has(url)) { return res.json({ valid: imageValidationCache.get(url) }); } try { const response = await axios.head(url, { timeout: 5000 }); const length = parseInt(response.headers['content-length'] || '0'); const isValid = length > 2048; imageValidationCache.set(url, isValid); res.json({ valid: isValid }); } catch (e) { imageValidationCache.set(url, false); res.json({ valid: false }); } });
 
@@ -845,7 +845,7 @@ app.get('/api/utils/check-image', async (req, res) => { const { url } = req.quer
 // Save or Update a Bingo Card
 app.post('/api/bingo/save', async (req, res) => {
     const { discordId, name, cardId, gridData, marked } = req.body;
-    
+
     if (!discordId || !name || !cardId || !gridData) {
         return res.status(400).json({ error: "Missing required data" });
     }
@@ -854,11 +854,11 @@ app.post('/api/bingo/save', async (req, res) => {
         // Check if updating existing by name for this user, or create new
         const result = await BingoCard.findOneAndUpdate(
             { discordId, name },
-            { 
-                cardId, 
-                gridData, 
-                marked, 
-                updatedAt: new Date() 
+            {
+                cardId,
+                gridData,
+                marked,
+                updatedAt: new Date()
             },
             { upsert: true, new: true }
         );
@@ -911,8 +911,8 @@ app.post('/api/bingo/config', auth, async (req, res) => {
     const { cardId, winCondition } = req.body;
     try {
         await Setting.findOneAndUpdate(
-            { key: 'bingo_config' }, 
-            { value: { cardId, winCondition } }, 
+            { key: 'bingo_config' },
+            { value: { cardId, winCondition } },
             { upsert: true }
         );
         res.json({ success: true, message: "Bingo config updated" });
@@ -940,21 +940,21 @@ app.get('/api/bingo/definition', async (req, res) => {
 app.post('/api/bingo/definition', async (req, res) => {
     const { cardId, gridData, difficulty } = req.body;
     if (!cardId || !gridData) return res.status(400).json({ error: "Missing data" });
-    
+
     try {
         // Try to create, if exists, return existing (first write wins strategy for consistency)
         const existing = await BingoDefinition.findOne({ cardId });
         if (existing) {
             return res.json({ success: true, data: existing, message: "Definition already exists" });
         }
-        
+
         const newDef = await BingoDefinition.create({ cardId, gridData, difficulty });
         res.json({ success: true, data: newDef });
     } catch (e) {
         // Handle race condition unique constraint error
         if (e.code === 11000) {
-             const existing = await BingoDefinition.findOne({ cardId });
-             return res.json({ success: true, data: existing });
+            const existing = await BingoDefinition.findOne({ cardId });
+            return res.json({ success: true, data: existing });
         }
         res.status(500).json({ error: "Error saving definition" });
     }
@@ -975,7 +975,7 @@ app.get('/api/bingo/winners', async (req, res) => {
 // Add Bingo Winner (Admin)
 app.post('/api/admin/bingo/winner', auth, async (req, res) => {
     const { discordId, minecraftUsername, cardId, linesCompleted, completedAt } = req.body;
-    
+
     if (!discordId || !minecraftUsername || !cardId || linesCompleted === undefined) {
         return res.status(400).json({ error: "Missing fields" });
     }
@@ -1019,9 +1019,9 @@ app.get('/api/tournament/config', async (req, res) => {
         const val = config ? config.value : {};
         // Use status if present, otherwise infer from legacy lockEnabled
         const status = val.status || (val.lockEnabled ? 'LOCK_IN' : 'DRAFTING');
-        
-        res.json({ 
-            status, 
+
+        res.json({
+            status,
             lockEnabled: status === 'LOCK_IN' // Maintain backward compat
         });
     } catch (e) {
@@ -1032,15 +1032,15 @@ app.get('/api/tournament/config', async (req, res) => {
 // Admin: Set Tournament Config
 app.post('/api/admin/tournament/config', auth, async (req, res) => {
     // Expect status string: 'DRAFTING', 'LOCK_IN', 'ONGOING'
-    const { status, lockEnabled } = req.body; 
-    
+    const { status, lockEnabled } = req.body;
+
     try {
         // Determine status from legacy input if new status input missing
         const newStatus = status || (lockEnabled ? 'LOCK_IN' : 'DRAFTING');
-        
+
         await Setting.findOneAndUpdate(
-            { key: 'tournament_config' }, 
-            { value: { status: newStatus, lockEnabled: newStatus === 'LOCK_IN' } }, 
+            { key: 'tournament_config' },
+            { value: { status: newStatus, lockEnabled: newStatus === 'LOCK_IN' } },
             { upsert: true }
         );
         res.json({ success: true });
@@ -1076,7 +1076,7 @@ app.post('/api/tournament/register', async (req, res) => {
         // Check config for ONGOING status
         const config = await Setting.findOne({ key: 'tournament_config' });
         if (config && config.value && config.value.status === 'ONGOING') {
-             return res.status(403).json({ error: "Tournament is ongoing. Registration closed." });
+            return res.status(403).json({ error: "Tournament is ongoing. Registration closed." });
         }
 
         // Check if locked
@@ -1087,10 +1087,10 @@ app.post('/api/tournament/register', async (req, res) => {
 
         await TournamentEntry.findOneAndUpdate(
             { discordId },
-            { 
-                minecraftUsername, 
-                team, 
-                updatedAt: new Date() 
+            {
+                minecraftUsername,
+                team,
+                updatedAt: new Date()
             },
             { upsert: true, new: true }
         );
@@ -1108,7 +1108,7 @@ app.post('/api/tournament/lock', async (req, res) => {
     // Check if locking is enabled (Status MUST be LOCK_IN)
     const config = await Setting.findOne({ key: 'tournament_config' });
     const currentStatus = config?.value?.status || (config?.value?.lockEnabled ? 'LOCK_IN' : 'DRAFTING');
-    
+
     if (currentStatus !== 'LOCK_IN') {
         return res.status(403).json({ error: "Lock-ins are currently unavailable." });
     }
@@ -1116,7 +1116,7 @@ app.post('/api/tournament/lock', async (req, res) => {
     try {
         const entry = await TournamentEntry.findOne({ discordId });
         if (!entry) return res.status(404).json({ error: "No team found to lock." });
-        
+
         // Basic Validation: Ensure team is somewhat valid (not completely empty)
         const validPokemon = entry.team.filter(p => p !== null).length;
         if (validPokemon === 0) return res.status(400).json({ error: "Cannot lock an empty team." });
@@ -1135,7 +1135,7 @@ app.get('/api/tournament/players', async (req, res) => {
     const { dev } = req.query;
     // If ?dev=true is NOT present, we filter out isDev: true players
     const filter = dev === 'true' ? {} : { isDev: { $ne: true } };
-    
+
     try {
         const players = await TournamentEntry.find(filter).sort({ updatedAt: -1 });
         // Sanitize: If not locked, hide team
@@ -1175,8 +1175,8 @@ app.post('/api/admin/tournament/unlock-team', auth, async (req, res) => {
     try {
         const result = await TournamentEntry.findOneAndUpdate(
             { discordId },
-            { 
-                isLocked: false, 
+            {
+                isLocked: false,
                 team: new Array(6).fill(null),
                 updatedAt: new Date()
             },
@@ -1214,7 +1214,7 @@ const generateMatches = async (key, type, participants) => {
     const totalPlayers = participants.length;
     let size = 2;
     while (size < totalPlayers) size *= 2;
-    
+
     // Create Bracket Structure
     const matches = [];
 
@@ -1222,20 +1222,20 @@ const generateMatches = async (key, type, participants) => {
     if (type === 'SINGLE_ELIMINATION') {
         const numRounds = Math.log2(size);
         let roundMatches = [];
-        
+
         // R1 (Leaf Nodes)
-        for(let i=0; i < size/2; i++) {
-            const p1 = participants[i*2] || null;
-            const p2 = participants[i*2+1] || null;
-            
+        for (let i = 0; i < size / 2; i++) {
+            const p1 = participants[i * 2] || null;
+            const p2 = participants[i * 2 + 1] || null;
+
             let winner = null;
             let status = 'PENDING';
-            if (p1 && !p2) { winner = p1; status = 'COMPLETED'; } 
+            if (p1 && !p2) { winner = p1; status = 'COMPLETED'; }
             else if (!p1 && !p2) { status = 'COMPLETED'; } // Bye vs Bye
             else if (p1 && p2) { status = 'READY'; }
 
             roundMatches.push({
-                id: `R1-M${i+1}`,
+                id: `R1-M${i + 1}`,
                 bracketGroup: 'winners',
                 round: 1,
                 matchIndex: i,
@@ -1248,26 +1248,26 @@ const generateMatches = async (key, type, participants) => {
             });
         }
         matches.push(...roundMatches);
-        
+
         let prevRoundMatches = roundMatches;
-        
+
         // Subsequent Rounds
-        for (let r=2; r <= numRounds; r++) {
+        for (let r = 2; r <= numRounds; r++) {
             let currentRoundMatches = [];
             const numMatchesInRound = size / Math.pow(2, r);
-            
-            for(let i=0; i < numMatchesInRound; i++) {
-                const matchId = `R${r}-M${i+1}`;
-                const prev1 = prevRoundMatches[i*2];
-                const prev2 = prevRoundMatches[i*2+1];
-                
+
+            for (let i = 0; i < numMatchesInRound; i++) {
+                const matchId = `R${r}-M${i + 1}`;
+                const prev1 = prevRoundMatches[i * 2];
+                const prev2 = prevRoundMatches[i * 2 + 1];
+
                 prev1.nextMatchId = matchId;
                 prev2.nextMatchId = matchId;
-                
+
                 let p1 = prev1.winner;
                 let p2 = prev2.winner;
                 let status = 'PENDING';
-                
+
                 if (p1 && p2) status = 'READY';
 
                 currentRoundMatches.push({
@@ -1286,7 +1286,7 @@ const generateMatches = async (key, type, participants) => {
             matches.push(...currentRoundMatches);
             prevRoundMatches = currentRoundMatches;
         }
-    } 
+    }
     // --- DOUBLE ELIMINATION GENERATION ---
     else if (type === 'DOUBLE_ELIMINATION') {
         // Limitation: Supports up to 16 players for logic simplicity in this implementation
@@ -1299,18 +1299,18 @@ const generateMatches = async (key, type, participants) => {
         let prevWbRound = [];
 
         // WB Round 1
-        for(let i=0; i < size/2; i++) {
-            const p1 = participants[i*2] || null;
-            const p2 = participants[i*2+1] || null;
-            
+        for (let i = 0; i < size / 2; i++) {
+            const p1 = participants[i * 2] || null;
+            const p2 = participants[i * 2 + 1] || null;
+
             let winner = null;
             let status = 'PENDING';
-            if (p1 && !p2) { winner = p1; status = 'COMPLETED'; } 
-            else if (!p1 && !p2) { status = 'COMPLETED'; } 
+            if (p1 && !p2) { winner = p1; status = 'COMPLETED'; }
+            else if (!p1 && !p2) { status = 'COMPLETED'; }
             else if (p1 && p2) { status = 'READY'; }
 
             const m = {
-                id: `WB-R1-M${i+1}`,
+                id: `WB-R1-M${i + 1}`,
                 bracketGroup: 'winners',
                 round: 1,
                 matchIndex: i,
@@ -1328,21 +1328,21 @@ const generateMatches = async (key, type, participants) => {
         matches.push(...prevWbRound);
 
         // WB Rounds 2+
-        for(let r=2; r <= numWbRounds; r++) {
+        for (let r = 2; r <= numWbRounds; r++) {
             let currentWbRound = [];
             const count = size / Math.pow(2, r);
-            for(let i=0; i < count; i++) {
-                const matchId = `WB-R${r}-M${i+1}`;
-                const prev1 = prevWbRound[i*2];
-                const prev2 = prevWbRound[i*2+1];
-                
+            for (let i = 0; i < count; i++) {
+                const matchId = `WB-R${r}-M${i + 1}`;
+                const prev1 = prevWbRound[i * 2];
+                const prev2 = prevWbRound[i * 2 + 1];
+
                 prev1.nextMatchId = matchId;
                 prev2.nextMatchId = matchId;
-                
+
                 let p1 = prev1.winner;
                 let p2 = prev2.winner;
                 let status = 'PENDING';
-                if(p1 && p2) status = 'READY';
+                if (p1 && p2) status = 'READY';
 
                 const m = {
                     id: matchId,
@@ -1365,7 +1365,7 @@ const generateMatches = async (key, type, participants) => {
 
         // 2. Generate Losers Bracket Logic (Mapped manually for 4, 8, 16 sizes for stability)
         const lbMatches = [];
-        
+
         // Helper to find match by ID
         const findMatch = (id) => matches.find(m => m.id === id);
 
@@ -1375,7 +1375,7 @@ const generateMatches = async (key, type, participants) => {
             const lbR1M1 = { id: `LB-R1-M1`, bracketGroup: 'losers', round: 1, matchIndex: 0, player1: null, player2: null, nextMatchId: 'LB-R2-M1' };
             findMatch('WB-R1-M1').loserNextMatchId = 'LB-R1-M1'; // WB R1 M1 Loser -> LB R1 M1 P1
             findMatch('WB-R1-M2').loserNextMatchId = 'LB-R1-M1'; // WB R1 M2 Loser -> LB R1 M1 P2
-            
+
             // LB R2 (Loser Finals) - Winner of LB R1 vs Loser of WB R2
             const lbR2M1 = { id: `LB-R2-M1`, bracketGroup: 'losers', round: 2, matchIndex: 0, player1: null, player2: null, nextMatchId: 'GF-M1' };
             findMatch('WB-R2-M1').loserNextMatchId = 'LB-R2-M1'; // WB Finals Loser -> LB Finals P2
@@ -1410,56 +1410,56 @@ const generateMatches = async (key, type, participants) => {
 
             // Redoing LB structure for 8 players standard:
             lbMatches.length = 0; // Clear
-            
+
             // Round 1 (WB R1 Losers)
-            lbMatches.push({ id: 'LB-R1-M1', bracketGroup: 'losers', round: 1, matchIndex: 0, nextMatchId: 'LB-R2-M1', player1:null, player2:null });
-            lbMatches.push({ id: 'LB-R1-M2', bracketGroup: 'losers', round: 1, matchIndex: 1, nextMatchId: 'LB-R2-M2', player1:null, player2:null });
-            
+            lbMatches.push({ id: 'LB-R1-M1', bracketGroup: 'losers', round: 1, matchIndex: 0, nextMatchId: 'LB-R2-M1', player1: null, player2: null });
+            lbMatches.push({ id: 'LB-R1-M2', bracketGroup: 'losers', round: 1, matchIndex: 1, nextMatchId: 'LB-R2-M2', player1: null, player2: null });
+
             findMatch('WB-R1-M1').loserNextMatchId = 'LB-R1-M1';
             findMatch('WB-R1-M2').loserNextMatchId = 'LB-R1-M1';
             findMatch('WB-R1-M3').loserNextMatchId = 'LB-R1-M2';
             findMatch('WB-R1-M4').loserNextMatchId = 'LB-R1-M2';
 
             // Round 2 (LB R1 Winners vs WB R2 Losers)
-            lbMatches.push({ id: 'LB-R2-M1', bracketGroup: 'losers', round: 2, matchIndex: 0, nextMatchId: 'LB-R3-M1', player1:null, player2:null });
-            lbMatches.push({ id: 'LB-R2-M2', bracketGroup: 'losers', round: 2, matchIndex: 1, nextMatchId: 'LB-R3-M1', player1:null, player2:null });
-            
+            lbMatches.push({ id: 'LB-R2-M1', bracketGroup: 'losers', round: 2, matchIndex: 0, nextMatchId: 'LB-R3-M1', player1: null, player2: null });
+            lbMatches.push({ id: 'LB-R2-M2', bracketGroup: 'losers', round: 2, matchIndex: 1, nextMatchId: 'LB-R3-M1', player1: null, player2: null });
+
             findMatch('WB-R2-M1').loserNextMatchId = 'LB-R2-M2'; // Cross seeding or direct
             findMatch('WB-R2-M2').loserNextMatchId = 'LB-R2-M1';
 
             // Round 3 (LB R2 Winners fight)
-            lbMatches.push({ id: 'LB-R3-M1', bracketGroup: 'losers', round: 3, matchIndex: 0, nextMatchId: 'LB-R4-M1', player1:null, player2:null });
+            lbMatches.push({ id: 'LB-R3-M1', bracketGroup: 'losers', round: 3, matchIndex: 0, nextMatchId: 'LB-R4-M1', player1: null, player2: null });
 
             // Round 4 (LB R3 Winner vs WB Finals Loser)
-            lbMatches.push({ id: 'LB-R4-M1', bracketGroup: 'losers', round: 4, matchIndex: 0, nextMatchId: 'GF-M1', player1:null, player2:null });
+            lbMatches.push({ id: 'LB-R4-M1', bracketGroup: 'losers', round: 4, matchIndex: 0, nextMatchId: 'GF-M1', player1: null, player2: null });
             findMatch('WB-R3-M1').loserNextMatchId = 'LB-R4-M1';
         }
         // --- 16 Players ---
         else if (size === 16) {
             // LB R1 (4 matches) - WB R1 Losers
-            for(let i=0; i<4; i++) {
-                lbMatches.push({ id: `LB-R1-M${i+1}`, bracketGroup: 'losers', round: 1, matchIndex: i, nextMatchId: `LB-R2-M${Math.ceil((i+1)/2)}` });
+            for (let i = 0; i < 4; i++) {
+                lbMatches.push({ id: `LB-R1-M${i + 1}`, bracketGroup: 'losers', round: 1, matchIndex: i, nextMatchId: `LB-R2-M${Math.ceil((i + 1) / 2)}` });
                 // Link WB R1 matches (0,1 -> 0 | 2,3 -> 1...)
-                findMatch(`WB-R1-M${i*2+1}`).loserNextMatchId = `LB-R1-M${i+1}`;
-                findMatch(`WB-R1-M${i*2+2}`).loserNextMatchId = `LB-R1-M${i+1}`;
+                findMatch(`WB-R1-M${i * 2 + 1}`).loserNextMatchId = `LB-R1-M${i + 1}`;
+                findMatch(`WB-R1-M${i * 2 + 2}`).loserNextMatchId = `LB-R1-M${i + 1}`;
             }
 
             // LB R2 (4 matches) - LB R1 Winners vs WB R2 Losers
-            for(let i=0; i<4; i++) {
-                lbMatches.push({ id: `LB-R2-M${i+1}`, bracketGroup: 'losers', round: 2, matchIndex: i, nextMatchId: `LB-R3-M${Math.ceil((i+1)/2)}` });
+            for (let i = 0; i < 4; i++) {
+                lbMatches.push({ id: `LB-R2-M${i + 1}`, bracketGroup: 'losers', round: 2, matchIndex: i, nextMatchId: `LB-R3-M${Math.ceil((i + 1) / 2)}` });
                 // Link WB R2 Losers (inverse order usually for seeding, doing direct for simplicity)
-                findMatch(`WB-R2-M${4-i}`).loserNextMatchId = `LB-R2-M${i+1}`; 
+                findMatch(`WB-R2-M${4 - i}`).loserNextMatchId = `LB-R2-M${i + 1}`;
             }
 
             // LB R3 (2 matches) - LB R2 Winners
-            for(let i=0; i<2; i++) {
-                lbMatches.push({ id: `LB-R3-M${i+1}`, bracketGroup: 'losers', round: 3, matchIndex: i, nextMatchId: `LB-R4-M${i+1}` }); // Direct mapping to R4
+            for (let i = 0; i < 2; i++) {
+                lbMatches.push({ id: `LB-R3-M${i + 1}`, bracketGroup: 'losers', round: 3, matchIndex: i, nextMatchId: `LB-R4-M${i + 1}` }); // Direct mapping to R4
             }
 
             // LB R4 (2 matches) - LB R3 Winners vs WB R3 Losers (Semis Losers)
-            for(let i=0; i<2; i++) {
-                lbMatches.push({ id: `LB-R4-M${i+1}`, bracketGroup: 'losers', round: 4, matchIndex: i, nextMatchId: `LB-R5-M1` });
-                findMatch(`WB-R3-M${2-i}`).loserNextMatchId = `LB-R4-M${i+1}`;
+            for (let i = 0; i < 2; i++) {
+                lbMatches.push({ id: `LB-R4-M${i + 1}`, bracketGroup: 'losers', round: 4, matchIndex: i, nextMatchId: `LB-R5-M1` });
+                findMatch(`WB-R3-M${2 - i}`).loserNextMatchId = `LB-R4-M${i + 1}`;
             }
 
             // LB R5 (1 match) - LB R4 Winners
@@ -1516,8 +1516,8 @@ app.get('/api/dev/tournament/bracket', async (req, res) => {
 
 // Generate Bracket from Locked Players
 app.post('/api/dev/tournament/generate', auth, async (req, res) => {
-    const { type, participants: manualParticipants } = req.body; 
-    
+    const { type, participants: manualParticipants } = req.body;
+
     try {
         let participants = [];
         if (manualParticipants && Array.isArray(manualParticipants)) {
@@ -1527,10 +1527,10 @@ app.post('/api/dev/tournament/generate', auth, async (req, res) => {
             players = players.sort(() => Math.random() - 0.5);
             participants = players.map(p => p.minecraftUsername);
         }
-        
+
         await generateMatches('main', type || 'SINGLE_ELIMINATION', participants);
         res.json({ success: true, message: `Bracket generated with ${participants.length} players.` });
-        
+
     } catch (e) {
         console.error(e);
         res.status(500).json({ error: "Generation failed" });
@@ -1540,32 +1540,32 @@ app.post('/api/dev/tournament/generate', auth, async (req, res) => {
 // Update Match Result
 app.post('/api/dev/tournament/match/update', auth, async (req, res) => {
     const { matchId, winner, score, player1, player2 } = req.body;
-    
+
     try {
         const bracket = await TournamentBracket.findOne({ key: 'main' });
         if (!bracket) return res.status(404).json({ error: "No bracket found" });
-        
+
         const matchIndex = bracket.matches.findIndex(m => m.id === matchId);
         if (matchIndex === -1) return res.status(404).json({ error: "Match not found" });
-        
+
         const match = bracket.matches[matchIndex];
-        
+
         // Update fields if provided
         if (player1 !== undefined) match.player1 = player1;
         if (player2 !== undefined) match.player2 = player2;
         if (winner !== undefined) match.winner = winner;
         if (score !== undefined) match.score = score;
-        
+
         // Auto status update if players set
         if (match.player1 && match.player2 && match.status === 'PENDING') {
-             match.status = 'READY';
+            match.status = 'READY';
         }
-        
+
         // If winner set, mark completed
         if (match.winner) match.status = 'COMPLETED';
-        
+
         // Propagate to next matches
-        
+
         // 1. Winner Progression
         if (match.nextMatchId) {
             const nextMatch = bracket.matches.find(m => m.id === match.nextMatchId);
@@ -1590,7 +1590,7 @@ app.post('/api/dev/tournament/match/update', auth, async (req, res) => {
         if (match.loserNextMatchId && match.player1 && match.player2 && match.winner) {
             const loser = match.winner === match.player1 ? match.player2 : match.player1;
             const loserMatch = bracket.matches.find(m => m.id === match.loserNextMatchId);
-            
+
             if (loserMatch) {
                 // Logic to place loser into empty slot. 
                 // Simple logic: fill p1 if empty, else p2.
@@ -1602,11 +1602,11 @@ app.post('/api/dev/tournament/match/update', auth, async (req, res) => {
                 if (loserMatch.player1 && loserMatch.player2) loserMatch.status = 'READY';
             }
         }
-        
+
         // Save the *parent* document, not the subdocument directly
-        bracket.markModified('matches'); 
+        bracket.markModified('matches');
         await bracket.save();
-        
+
         res.json({ success: true });
     } catch (e) {
         console.error(e);
@@ -1619,7 +1619,7 @@ app.post('/api/dev/tournament/clear', auth, async (req, res) => {
     try {
         await TournamentBracket.deleteMany({ key: 'main' });
         res.json({ success: true });
-    } catch(e) {
+    } catch (e) {
         res.status(500).json({ error: "Failed" });
     }
 });
@@ -1629,11 +1629,11 @@ app.post('/api/dev/tournament/inject-players', auth, async (req, res) => {
     const { count } = req.body;
     try {
         const dummies = [];
-        for(let i=0; i<count; i++) {
+        for (let i = 0; i < count; i++) {
             const id = `dummy-${Date.now()}-${i}`;
             dummies.push({
                 discordId: id,
-                minecraftUsername: `Player_${Math.floor(Math.random()*1000)}`,
+                minecraftUsername: `Player_${Math.floor(Math.random() * 1000)}`,
                 team: new Array(6).fill(null), // Empty team is fine for bracket testing logic
                 isLocked: true, // Auto-lock to be eligible
                 isDev: true, // Marked as Dev Player
@@ -1642,7 +1642,7 @@ app.post('/api/dev/tournament/inject-players', auth, async (req, res) => {
         }
         await TournamentEntry.insertMany(dummies);
         res.json({ success: true, count: dummies.length });
-    } catch(e) {
+    } catch (e) {
         res.status(500).json({ error: "Failed" });
     }
 });
@@ -1666,8 +1666,8 @@ app.get('/api/tournament/bracket', async (req, res) => {
 
 // Generate Bracket (Production)
 app.post('/api/admin/tournament/generate', auth, async (req, res) => {
-    const { type, participants: manualParticipants } = req.body; 
-    
+    const { type, participants: manualParticipants } = req.body;
+
     try {
         let participants = [];
         if (manualParticipants && Array.isArray(manualParticipants)) {
@@ -1677,10 +1677,10 @@ app.post('/api/admin/tournament/generate', auth, async (req, res) => {
             players = players.sort(() => Math.random() - 0.5);
             participants = players.map(p => p.minecraftUsername);
         }
-        
+
         await generateMatches('production', type || 'SINGLE_ELIMINATION', participants);
         res.json({ success: true, message: `Production bracket generated with ${participants.length} players.` });
-        
+
     } catch (e) {
         console.error(e);
         res.status(500).json({ error: "Generation failed" });
@@ -1690,26 +1690,26 @@ app.post('/api/admin/tournament/generate', auth, async (req, res) => {
 // Update Match Result (Production)
 app.post('/api/admin/tournament/match/update', auth, async (req, res) => {
     const { matchId, winner, score, player1, player2 } = req.body;
-    
+
     try {
         const bracket = await TournamentBracket.findOne({ key: 'production' });
         if (!bracket) return res.status(404).json({ error: "No bracket found" });
-        
+
         const matchIndex = bracket.matches.findIndex(m => m.id === matchId);
         if (matchIndex === -1) return res.status(404).json({ error: "Match not found" });
-        
+
         const match = bracket.matches[matchIndex];
-        
+
         if (player1 !== undefined) match.player1 = player1;
         if (player2 !== undefined) match.player2 = player2;
         if (winner !== undefined) match.winner = winner;
         if (score !== undefined) match.score = score;
-        
+
         if (match.player1 && match.player2 && match.status === 'PENDING') {
-             match.status = 'READY';
+            match.status = 'READY';
         }
         if (match.winner) match.status = 'COMPLETED';
-        
+
         // Progression Logic
         if (match.nextMatchId) {
             const nextMatch = bracket.matches.find(m => m.id === match.nextMatchId);
@@ -1737,10 +1737,10 @@ app.post('/api/admin/tournament/match/update', auth, async (req, res) => {
                 if (loserMatch.player1 && loserMatch.player2) loserMatch.status = 'READY';
             }
         }
-        
-        bracket.markModified('matches'); 
+
+        bracket.markModified('matches');
         await bracket.save();
-        
+
         res.json({ success: true });
     } catch (e) {
         console.error(e);
@@ -1753,10 +1753,364 @@ app.post('/api/admin/tournament/clear', auth, async (req, res) => {
     try {
         await TournamentBracket.deleteMany({ key: 'production' });
         res.json({ success: true });
-    } catch(e) {
+    } catch (e) {
         res.status(500).json({ error: "Failed" });
     }
 });
+
+// ==========================================
+// COBBLEMON RANKED SYSTEM
+// ==========================================
+
+// Ranked Player Schema
+const RankedPlayer = mongoose.model('RankedPlayer', new mongoose.Schema({
+    uuid: { type: String, required: true, unique: true },
+    minecraftName: { type: String, required: true },
+    elo: { type: Number, default: 0 },
+    wins: { type: Number, default: 0 },
+    losses: { type: Number, default: 0 },
+    tier: { type: String, default: 'DIRT' },
+    totalKOs: { type: Number, default: 0 },
+    totalDeaths: { type: Number, default: 0 },
+    winStreak: { type: Number, default: 0 },
+    bestWinStreak: { type: Number, default: 0 },
+    lastMatchAt: { type: Date, default: null },
+    createdAt: { type: Date, default: Date.now },
+    updatedAt: { type: Date, default: Date.now }
+}));
+
+// Ranked Match Schema
+const RankedMatch = mongoose.model('RankedMatch', new mongoose.Schema({
+    winnerUuid: { type: String, required: true },
+    winnerName: { type: String, required: true },
+    loserUuid: { type: String, required: true },
+    loserName: { type: String, required: true },
+    winnerAlivePokemon: { type: Number, default: 0 },
+    winnerTotalPokemon: { type: Number, default: 0 },
+    loserAlivePokemon: { type: Number, default: 0 },
+    loserTotalPokemon: { type: Number, default: 0 },
+    winnerKOs: { type: Number, default: 0 },
+    loserKOs: { type: Number, default: 0 },
+    battleType: { type: String, default: '1v1' }, // '1v1' or '2v2'
+    endReason: { type: String, default: 'normal' }, // 'normal', 'forfeit', 'disconnect'
+    winnerEloChange: { type: Number, default: 0 },
+    loserEloChange: { type: Number, default: 0 },
+    winnerEloBefore: { type: Number, default: 0 },
+    loserEloBefore: { type: Number, default: 0 },
+    createdAt: { type: Date, default: Date.now }
+}));
+
+// Tier definitions
+const TIERS = {
+    DIRT: { name: 'Dirt', minElo: 0, color: '#8B4513' },
+    CASUAL: { name: 'Casual', minElo: 0, minWins: 1, color: '#808080' },
+    OMEGA: { name: 'Omega', minElo: 1000, color: '#00FF00' },
+    BETA: { name: 'Beta', minElo: 1200, color: '#0066FF' },
+    ALPHA: { name: 'Alpha', minElo: 1400, color: '#9900FF' },
+    LEGENDARY: { name: 'Legendary', minElo: 1600, color: '#FFD700' },
+    MYTHIC: { name: 'Mythic', minElo: 1800, color: '#FF69B4' },
+    ETERNAL: { name: 'Eternal', minElo: 2000, color: '#FF0000' }
+};
+
+// Calculate tier from ELO and wins
+const calculateTier = (elo, wins) => {
+    if (wins === 0) return 'DIRT';
+    if (elo >= 2000) return 'ETERNAL';
+    if (elo >= 1800) return 'MYTHIC';
+    if (elo >= 1600) return 'LEGENDARY';
+    if (elo >= 1400) return 'ALPHA';
+    if (elo >= 1200) return 'BETA';
+    if (elo >= 1000) return 'OMEGA';
+    return 'CASUAL';
+};
+
+// Custom ELO calculation with bonuses
+const calculateEloChange = (winnerElo, loserElo, result) => {
+    const K = 32; // Base K-factor
+
+    // Expected score for winner
+    const expectedWinner = 1 / (1 + Math.pow(10, (loserElo - winnerElo) / 400));
+    const expectedLoser = 1 - expectedWinner;
+
+    // Base ELO change
+    let baseWinnerChange = K * (1 - expectedWinner);
+    let baseLoserChange = K * (0 - expectedLoser);
+
+    // Alive Pokemon bonus for winner (0-5 points)
+    let aliveBonus = 0;
+    if (result.winnerTotalPokemon > 0) {
+        aliveBonus = (result.winnerAlivePokemon / result.winnerTotalPokemon) * 5;
+    }
+
+    // KO bonus for winner (0-5 points based on how many opponent Pokemon KO'd)
+    let koBonus = 0;
+    if (result.loserTotalPokemon > 0) {
+        koBonus = (result.winnerKOs / result.loserTotalPokemon) * 5;
+    }
+
+    // Format multiplier (2v2 battles slightly higher stakes)
+    const formatMultiplier = result.battleType === '2v2' ? 1.1 : 1.0;
+
+    // End reason modifiers
+    let winnerMultiplier = 1.0;
+    let loserMultiplier = 1.0;
+
+    if (result.endReason === 'forfeit') {
+        winnerMultiplier = 0.5; // Winner gets half ELO
+        loserMultiplier = 1.5; // Loser loses 1.5x
+    } else if (result.endReason === 'disconnect') {
+        winnerMultiplier = 0; // No ELO for winner
+        loserMultiplier = 1.0; // Normal loss for disconnector
+    }
+
+    // Calculate final changes
+    const winnerChange = Math.round((baseWinnerChange * formatMultiplier + aliveBonus + koBonus) * winnerMultiplier);
+    const loserChange = Math.round(baseLoserChange * formatMultiplier * loserMultiplier);
+
+    return { winnerChange, loserChange };
+};
+
+// Submit Match Result (from Mod)
+app.post('/api/ranked/match', async (req, res) => {
+    // API Authentication
+    const apiKey = req.headers['x-api-key'];
+    const validKey = process.env.RANKED_API_KEY || 'urnisa-ranked-api-key-2024';
+
+    if (apiKey !== validKey) {
+        return res.status(401).json({ error: 'Unauthorized: Invalid API Key' });
+    }
+
+    try {
+        const {
+            winnerUuid, winnerName, loserUuid, loserName,
+            winnerAlivePokemon, winnerTotalPokemon,
+            loserAlivePokemon, loserTotalPokemon,
+            winnerKOs, loserKOs, battleType, endReason
+        } = req.body;
+
+        if (!winnerUuid || !loserUuid) {
+            return res.status(400).json({ error: 'Missing required fields' });
+        }
+
+        // Get or create players
+        let winner = await RankedPlayer.findOne({ uuid: winnerUuid });
+        let loser = await RankedPlayer.findOne({ uuid: loserUuid });
+
+        if (!winner) {
+            winner = await RankedPlayer.create({ uuid: winnerUuid, minecraftName: winnerName });
+        }
+        if (!loser) {
+            loser = await RankedPlayer.create({ uuid: loserUuid, minecraftName: loserName });
+        }
+
+        // Update names in case they changed
+        if (winnerName) winner.minecraftName = winnerName;
+        if (loserName) loser.minecraftName = loserName;
+
+        // Calculate ELO changes
+        const eloChanges = calculateEloChange(winner.elo, loser.elo, {
+            winnerAlivePokemon: winnerAlivePokemon || 0,
+            winnerTotalPokemon: winnerTotalPokemon || 1,
+            loserTotalPokemon: loserTotalPokemon || 1,
+            winnerKOs: winnerKOs || 0,
+            battleType: battleType || '1v1',
+            endReason: endReason || 'normal'
+        });
+
+        // Store ELO before changes
+        const winnerEloBefore = winner.elo;
+        const loserEloBefore = loser.elo;
+
+        // Update winner
+        winner.elo = Math.max(0, winner.elo + eloChanges.winnerChange);
+        winner.wins += 1;
+        winner.winStreak += 1;
+        winner.bestWinStreak = Math.max(winner.bestWinStreak, winner.winStreak);
+        winner.totalKOs += (winnerKOs || 0);
+        winner.totalDeaths += (winnerTotalPokemon - winnerAlivePokemon) || 0;
+        winner.tier = calculateTier(winner.elo, winner.wins);
+        winner.lastMatchAt = new Date();
+        winner.updatedAt = new Date();
+
+        // Update loser
+        loser.elo = Math.max(0, loser.elo + eloChanges.loserChange);
+        loser.losses += 1;
+        loser.winStreak = 0;
+        loser.totalKOs += (loserKOs || 0);
+        loser.totalDeaths += (loserTotalPokemon - loserAlivePokemon) || 0;
+        loser.tier = calculateTier(loser.elo, loser.wins);
+        loser.lastMatchAt = new Date();
+        loser.updatedAt = new Date();
+
+        await winner.save();
+        await loser.save();
+
+        // Record match
+        const match = await RankedMatch.create({
+            winnerUuid, winnerName, loserUuid, loserName,
+            winnerAlivePokemon, winnerTotalPokemon,
+            loserAlivePokemon, loserTotalPokemon,
+            winnerKOs, loserKOs, battleType, endReason,
+            winnerEloChange: eloChanges.winnerChange,
+            loserEloChange: eloChanges.loserChange,
+            winnerEloBefore, loserEloBefore
+        });
+
+        console.log(`🏆 Ranked Match: ${winnerName} (+${eloChanges.winnerChange}) defeated ${loserName} (${eloChanges.loserChange})`);
+
+        res.json({
+            success: true,
+            winnerElo: winner.elo,
+            loserElo: loser.elo,
+            winnerWins: winner.wins,
+            loserLosses: loser.losses,
+            winnerEloChange: eloChanges.winnerChange,
+            loserEloChange: eloChanges.loserChange,
+            winnerTier: winner.tier,
+            loserTier: loser.tier,
+            matchId: match._id
+        });
+    } catch (e) {
+        console.error('Ranked match error:', e);
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// Get Leaderboard
+app.get('/api/ranked/leaderboard', async (req, res) => {
+    try {
+        const limit = Math.min(parseInt(req.query.limit) || 50, 1000);
+        const offset = parseInt(req.query.offset) || 0;
+
+        const players = await RankedPlayer.find({ wins: { $gt: 0 } })
+            .sort({ elo: -1, wins: -1 })
+            .skip(offset)
+            .limit(limit)
+            .select('uuid minecraftName elo wins losses tier winStreak bestWinStreak');
+
+        const total = await RankedPlayer.countDocuments({ wins: { $gt: 0 } });
+
+        const leaderboard = players.map((p, i) => ({
+            rank: offset + i + 1,
+            uuid: p.uuid,
+            minecraftName: p.minecraftName,
+            elo: p.elo,
+            wins: p.wins,
+            losses: p.losses,
+            tier: p.tier,
+            tierInfo: TIERS[p.tier] || TIERS.DIRT,
+            winRate: p.wins + p.losses > 0 ? Math.round((p.wins / (p.wins + p.losses)) * 100) : 0,
+            winStreak: p.winStreak,
+            bestWinStreak: p.bestWinStreak
+        }));
+
+        res.json({ players: leaderboard, total, tiers: TIERS });
+    } catch (e) {
+        console.error('Leaderboard error:', e);
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// Get Player Profile
+app.get('/api/ranked/player/:uuid', async (req, res) => {
+    try {
+        const player = await RankedPlayer.findOne({ uuid: req.params.uuid });
+        if (!player) {
+            return res.json({
+                uuid: req.params.uuid,
+                elo: 0, wins: 0, losses: 0, tier: 'DIRT',
+                tierInfo: TIERS.DIRT
+            });
+        }
+
+        // Get rank position
+        const rank = await RankedPlayer.countDocuments({
+            $or: [
+                { elo: { $gt: player.elo } },
+                { elo: player.elo, wins: { $gt: player.wins } }
+            ],
+            wins: { $gt: 0 }
+        }) + 1;
+
+        res.json({
+            uuid: player.uuid,
+            minecraftName: player.minecraftName,
+            elo: player.elo,
+            wins: player.wins,
+            losses: player.losses,
+            tier: player.tier,
+            tierInfo: TIERS[player.tier] || TIERS.DIRT,
+            rank: player.wins > 0 ? rank : null,
+            winRate: player.wins + player.losses > 0 ?
+                Math.round((player.wins / (player.wins + player.losses)) * 100) : 0,
+            winStreak: player.winStreak,
+            bestWinStreak: player.bestWinStreak,
+            totalKOs: player.totalKOs,
+            totalDeaths: player.totalDeaths,
+            lastMatchAt: player.lastMatchAt
+        });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// Get Player Match History
+app.get('/api/ranked/player/:uuid/history', async (req, res) => {
+    try {
+        const limit = Math.min(parseInt(req.query.limit) || 20, 100);
+
+        const matches = await RankedMatch.find({
+            $or: [
+                { winnerUuid: req.params.uuid },
+                { loserUuid: req.params.uuid }
+            ]
+        }).sort({ createdAt: -1 }).limit(limit);
+
+        const history = matches.map(m => ({
+            id: m._id,
+            isWin: m.winnerUuid === req.params.uuid,
+            opponent: m.winnerUuid === req.params.uuid ? m.loserName : m.winnerName,
+            opponentUuid: m.winnerUuid === req.params.uuid ? m.loserUuid : m.winnerUuid,
+            eloChange: m.winnerUuid === req.params.uuid ? m.winnerEloChange : m.loserEloChange,
+            battleType: m.battleType,
+            endReason: m.endReason,
+            date: m.createdAt
+        }));
+
+        res.json(history);
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// Get Player Rank (for in-game display)
+app.get('/api/ranked/player/:uuid/rank', async (req, res) => {
+    try {
+        const player = await RankedPlayer.findOne({ uuid: req.params.uuid });
+        if (!player) {
+            return res.json({ tier: 'DIRT', tierInfo: TIERS.DIRT, elo: 0 });
+        }
+        res.json({
+            tier: player.tier,
+            tierInfo: TIERS[player.tier] || TIERS.DIRT,
+            elo: player.elo
+        });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// Admin: Reset Ranked Data
+app.post('/api/ranked/reset', auth, async (req, res) => {
+    try {
+        await RankedPlayer.deleteMany({});
+        await RankedMatch.deleteMany({});
+        res.json({ success: true, message: 'All ranked data cleared' });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
 
 // START
 if (MONGO_URI) {
@@ -1766,14 +2120,14 @@ if (MONGO_URI) {
             console.log("✅ MongoDB Ready");
             app.listen(PORT, async () => {
                 console.log(`✅ Server on ${PORT}`);
-                
+
                 await resolveChannelId();
                 connectSocket();
-                
+
                 console.log("🚀 Startup Deep Sync...");
                 await runSync(true);
                 setInterval(() => runSync(false), 30000);
-                setInterval(() => { axios.get('https://urnisa-backend-21ls.onrender.com').catch(()=>{}) }, 300000);
+                setInterval(() => { axios.get('https://urnisa-backend-21ls.onrender.com').catch(() => { }) }, 300000);
             });
         })
         .catch(e => console.error("❌ DB Fail:", e));
