@@ -1802,19 +1802,22 @@ const RankedMatch = mongoose.model('RankedMatch', new mongoose.Schema({
 
 // Tier definitions
 const TIERS = {
-    DIRT: { name: 'Dirt', minElo: 0, color: '#8B4513' },
-    CASUAL: { name: 'Casual', minElo: 0, minWins: 1, color: '#808080' },
-    OMEGA: { name: 'Omega', minElo: 1000, color: '#00FF00' },
-    BETA: { name: 'Beta', minElo: 1200, color: '#0066FF' },
-    ALPHA: { name: 'Alpha', minElo: 1400, color: '#9900FF' },
-    LEGENDARY: { name: 'Legendary', minElo: 1600, color: '#FFD700' },
-    MYTHIC: { name: 'Mythic', minElo: 1800, color: '#FF69B4' },
-    ETERNAL: { name: 'Eternal', minElo: 2000, color: '#FF0000' }
+    UNRANKED: { name: 'Unranked', minElo: 0, minWins: 0, color: '#666666' },
+    DIRT: { name: 'Dirt', minElo: 0, minWins: 1, color: '#D2691E' },      // Light brown
+    CASUAL: { name: 'Casual', minElo: 0, minWins: 2, color: '#808080' },  // Gray
+    OMEGA: { name: 'Omega', minElo: 1000, color: '#55FF55' },
+    BETA: { name: 'Beta', minElo: 1200, color: '#5555FF' },
+    ALPHA: { name: 'Alpha', minElo: 1400, color: '#AA00AA' },
+    LEGENDARY: { name: 'Legendary', minElo: 1600, color: '#FFFF55' },     // Yellow (changed from gold)
+    MYTHIC: { name: 'Mythic', minElo: 1800, color: '#FF55FF' },
+    ETERNAL: { name: 'Eternal', minElo: 2000, color: '#FF5555' }
 };
 
 // Calculate tier from ELO and wins
+// 0 wins = UNRANKED, 1 win = DIRT, >1 win <1000 ELO = CASUAL, then ELO-based
 const calculateTier = (elo, wins) => {
-    if (wins === 0) return 'DIRT';
+    if (wins === 0) return 'UNRANKED';
+    if (wins === 1) return 'DIRT';
     if (elo >= 2000) return 'ETERNAL';
     if (elo >= 1800) return 'MYTHIC';
     if (elo >= 1600) return 'LEGENDARY';
