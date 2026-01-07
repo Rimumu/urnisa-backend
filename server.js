@@ -2352,8 +2352,9 @@ app.post('/api/ranked/match', async (req, res) => {
         }
 
         // Fire-and-forget call to Discord Bot to sync ranks immediately
-        const botPort = process.env.BOT_PORT || 3002;
-        axios.post(`http://localhost:${botPort}/api/internal/sync-ranks`)
+        // On Render, we must use the remote URL provided in env, else fallback to localhost
+        const botUrl = process.env.BOT_API_URL || `http://localhost:${process.env.BOT_PORT || 3002}`;
+        axios.post(`${botUrl}/api/internal/sync-ranks`)
             .catch(err => console.error("⚠️ Failed to trigger Bot Rank Sync:", err.message));
 
         res.json({
