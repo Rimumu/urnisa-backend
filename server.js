@@ -1861,6 +1861,77 @@ const DailyStats = mongoose.model('DailyStats', new mongoose.Schema({
 
 DailyStats.collection.createIndex({ playerUuid: 1, date: 1 }, { unique: true });
 
+// Ranked Ban Schema - persistent bans
+const RankedBan = mongoose.model('RankedBan', new mongoose.Schema({
+    playerUuid: { type: String, required: true, unique: true },
+    playerName: { type: String },
+    reason: { type: String, default: 'Manual ban' },
+    bannedBy: { type: String }, // UUID or 'SYSTEM' for auto-bans
+    bannedAt: { type: Date, default: Date.now },
+    expiresAt: { type: Date, default: null }, // null = permanent
+    isPermanent: { type: Boolean, default: false }
+}));
+
+// Forfeit History Schema - tracks recent forfeits for abuse detection
+const ForfeitHistory = mongoose.model('ForfeitHistory', new mongoose.Schema({
+    playerUuid: { type: String, required: true },
+    matchId: { type: String },
+    opponent: { type: String },
+    forfeitedAt: { type: Date, default: Date.now }
+}));
+
+ForfeitHistory.collection.createIndex({ playerUuid: 1, forfeitedAt: -1 });
+
+// Helper function to check if player is banned
+const isPlayerBanned = async (playerUuid) => {
+    const ban = await RankedBan.findOne({ playerUuid });
+    if (!ban) return { banned: false };
+
+    // Check if ban has expired
+    if (ban.expiresAt && new Date() > ban.expiresAt) {
+        await RankedBan.deleteOne({ playerUuid });
+        return { banned: false };
+    }
+
+    return {
+        banned: true,
+        reason: ban.reason,
+        expiresAt: ban.expiresAt,
+        isPermanent: ban.isPermanent
+    };
+};
+
+// Helper function to check and apply forfeit abuse ban
+const checkForfeitAbuse = async (playerUuid, playerName) => {
+    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
+
+    // Get recent forfeits (last hour)
+    const recentForfeits = await ForfeitHistory.find({
+        playerUuid,
+        forfeitedAt: { $gte: oneHourAgo }
+    }).sort({ forfeitedAt: -1 });
+
+    // If 3 or more forfeits in last hour, auto-ban for 24 hours
+    if (recentForfeits.length >= 3) {
+        const existingBan = await RankedBan.findOne({ playerUuid });
+        if (!existingBan) {
+            await RankedBan.create({
+                playerUuid,
+                playerName,
+                reason: 'Auto-ban: 3 forfeits within 1 hour',
+                bannedBy: 'SYSTEM',
+                expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000), // 24 hours
+                isPermanent: false
+            });
+            console.log(`🚫 Auto-banned ${playerName} for 24h (forfeit abuse)`);
+            return { banned: true, duration: '24 hours' };
+        }
+    }
+
+    return { banned: false };
+};
+
+
 // Anti-Abuse Helper Functions
 
 /**
@@ -2218,6 +2289,24 @@ app.post('/api/ranked/match', async (req, res) => {
         if (winnerUniqueBonus.bonusApplied) logMsg += ` [Unique Opponent Bonus!]`;
         console.log(logMsg);
 
+        // Track forfeits for abuse detection
+        let forfeitBan = null;
+        if (endReason === 'forfeit') {
+            // Record this forfeit
+            await ForfeitHistory.create({
+                playerUuid: loserUuid,
+                matchId: match._id.toString(),
+                opponent: winnerUuid
+            });
+
+            // Check if this triggers an auto-ban
+            forfeitBan = await checkForfeitAbuse(loserUuid, loserName);
+
+            // Clean up old forfeit records (older than 12 hours)
+            const twelveHoursAgo = new Date(Date.now() - 12 * 60 * 60 * 1000);
+            await ForfeitHistory.deleteMany({ forfeitedAt: { $lt: twelveHoursAgo } });
+        }
+
         res.json({
             success: true,
             winnerElo: winner.elo,
@@ -2235,11 +2324,130 @@ app.post('/api/ranked/match', async (req, res) => {
                 sameOpponentCount: winnerDiminishing.matchCount + 1,
                 eloRangeReduced: eloRangePenalty.reduced,
                 uniqueOpponentBonus: winnerUniqueBonus.bonusApplied,
-                uniqueOpponentsToday: winnerUniqueBonus.uniqueCount
+                uniqueOpponentsToday: winnerUniqueBonus.uniqueCount,
+                forfeitBan: forfeitBan
             }
         });
     } catch (e) {
         console.error('Ranked match error:', e);
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// === BAN MANAGEMENT ENDPOINTS ===
+
+// Check if player is banned (for mod to call)
+app.get('/api/ranked/ban/:uuid', async (req, res) => {
+    try {
+        const { uuid } = req.params;
+        const banStatus = await isPlayerBanned(uuid);
+        res.json(banStatus);
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// Ban a player (requires API key)
+app.post('/api/ranked/ban', async (req, res) => {
+    try {
+        const { apiKey, playerUuid, playerName, reason, duration, bannedBy, isPermanent } = req.body;
+
+        const configApiKey = process.env.RANKED_API_KEY || 'your-api-key-here';
+        if (apiKey !== configApiKey) {
+            return res.status(403).json({ error: 'Invalid API key' });
+        }
+
+        // Check if already banned
+        const existing = await RankedBan.findOne({ playerUuid });
+        if (existing) {
+            return res.json({ success: false, message: 'Player is already banned' });
+        }
+
+        // Calculate expiry
+        let expiresAt = null;
+        if (!isPermanent && duration) {
+            expiresAt = new Date(Date.now() + duration * 60 * 60 * 1000); // duration in hours
+        }
+
+        await RankedBan.create({
+            playerUuid,
+            playerName: playerName || 'Unknown',
+            reason: reason || 'Manual ban',
+            bannedBy: bannedBy || 'OP',
+            expiresAt,
+            isPermanent: isPermanent || false
+        });
+
+        console.log(`🚫 ${playerName} banned from ranked by ${bannedBy} - Reason: ${reason}`);
+
+        res.json({
+            success: true,
+            expiresAt,
+            isPermanent: isPermanent || false
+        });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// Unban a player (requires API key)
+app.delete('/api/ranked/ban/:uuid', async (req, res) => {
+    try {
+        const { uuid } = req.params;
+        const { apiKey, unbannedBy } = req.body;
+
+        const configApiKey = process.env.RANKED_API_KEY || 'your-api-key-here';
+        if (apiKey !== configApiKey) {
+            return res.status(403).json({ error: 'Invalid API key' });
+        }
+
+        const ban = await RankedBan.findOneAndDelete({ playerUuid: uuid });
+
+        if (!ban) {
+            return res.json({ success: false, message: 'Player is not banned' });
+        }
+
+        console.log(`✅ ${ban.playerName} unbanned from ranked by ${unbannedBy || 'OP'}`);
+
+        res.json({
+            success: true,
+            playerName: ban.playerName
+        });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// List all active bans (requires API key)
+app.get('/api/ranked/bans', async (req, res) => {
+    try {
+        const { apiKey } = req.query;
+
+        const configApiKey = process.env.RANKED_API_KEY || 'your-api-key-here';
+        if (apiKey !== configApiKey) {
+            return res.status(403).json({ error: 'Invalid API key' });
+        }
+
+        // Clean up expired bans first
+        await RankedBan.deleteMany({
+            expiresAt: { $ne: null, $lt: new Date() }
+        });
+
+        const bans = await RankedBan.find({}).sort({ bannedAt: -1 });
+
+        res.json({
+            count: bans.length,
+            bans: bans.map(b => ({
+                uuid: b.playerUuid,
+                name: b.playerName,
+                reason: b.reason,
+                bannedBy: b.bannedBy,
+                bannedAt: b.bannedAt,
+                expiresAt: b.expiresAt,
+                isPermanent: b.isPermanent
+            }))
+        });
+    } catch (e) {
         res.status(500).json({ error: e.message });
     }
 });
