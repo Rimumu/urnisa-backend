@@ -2169,6 +2169,39 @@ app.post('/api/ranked/match', async (req, res) => {
         if (winnerName) winner.minecraftName = winnerName;
         if (loserName) loser.minecraftName = loserName;
 
+        // === TIMEOUT DRAW HANDLING ===
+        // If battle timed out, record as draw with 0 ELO changes
+        if (endReason === 'timeout') {
+            const match = await RankedMatch.create({
+                winnerUuid: winnerUuid,
+                winnerName: winnerName,
+                loserUuid: loserUuid,
+                loserName: loserName,
+                winnerEloChange: 0,
+                loserEloChange: 0,
+                winnerEloBefore: winner.elo,
+                loserEloBefore: loser.elo,
+                winnerEloAfter: winner.elo,
+                loserEloAfter: loser.elo,
+                winnerAlivePokemon: 0,
+                winnerTotalPokemon: winnerTotalPokemon || 0,
+                loserAlivePokemon: 0,
+                loserTotalPokemon: loserTotalPokemon || 0,
+                battleType: battleType || '1v1',
+                endReason: 'timeout'
+            });
+
+            console.log(`⏱️ Timeout draw recorded: ${winnerName} vs ${loserName}`);
+
+            return res.status(200).json({
+                success: true,
+                matchId: match._id,
+                draw: true,
+                reason: 'timeout',
+                message: 'Battle timed out - no ELO changes'
+            });
+        }
+
         // === ANTI-ABUSE CHECKS ===
 
         // 1. Diminishing returns for same opponent (resets after 12 hours)
