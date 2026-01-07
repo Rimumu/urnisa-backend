@@ -2502,13 +2502,13 @@ app.get('/api/ranked/leaderboard', async (req, res) => {
         const limit = Math.min(parseInt(req.query.limit) || 50, 1000);
         const offset = parseInt(req.query.offset) || 0;
 
-        const players = await RankedPlayer.find({ wins: { $gt: 0 } })
+        const players = await RankedPlayer.find({})
             .sort({ elo: -1, wins: -1 })
             .skip(offset)
             .limit(limit)
             .select('uuid minecraftName elo wins losses tier winStreak bestWinStreak');
 
-        const total = await RankedPlayer.countDocuments({ wins: { $gt: 0 } });
+        const total = await RankedPlayer.countDocuments({});
 
         const leaderboard = players.map((p, i) => ({
             rank: offset + i + 1,
