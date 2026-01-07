@@ -1768,7 +1768,7 @@ const RankedPlayer = mongoose.model('RankedPlayer', new mongoose.Schema({
     minecraftName: { type: String, required: true },
 
     // === COMBINED STATS (ACTIVE - used for current leaderboard) ===
-    elo: { type: Number, default: 0 },
+    elo: { type: Number, default: 1000 },
     wins: { type: Number, default: 0 },
     losses: { type: Number, default: 0 },
     tier: { type: String, default: 'UNRANKED' },
@@ -1778,7 +1778,7 @@ const RankedPlayer = mongoose.model('RankedPlayer', new mongoose.Schema({
     bestWinStreak: { type: Number, default: 0 },
 
     // === 1v1 STATS (INACTIVE - for future separate leaderboard) ===
-    elo1v1: { type: Number, default: 0 },
+    elo1v1: { type: Number, default: 1000 },
     wins1v1: { type: Number, default: 0 },
     losses1v1: { type: Number, default: 0 },
     tier1v1: { type: String, default: 'UNRANKED' },
@@ -1786,7 +1786,7 @@ const RankedPlayer = mongoose.model('RankedPlayer', new mongoose.Schema({
     bestWinStreak1v1: { type: Number, default: 0 },
 
     // === 2v2 STATS (INACTIVE - for future separate leaderboard) ===
-    elo2v2: { type: Number, default: 0 },
+    elo2v2: { type: Number, default: 1000 },
     wins2v2: { type: Number, default: 0 },
     losses2v2: { type: Number, default: 0 },
     tier2v2: { type: String, default: 'UNRANKED' },
@@ -1960,11 +1960,14 @@ const getDiminishingMultiplier = async (playerUuid, opponentUuid) => {
     }
 
     // Calculate multiplier based on match count
+    // Relaxed for small server: First 2 matches are 100%, then tapers off
+    // 0 = 1st match, 1 = 2nd match
     const count = history.matchCount;
     let multiplier = 1.0;
-    if (count === 1) multiplier = 0.75;
-    else if (count === 2) multiplier = 0.50;
-    else if (count >= 3) multiplier = 0.25;
+
+    if (count <= 1) multiplier = 1.0;        // 1st & 2nd match: 100%
+    else if (count <= 3) multiplier = 0.50;  // 3rd & 4th match: 50%
+    else multiplier = 0.25;                  // 5th+ match: 25%
 
     return { multiplier, matchCount: count };
 };
@@ -2058,36 +2061,44 @@ const getEloRangePenalty = (winnerElo, loserElo) => {
     }
 };
 
-// Tier definitions
+// Tier definitions - Fast Track for Small Server
+// Tier definitions - Adjusted for specific progression timeline
 const TIERS = {
     UNRANKED: { name: 'Unranked', minElo: 0, minWins: 0, color: '#666666' },
-    DIRT: { name: 'Dirt', minElo: 0, minWins: 1, color: '#D2691E' },      // Light brown
-    CASUAL: { name: 'Casual', minElo: 0, minWins: 2, color: '#808080' },  // Gray
-    OMEGA: { name: 'Omega', minElo: 1000, color: '#55FF55' },
+    DIRT: { name: 'Dirt', minElo: 0, minWins: 1, color: '#D2691E' },
+    CASUAL: { name: 'Casual', minElo: 0, minWins: 2, color: '#808080' },
+    OMEGA: { name: 'Omega', minElo: 1100, color: '#55FF55' },      // Raised start to 1100 (Target: Few Hours)
     BETA: { name: 'Beta', minElo: 1200, color: '#5555FF' },
-    ALPHA: { name: 'Alpha', minElo: 1400, color: '#AA00AA' },
-    LEGENDARY: { name: 'Legendary', minElo: 1600, color: '#FFFF55' },     // Yellow (changed from gold)
-    MYTHIC: { name: 'Mythic', minElo: 1800, color: '#FF55FF' },
-    ETERNAL: { name: 'Eternal', minElo: 2000, color: '#FF5555' }
+    ALPHA: { name: 'Alpha', minElo: 1275, color: '#AA00AA' },      // Bridge tier
+    LEGENDARY: { name: 'Legendary', minElo: 1350, color: '#FFFF55' }, // Target: 5 Days
+    MYTHIC: { name: 'Mythic', minElo: 1550, color: '#FF55FF' },     // Target: 10 Days
+    ETERNAL: { name: 'Eternal', minElo: 1750, color: '#FF5555' }    // Target: 14 Days
 };
 
 // Calculate tier from ELO and wins
-// 0 wins = UNRANKED, 1 win = DIRT, >1 win <1000 ELO = CASUAL, then ELO-based
 const calculateTier = (elo, wins) => {
     if (wins === 0) return 'UNRANKED';
-    if (wins === 1) return 'DIRT';
-    if (elo >= 2000) return 'ETERNAL';
-    if (elo >= 1800) return 'MYTHIC';
-    if (elo >= 1600) return 'LEGENDARY';
-    if (elo >= 1400) return 'ALPHA';
+
+    // Demotion Rule: If ELO drops below 1000, you are DIRT (even with 2+ wins)
+    // To reach/return to Casual, you must be >= 1000.
+    if (elo < 1000) return 'DIRT';
+
+    if (wins === 1) return 'DIRT'; // Gatekeeper for new players staying >1000
+
+    if (elo >= 1750) return 'ETERNAL';
+    if (elo >= 1550) return 'MYTHIC';
+    if (elo >= 1350) return 'LEGENDARY';
+    if (elo >= 1275) return 'ALPHA';
     if (elo >= 1200) return 'BETA';
-    if (elo >= 1000) return 'OMEGA';
+    if (elo >= 1100) return 'OMEGA';
+
+    // If Wins >= 2 AND ELO >= 1000
     return 'CASUAL';
 };
 
 // Custom ELO calculation with bonuses
 const calculateEloChange = (winnerElo, loserElo, result) => {
-    const K = 32; // Base K-factor
+    const K = 60; // Increased to 60 for fast progression
 
     // Expected score for winner
     const expectedWinner = 1 / (1 + Math.pow(10, (loserElo - winnerElo) / 400));
@@ -2097,16 +2108,16 @@ const calculateEloChange = (winnerElo, loserElo, result) => {
     let baseWinnerChange = K * (1 - expectedWinner);
     let baseLoserChange = K * (0 - expectedLoser);
 
-    // Alive Pokemon bonus for winner (0-5 points)
+    // Alive Pokemon bonus for winner (0-5.0 points) - HIGH BONUS for speed
     let aliveBonus = 0;
     if (result.winnerTotalPokemon > 0) {
-        aliveBonus = (result.winnerAlivePokemon / result.winnerTotalPokemon) * 5;
+        aliveBonus = (result.winnerAlivePokemon / result.winnerTotalPokemon) * 5.0;
     }
 
-    // KO bonus for winner (0-5 points based on how many opponent Pokemon KO'd)
+    // KO bonus for winner (0-5.0 points)
     let koBonus = 0;
     if (result.loserTotalPokemon > 0) {
-        koBonus = (result.winnerKOs / result.loserTotalPokemon) * 5;
+        koBonus = (result.winnerKOs / result.loserTotalPokemon) * 5.0;
     }
 
     // Format multiplier (2v2 battles slightly higher stakes)
