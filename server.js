@@ -1844,7 +1844,8 @@ const OpponentHistory = mongoose.model('OpponentHistory', new mongoose.Schema({
     opponentUuid: { type: String, required: true },
     matchCount: { type: Number, default: 0 },
     lastMatchAt: { type: Date, default: null },
-    resetAt: { type: Date, default: null } // 12-hour reset timer
+    firstMatchAt: { type: Date, default: null }, // Tracks when first match started for 12hr reset
+    cooldownUntil: { type: Date, default: null } // When null, no cooldown active
 }));
 
 // Create compound index for efficient lookups
@@ -1936,57 +1937,108 @@ const checkForfeitAbuse = async (playerUuid, playerName) => {
 
 /**
  * Get diminishing returns multiplier for same-opponent matches
- * Match 1: 100%, Match 2: 75%, Match 3: 50%, Match 4+: 25%
- * Resets after 12 hours
+ * 
+ * Logic:
+ * - Matches 1-3: Full ELO (100%)
+ * - After 3rd match: 30-minute cooldown starts
+ * - During cooldown: Cannot queue (handled by mod/frontend), but if bypassed,
+ *   match proceeds with diminishing returns (50% -> 25%)
+ * - After cooldown: Match allowed with diminishing returns, then new cooldown
+ * - After 12 hours since FIRST match with this opponent: Full reset
  */
 const getDiminishingMultiplier = async (playerUuid, opponentUuid) => {
     const now = new Date();
-    const twelveHoursAgo = new Date(now.getTime() - 12 * 60 * 60 * 1000);
+    const twelveHoursMs = 12 * 60 * 60 * 1000;
+    const thirtyMinutesMs = 30 * 60 * 1000;
 
     let history = await OpponentHistory.findOne({ playerUuid, opponentUuid });
 
     if (!history) {
         // First match with this opponent
-        return { multiplier: 1.0, matchCount: 0 };
+        return { multiplier: 1.0, matchCount: 0, onCooldown: false, cooldownRemaining: 0 };
     }
 
-    // Check if 12-hour reset has passed
-    if (history.lastMatchAt && history.lastMatchAt < twelveHoursAgo) {
-        // Reset the counter
+    // Check if 12-hour reset has passed since FIRST match
+    if (history.firstMatchAt && (now.getTime() - new Date(history.firstMatchAt).getTime() >= twelveHoursMs)) {
+        // Full reset - back to 3 free matches
         history.matchCount = 0;
-        history.resetAt = now;
+        history.firstMatchAt = null;
+        history.cooldownUntil = null;
         await history.save();
-        return { multiplier: 1.0, matchCount: 0 };
+        return { multiplier: 1.0, matchCount: 0, onCooldown: false, cooldownRemaining: 0 };
     }
 
-    // Calculate multiplier based on match count
-    // Relaxed for small server: First 2 matches are 100%, then tapers off
-    // 0 = 1st match, 1 = 2nd match
     const count = history.matchCount;
+
+    // Check if currently on cooldown
+    if (history.cooldownUntil && now < new Date(history.cooldownUntil)) {
+        const cooldownRemaining = Math.ceil((new Date(history.cooldownUntil).getTime() - now.getTime()) / 60000);
+        // On cooldown - return info but still allow with heavy penalty if they somehow bypass
+        return {
+            multiplier: 0.25,
+            matchCount: count,
+            onCooldown: true,
+            cooldownRemaining
+        };
+    }
+
+    // First 3 matches: Full ELO
+    if (count < 3) {
+        return { multiplier: 1.0, matchCount: count, onCooldown: false, cooldownRemaining: 0 };
+    }
+
+    // Beyond 3 matches (after cooldown expired): Diminishing returns
+    // Match 4-5: 50%, Match 6+: 25%
     let multiplier = 1.0;
+    if (count <= 4) {
+        multiplier = 0.50;
+    } else {
+        multiplier = 0.25;
+    }
 
-    if (count <= 1) multiplier = 1.0;        // 1st & 2nd match: 100%
-    else if (count <= 3) multiplier = 0.50;  // 3rd & 4th match: 50%
-    else multiplier = 0.25;                  // 5th+ match: 25%
-
-    return { multiplier, matchCount: count };
+    return { multiplier, matchCount: count, onCooldown: false, cooldownRemaining: 0 };
 };
 
 /**
  * Update opponent history after a match
+ * Handles cooldown setting and firstMatchAt tracking
  */
 const updateOpponentHistory = async (playerUuid, opponentUuid) => {
     const now = new Date();
+    const thirtyMinutesMs = 30 * 60 * 1000;
 
-    await OpponentHistory.findOneAndUpdate(
-        { playerUuid, opponentUuid },
-        {
-            $inc: { matchCount: 1 },
-            $set: { lastMatchAt: now }
-        },
-        { upsert: true, new: true }
-    );
+    let history = await OpponentHistory.findOne({ playerUuid, opponentUuid });
+
+    if (!history) {
+        // Create new record - this is the first match
+        await OpponentHistory.create({
+            playerUuid,
+            opponentUuid,
+            matchCount: 1,
+            lastMatchAt: now,
+            firstMatchAt: now,
+            cooldownUntil: null
+        });
+        return;
+    }
+
+    // Increment match count
+    history.matchCount += 1;
+    history.lastMatchAt = now;
+
+    // If this was the first match of a new cycle, set firstMatchAt
+    if (!history.firstMatchAt) {
+        history.firstMatchAt = now;
+    }
+
+    // If we just hit 3 matches or beyond, start/extend cooldown
+    if (history.matchCount >= 3) {
+        history.cooldownUntil = new Date(now.getTime() + thirtyMinutesMs);
+    }
+
+    await history.save();
 };
+
 
 /**
  * Check daily unique opponents and return bonus multiplier
@@ -2067,12 +2119,12 @@ const TIERS = {
     UNRANKED: { name: 'Unranked', minElo: 0, minWins: 0, color: '#666666' },
     DIRT: { name: 'Dirt', minElo: 0, minWins: 1, color: '#D2691E' },
     CASUAL: { name: 'Casual', minElo: 0, minWins: 2, color: '#808080' },
-    OMEGA: { name: 'Omega', minElo: 1100, color: '#55FF55' },      // Raised start to 1100 (Target: Few Hours)
+    OMEGA: { name: 'Omega', minElo: 1100, color: '#55FF55' },      // Raised start to 1100
     BETA: { name: 'Beta', minElo: 1200, color: '#5555FF' },
     ALPHA: { name: 'Alpha', minElo: 1275, color: '#AA00AA' },      // Bridge tier
-    LEGENDARY: { name: 'Legendary', minElo: 1350, color: '#FFFF55' }, // Target: 5 Days
-    MYTHIC: { name: 'Mythic', minElo: 1550, color: '#FF55FF' },     // Target: 10 Days
-    ETERNAL: { name: 'Eternal', minElo: 1750, color: '#FF5555' }    // Target: 14 Days
+    LEGENDARY: { name: 'Legendary', minElo: 1425, color: '#FFFF55' }, // Target: 5 Days
+    MYTHIC: { name: 'Mythic', minElo: 1625, color: '#FF55FF' },     // Target: 10 Days
+    ETERNAL: { name: 'Eternal', minElo: 1900, color: '#FF5555' }    // Target: 14 Days
 };
 
 // Calculate tier from ELO and wins
@@ -2085,9 +2137,9 @@ const calculateTier = (elo, wins) => {
 
     if (wins === 1) return 'DIRT'; // Gatekeeper for new players staying >1000
 
-    if (elo >= 1750) return 'ETERNAL';
-    if (elo >= 1550) return 'MYTHIC';
-    if (elo >= 1350) return 'LEGENDARY';
+    if (elo >= 1900) return 'ETERNAL';
+    if (elo >= 1625) return 'MYTHIC';
+    if (elo >= 1425) return 'LEGENDARY';
     if (elo >= 1275) return 'ALPHA';
     if (elo >= 1200) return 'BETA';
     if (elo >= 1100) return 'OMEGA';
@@ -2698,6 +2750,199 @@ app.post('/api/ranked/reset', auth, async (req, res) => {
         await RankedPlayer.deleteMany({});
         await RankedMatch.deleteMany({});
         res.json({ success: true, message: 'All ranked data cleared' });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// === ADMIN COMMAND ENDPOINTS ===
+
+// Modify ELO (add or remove)
+app.post('/api/ranked/admin/modify-elo', async (req, res) => {
+    const apiKey = req.headers['x-api-key'];
+    const validKey = process.env.RANKED_API_KEY || 'urnisa-ranked-api-key-2024';
+    if (apiKey !== validKey) return res.status(401).json({ error: 'Unauthorized' });
+
+    try {
+        const { playerUuid, playerName, eloChange, modifiedBy } = req.body;
+
+        let player = await RankedPlayer.findOne({ uuid: playerUuid });
+        if (!player) {
+            player = await RankedPlayer.create({ uuid: playerUuid, minecraftName: playerName });
+        }
+
+        const oldElo = player.elo;
+        player.elo = Math.max(0, player.elo + eloChange);
+        player.tier = calculateTier(player.elo, player.wins);
+        player.updatedAt = new Date();
+        await player.save();
+
+        console.log(`⚙️ Admin ELO Modify: ${playerName} ${eloChange >= 0 ? '+' : ''}${eloChange} (${oldElo} → ${player.elo}) by ${modifiedBy}`);
+
+        res.json({
+            success: true,
+            oldElo,
+            newElo: player.elo,
+            tier: player.tier
+        });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// Set ELO to specific value
+app.post('/api/ranked/admin/set-elo', async (req, res) => {
+    const apiKey = req.headers['x-api-key'];
+    const validKey = process.env.RANKED_API_KEY || 'urnisa-ranked-api-key-2024';
+    if (apiKey !== validKey) return res.status(401).json({ error: 'Unauthorized' });
+
+    try {
+        const { playerUuid, playerName, newElo, modifiedBy } = req.body;
+
+        let player = await RankedPlayer.findOne({ uuid: playerUuid });
+        if (!player) {
+            player = await RankedPlayer.create({ uuid: playerUuid, minecraftName: playerName });
+        }
+
+        const oldElo = player.elo;
+        player.elo = Math.max(0, newElo);
+        player.tier = calculateTier(player.elo, player.wins);
+        player.updatedAt = new Date();
+        await player.save();
+
+        console.log(`⚙️ Admin ELO Set: ${playerName} ${oldElo} → ${player.elo} by ${modifiedBy}`);
+
+        res.json({
+            success: true,
+            oldElo,
+            newElo: player.elo,
+            tier: player.tier
+        });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// Reset Player Stats
+app.post('/api/ranked/admin/reset-player', async (req, res) => {
+    const apiKey = req.headers['x-api-key'];
+    const validKey = process.env.RANKED_API_KEY || 'urnisa-ranked-api-key-2024';
+    if (apiKey !== validKey) return res.status(401).json({ error: 'Unauthorized' });
+
+    try {
+        const { playerUuid, playerName, resetBy } = req.body;
+
+        const player = await RankedPlayer.findOne({ uuid: playerUuid });
+        if (!player) {
+            return res.json({ success: false, message: 'Player not found' });
+        }
+
+        const oldStats = { elo: player.elo, wins: player.wins, losses: player.losses };
+
+        // Reset all stats
+        player.elo = 1000;
+        player.wins = 0;
+        player.losses = 0;
+        player.tier = 'UNRANKED';
+        player.totalKOs = 0;
+        player.totalDeaths = 0;
+        player.winStreak = 0;
+        player.bestWinStreak = 0;
+        player.updatedAt = new Date();
+        await player.save();
+
+        // Also clear opponent history for this player
+        await OpponentHistory.deleteMany({
+            $or: [{ playerUuid }, { opponentUuid: playerUuid }]
+        });
+
+        console.log(`⚙️ Admin Reset: ${playerName} stats reset by ${resetBy} (was: ELO ${oldStats.elo}, W${oldStats.wins}/L${oldStats.losses})`);
+
+        res.json({
+            success: true,
+            oldStats,
+            message: `${playerName}'s stats have been reset`
+        });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// Get Player Info (Admin Detail)
+app.get('/api/ranked/admin/player-info/:uuid', async (req, res) => {
+    try {
+        const { uuid } = req.params;
+
+        const player = await RankedPlayer.findOne({ uuid });
+        if (!player) {
+            return res.json({ found: false });
+        }
+
+        // Get ban status
+        const banStatus = await isPlayerBanned(uuid);
+
+        // Get opponent history count
+        const opponentHistoryCount = await OpponentHistory.countDocuments({
+            $or: [{ playerUuid: uuid }, { opponentUuid: uuid }]
+        });
+
+        // Get recent forfeits
+        const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
+        const recentForfeits = await ForfeitHistory.countDocuments({
+            playerUuid: uuid,
+            forfeitedAt: { $gte: oneHourAgo }
+        });
+
+        res.json({
+            found: true,
+            uuid: player.uuid,
+            name: player.minecraftName,
+            elo: player.elo,
+            tier: player.tier,
+            wins: player.wins,
+            losses: player.losses,
+            winRate: player.wins + player.losses > 0
+                ? Math.round((player.wins / (player.wins + player.losses)) * 100)
+                : 0,
+            winStreak: player.winStreak,
+            bestWinStreak: player.bestWinStreak,
+            totalKOs: player.totalKOs,
+            totalDeaths: player.totalDeaths,
+            lastMatchAt: player.lastMatchAt,
+            createdAt: player.createdAt,
+            banStatus,
+            opponentHistoryCount,
+            recentForfeits
+        });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// Clear Opponent History Between Two Players
+app.post('/api/ranked/admin/clear-history', async (req, res) => {
+    const apiKey = req.headers['x-api-key'];
+    const validKey = process.env.RANKED_API_KEY || 'urnisa-ranked-api-key-2024';
+    if (apiKey !== validKey) return res.status(401).json({ error: 'Unauthorized' });
+
+    try {
+        const { player1Uuid, player2Uuid, clearedBy } = req.body;
+
+        // Delete both directions
+        const result = await OpponentHistory.deleteMany({
+            $or: [
+                { playerUuid: player1Uuid, opponentUuid: player2Uuid },
+                { playerUuid: player2Uuid, opponentUuid: player1Uuid }
+            ]
+        });
+
+        console.log(`⚙️ Admin Clear History: ${player1Uuid} <-> ${player2Uuid} by ${clearedBy} (${result.deletedCount} records)`);
+
+        res.json({
+            success: true,
+            deletedCount: result.deletedCount,
+            message: `Cleared ${result.deletedCount} opponent history records`
+        });
     } catch (e) {
         res.status(500).json({ error: e.message });
     }
