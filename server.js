@@ -2093,24 +2093,30 @@ const getUniqueOpponentBonus = async (playerUuid, opponentUuid) => {
 };
 
 /**
- * Get ELO range penalty - reduces gains if ELO difference > 500
+ * Get ELO range penalty - reduces gains if ELO difference > 200 (2 ranks)
+ * Updated for small server where ranks are ~100 ELO apart
  */
 const getEloRangePenalty = (winnerElo, loserElo) => {
     const eloDiff = Math.abs(winnerElo - loserElo);
 
-    if (eloDiff <= 500) {
+    // No penalty for matches within 200 ELO (~2 ranks)
+    if (eloDiff <= 200) {
         return { multiplier: 1.0, reduced: false };
     }
 
-    // Significant reduction for farming lower-ranked players
-    // 500-700 diff: 50%, 700-1000 diff: 25%, 1000+ diff: 10%
-    if (eloDiff <= 700) {
-        return { multiplier: 0.50, reduced: true };
-    } else if (eloDiff <= 1000) {
-        return { multiplier: 0.25, reduced: true };
-    } else {
-        return { multiplier: 0.10, reduced: true };
+    // Graduated reduction for farming lower/higher ranked players
+    // 200-400 diff (~3-4 ranks): 75%
+    if (eloDiff <= 400) {
+        return { multiplier: 0.75, reduced: true };
     }
+
+    // 400-600 diff (~5-6 ranks): 50%
+    if (eloDiff <= 600) {
+        return { multiplier: 0.50, reduced: true };
+    }
+
+    // 600+ diff: 25%
+    return { multiplier: 0.25, reduced: true };
 };
 
 // Tier definitions - Fast Track for Small Server
@@ -2149,8 +2155,10 @@ const calculateTier = (elo, wins) => {
 };
 
 // Custom ELO calculation with bonuses
+// OPTIMIZED for 8-player server progression (Legendary ~5d, Mythic ~10d, Eternal ~14d)
 const calculateEloChange = (winnerElo, loserElo, result) => {
-    const K = 60; // Increased to 60 for fast progression
+    const K = 100; // High K for small server fast progression
+    const LOSER_ELO_RATIO = 0.5; // Asymmetric: loser loses 50% of winner gains (inflation)
 
     // Expected score for winner
     const expectedWinner = 1 / (1 + Math.pow(10, (loserElo - winnerElo) / 400));
@@ -2160,16 +2168,16 @@ const calculateEloChange = (winnerElo, loserElo, result) => {
     let baseWinnerChange = K * (1 - expectedWinner);
     let baseLoserChange = K * (0 - expectedLoser);
 
-    // Alive Pokemon bonus for winner (0-5.0 points) - HIGH BONUS for speed
+    // Alive Pokemon bonus for winner (0-10.0 points) - HIGH BONUS for speed
     let aliveBonus = 0;
     if (result.winnerTotalPokemon > 0) {
-        aliveBonus = (result.winnerAlivePokemon / result.winnerTotalPokemon) * 5.0;
+        aliveBonus = (result.winnerAlivePokemon / result.winnerTotalPokemon) * 10.0;
     }
 
-    // KO bonus for winner (0-5.0 points)
+    // KO bonus for winner (0-10.0 points)
     let koBonus = 0;
     if (result.loserTotalPokemon > 0) {
-        koBonus = (result.winnerKOs / result.loserTotalPokemon) * 5.0;
+        koBonus = (result.winnerKOs / result.loserTotalPokemon) * 10.0;
     }
 
     // Format multiplier (2v2 battles slightly higher stakes)
@@ -2189,7 +2197,7 @@ const calculateEloChange = (winnerElo, loserElo, result) => {
 
     // Calculate final changes
     const winnerChange = Math.round((baseWinnerChange * formatMultiplier + aliveBonus + koBonus) * winnerMultiplier);
-    const loserChange = Math.round(baseLoserChange * formatMultiplier * loserMultiplier);
+    const loserChange = Math.round(baseLoserChange * formatMultiplier * loserMultiplier * LOSER_ELO_RATIO);
 
     return { winnerChange, loserChange };
 };
