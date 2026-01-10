@@ -1958,9 +1958,23 @@ const getDiminishingMultiplier = async (playerUuid, opponentUuid) => {
         return { multiplier: 1.0, matchCount: 0, onCooldown: false, cooldownRemaining: 0 };
     }
 
-    // Check if 12-hour reset has passed since FIRST match
-    if (history.firstMatchAt && (now.getTime() - new Date(history.firstMatchAt).getTime() >= twelveHoursMs)) {
+    // Check if 12-hour reset has passed
+    // Use firstMatchAt if available, otherwise fall back to lastMatchAt for legacy data
+    const referenceTime = history.firstMatchAt || history.lastMatchAt;
+
+    if (referenceTime && (now.getTime() - new Date(referenceTime).getTime() >= twelveHoursMs)) {
         // Full reset - back to 3 free matches
+        history.matchCount = 0;
+        history.firstMatchAt = null;
+        history.cooldownUntil = null;
+        await history.save();
+        console.log(`🔄 Opponent history reset for ${playerUuid} vs ${opponentUuid} (12h passed)`);
+        return { multiplier: 1.0, matchCount: 0, onCooldown: false, cooldownRemaining: 0 };
+    }
+
+    // ADDITIONAL FIX: If no reference time exists but matchCount is high, reset it (corrupted data)
+    if (!referenceTime && history.matchCount >= 3) {
+        console.log(`⚠️ Corrupted opponent history detected for ${playerUuid} vs ${opponentUuid}, resetting`);
         history.matchCount = 0;
         history.firstMatchAt = null;
         history.cooldownUntil = null;
@@ -2950,6 +2964,32 @@ app.post('/api/ranked/admin/clear-history', async (req, res) => {
             success: true,
             deletedCount: result.deletedCount,
             message: `Cleared ${result.deletedCount} opponent history records`
+        });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// ADMIN: Clear ALL Opponent History (resets everyone's diminishing returns)
+app.post('/api/ranked/admin/clear-all-opponent-history', async (req, res) => {
+    const apiKey = req.headers['x-api-key'];
+    const validKey = process.env.RANKED_API_KEY || 'urnisa-ranked-api-key-2024';
+
+    if (apiKey !== validKey) {
+        return res.status(401).json({ error: 'Unauthorized: Invalid API Key' });
+    }
+
+    try {
+        const { clearedBy } = req.body;
+
+        const result = await OpponentHistory.deleteMany({});
+
+        console.log(`🗑️ ADMIN: ALL opponent history cleared by ${clearedBy || 'Unknown'} (${result.deletedCount} records)`);
+
+        res.json({
+            success: true,
+            deletedCount: result.deletedCount,
+            message: `Cleared ALL ${result.deletedCount} opponent history records. All diminishing returns reset.`
         });
     } catch (e) {
         res.status(500).json({ error: e.message });
