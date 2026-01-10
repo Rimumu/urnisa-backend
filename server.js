@@ -2142,7 +2142,7 @@ const TIERS = {
     OMEGA: { name: 'Omega', minElo: 1100, color: '#55FF55' },      // Raised start to 1100
     BETA: { name: 'Beta', minElo: 1200, color: '#5555FF' },
     ALPHA: { name: 'Alpha', minElo: 1275, color: '#AA00AA' },      // Bridge tier
-    LEGENDARY: { name: 'Legendary', minElo: 1425, color: '#FFFF55' }, // Target: 5 Days
+    LEGENDARY: { name: 'Legend', minElo: 1425, color: '#FFFF55' }, // Target: 5 Days
     MYTHIC: { name: 'Mythic', minElo: 1625, color: '#FF55FF' },     // Target: 10 Days
     ETERNAL: { name: 'Eternal', minElo: 1900, color: '#FF5555' }    // Target: 14 Days
 };
