@@ -32,9 +32,12 @@ const IMGBB_API_KEY = process.env.IMGBB_API_KEY || process.env.VITE_IMGBB_API_KE
 
 const DEFAULT_SCHEDULE_URL = 'https://cdn.discordapp.com/attachments/1338254150479118347/1439859590152978443/3_am_17.png';
 
+const path = require('path');
 const app = express();
 app.use(express.json({ limit: '50mb' }));
 app.use(cors({ origin: '*' }));
+// Enable static file serving for resource packs (safe absolute path)
+app.use('/downloads', express.static(path.join(__dirname, 'downloads')));
 
 console.log("--- URNISA HYBRID BACKEND STARTING ---");
 
