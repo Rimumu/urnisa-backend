@@ -945,6 +945,11 @@ app.post('/api/snakes/move', auth, async (req, res) => {
                 { upsert: true, new: true }
             );
             console.log(`🏆 ${queueItem.user} recorded as winner! Total wins: ${winner.winCount}`);
+
+            // Reset player to start for next run
+            player.position = 0;
+            await player.save();
+            console.log(`🔄 Reset ${player.user} to start (position 0)`);
         }
 
         console.log(`🎲 ${queueItem.user} rolled ${roll}: ${fromPosition} -> ${newPosition}${specialMove ? ` (${specialMove}!)` : ''}${isWinner ? ' 🏆 WINNER!' : ''}`);
@@ -1011,6 +1016,11 @@ app.post('/api/snakes/admin/move', auth, async (req, res) => {
                 { upsert: true, new: true }
             );
             console.log(`🏆 Admin move triggered win for ${player.user}! Total wins: ${winner.winCount}`);
+
+            // Reset player to start for next run
+            player.position = 0;
+            await player.save();
+            console.log(`🔄 Reset ${player.user} to start (position 0)`);
         }
 
         console.log(`🔧 Admin moved ${player.user} by ${spaces} to ${newPosition}${specialMove ? ` (${specialMove}!)` : ''}`);
