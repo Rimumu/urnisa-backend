@@ -955,12 +955,25 @@ app.post('/api/snakes/admin/move', auth, async (req, res) => {
         if (newPosition < 0) newPosition = 0;
         if (newPosition > 100) newPosition = 100;
 
+        let specialMove = null;
+
+        // Check for ladder
+        if (SNAKES_AND_LADDERS.ladders[newPosition]) {
+            specialMove = 'ladder';
+            newPosition = SNAKES_AND_LADDERS.ladders[newPosition];
+        }
+        // Check for snake
+        else if (SNAKES_AND_LADDERS.snakes[newPosition]) {
+            specialMove = 'snake';
+            newPosition = SNAKES_AND_LADDERS.snakes[newPosition];
+        }
+
         player.position = newPosition;
         player.lastMovedAt = new Date();
         await player.save();
 
-        console.log(`🔧 Admin moved ${player.user} by ${spaces} spaces to ${newPosition}`);
-        res.json({ success: true, newPosition });
+        console.log(`🔧 Admin moved ${player.user} by ${spaces} to ${newPosition}${specialMove ? ` (${specialMove}!)` : ''}`);
+        res.json({ success: true, newPosition, specialMove });
     } catch (e) {
         res.status(500).json({ error: e.message });
     }
