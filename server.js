@@ -1048,9 +1048,10 @@ app.post('/api/snakes/reset', auth, async (req, res) => {
         await Promise.all([
             SnakesQueue.deleteMany({}),
             SnakesPlayer.deleteMany({}),
-            SnakesHistory.deleteMany({})
+            SnakesHistory.deleteMany({}),
+            SnakesWinner.deleteMany({}) // Clear Hall of Fame
         ]);
-        console.log('🐍 Snakes game RESET');
+        console.log('🐍 Snakes game RESET (including winners)');
         res.json({ success: true });
     } catch (e) {
         res.status(500).json({ error: e.message });
