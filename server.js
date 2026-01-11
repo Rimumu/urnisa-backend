@@ -220,29 +220,31 @@ const processBufferedGift = async (sender, data) => {
 
     try {
         const stats = await NisathonStats.findOne({ key: 'main' });
-        if (!stats) return;
-
-        // If ended, do not process
-        if (stats.isEnded) {
-            console.log("🛑 Nisathon Ended - Skipping Gift Buffer");
-            return;
-        }
 
         // Generate a unique ID for this bulk event
         const providerId = `bulk-gift-${Date.now()}-${sender}`;
 
-        // Process as a single 'gift' event with amount = count
-        await processEvent(
-            stats,
-            'gift',
-            sender,
-            data.count,
-            `Gifted ${data.count} subs`,
-            providerId,
-            data.tier
-        );
+        // Process for Nisathon (if stats exist)
+        if (stats) {
+            if (stats.isEnded) {
+                console.log("🛑 Nisathon Ended - Skipping Gift Buffer for Nisathon");
+            } else {
+                await processEvent(
+                    stats,
+                    'gift',
+                    sender,
+                    data.count,
+                    `Gifted ${data.count} subs`,
+                    providerId,
+                    data.tier
+                );
+                await stats.save();
+            }
+        }
 
-        await stats.save();
+        // Process for Snakes (Always try)
+        await processSnakesEvent('gift', sender, data.count, providerId, data.tier);
+
     } catch (e) {
         console.error("Gift Buffer Error:", e);
     }
@@ -396,13 +398,9 @@ const connectSocket = () => {
 
         try {
             const stats = await NisathonStats.findOne({ key: 'main' });
-            if (!stats) return;
 
-            // --- STOP IF ENDED ---
-            if (stats.isEnded) {
-                console.log("🛑 Nisathon Ended - Ignoring Event");
-                return;
-            }
+            // --- STOP IF ENDED (Only for Nisathon) ---
+            // We continue to parse data even if stats is ended, to allow Snakes logic to run
 
             const info = data.data;
             let amount = 1;
@@ -442,8 +440,16 @@ const connectSocket = () => {
             }
 
             const providerId = data._id || `sock-${Date.now()}-${Math.random()}`;
-            await processEvent(stats, type, username, amount, info.message || "", providerId, tier);
-            await stats.save();
+
+            // Process Nisathon (if active)
+            if (stats) {
+                await processEvent(stats, type, username, amount, info.message || "", providerId, tier);
+                await stats.save();
+            }
+
+            // Process Snakes (Always try)
+            await processSnakesEvent(type, username, amount, providerId, tier);
+
         } catch (e) { console.error("Socket Error:", e); }
     });
 };
@@ -473,7 +479,7 @@ const fetchAndProcess = async (channelId, label, stats, limit = 25, offset = 0) 
     if (!channelId) return [];
 
     // Check if ended (extra safety for poll loop)
-    if (stats && stats.isEnded) return [];
+    // if (stats && stats.isEnded) return []; // Removed to allow Snakes processing
 
     try {
         const url = `https://api.streamelements.com/kappa/v2/activities/${channelId}`;
@@ -519,8 +525,14 @@ const fetchAndProcess = async (channelId, label, stats, limit = 25, offset = 0) 
                 }
                 else continue;
 
-                const added = await processEvent(stats, type, username, amt, act.data.message, act._id, tier);
-                if (added > 0 || type === 'follower') changes = true;
+                // Process Nisathon
+                if (stats) {
+                    const added = await processEvent(stats, type, username, amt, act.data.message, act._id, tier);
+                    if (added > 0 || type === 'follower') changes = true;
+                }
+
+                // Process Snakes
+                await processSnakesEvent(type, username, amt, act._id, tier);
             }
             return changes;
         }
@@ -530,7 +542,7 @@ const fetchAndProcess = async (channelId, label, stats, limit = 25, offset = 0) 
 
 const syncSessionFallback = async (channelId, stats) => {
     // Check if ended
-    if (stats.isEnded) return;
+    // if (stats.isEnded) return; // Removed to allow Snakes
 
     try {
         const { data: session } = await axios.get(`https://api.streamelements.com/kappa/v2/sessions/${channelId}`, {
@@ -548,19 +560,22 @@ const syncSessionFallback = async (channelId, stats) => {
                 username = lastSub.sender;
                 type = 'gift';
             }
-            await processEvent(stats, type, username, 1, "", `session-sub-${username}`, lastSub.tier);
+            if (stats) await processEvent(stats, type, username, 1, "", `session-sub-${username}`, lastSub.tier);
+            await processSnakesEvent(type, username, 1, `session-sub-${username}`, lastSub.tier);
             changes = true;
         }
 
         const lastTip = session.data['latest-tip'];
         if (lastTip) {
-            await processEvent(stats, 'tip', lastTip.name, lastTip.amount, lastTip.message, `session-tip-${lastTip.name}-${lastTip.amount}`);
+            if (stats) await processEvent(stats, 'tip', lastTip.name, lastTip.amount, lastTip.message, `session-tip-${lastTip.name}-${lastTip.amount}`);
+            await processSnakesEvent('tip', lastTip.name, lastTip.amount, `session-tip-${lastTip.name}-${lastTip.amount}`);
             changes = true;
         }
 
         const lastCheer = session.data['latest-cheer'];
         if (lastCheer) {
-            await processEvent(stats, 'cheer', lastCheer.name, lastCheer.amount, lastCheer.message, `session-cheer-${lastCheer.name}-${lastCheer.amount}`);
+            if (stats) await processEvent(stats, 'cheer', lastCheer.name, lastCheer.amount, lastCheer.message, `session-cheer-${lastCheer.name}-${lastCheer.amount}`);
+            await processSnakesEvent('cheer', lastCheer.name, lastCheer.amount, `session-cheer-${lastCheer.name}-${lastCheer.amount}`);
             changes = true;
         }
         if (changes) console.log("✅ Session Sync Processed");
@@ -575,17 +590,20 @@ const runSync = async (forceDeep = false) => {
         let stats = await NisathonStats.findOne({ key: 'main' });
         if (!stats) stats = await NisathonStats.create({ key: 'main', timerEndTime: new Date(Date.now() + 3 * 3600000) });
 
-        // If Nisathon is ended, stop fetching activity
-        if (stats.isEnded && !forceDeep) return;
+        // If Nisathon is ended, stop fetching activity? 
+        // NO, we want to fetch for Snakes (unless snakes inactive). 
+        // But fetchAndProcess now handles allowing snakes if stats ended.
+        // if (stats.isEnded && !forceDeep) return; // REMOVED
 
-        let resolvedId = await resolveChannelId();
+        let resolvedId = await resolveChannelId() || ENV_CHANNEL_ID;
         if (!resolvedId) resolvedId = ENV_CHANNEL_ID;
 
         if (resolvedId) {
             const limit = forceDeep ? 100 : 25;
             const c1 = await fetchAndProcess(resolvedId, "AUTO-ID", stats, limit);
             if (!c1 && forceDeep) await syncSessionFallback(resolvedId, stats);
-            if (c1 || forceDeep) await stats.save();
+            // Only save stats if it exists and changed/forceDeep
+            if ((c1 || forceDeep) && stats) await stats.save();
         }
     } catch (e) { console.error("Loop Error:", e); }
 };
@@ -1143,6 +1161,131 @@ app.get('/api/countdown/stats', async (req, res) => {
     if (!stats) stats = await mongoose.model('CountdownStats').create({ key: 'main' });
     res.json(stats);
 });
+
+// ==========================================
+// SNAKES REAL EVENT LISTENER LOGIC
+// ==========================================
+
+const processSnakesEvent = async (type, user, amount, providerId, tier = '1000', isManual = false) => {
+    try {
+        // 1. Check if Listener is Active
+        const settings = await SnakesSettings.findOne({ key: 'main' });
+        if (!settings || (!settings.isActive && !isManual)) {
+            if (isManual) console.log("⚠️ Snakes Listener is OFF, but proceeding (MANUAL override)");
+            else return; // Ignore if inactive
+        }
+
+        // 2. Check Duplicates (if providerId exists)
+        if (providerId && !isManual) {
+            // We verify against specific snakes sourceEventId if we want strictness, 
+            // but for simplicity we rely on checking if this providerId was already processed for snakes?
+            // Actually, we can reuse providerId as sourceEventId.
+            // If we want to prevent double processing same event for snakes:
+            const existing = await SnakesQueue.findOne({ sourceEventId: providerId });
+            if (existing) return;
+        }
+
+        let rolls = 0;
+
+        // 3. Logic (Same as Nisathon)
+        // Sub (Tier 1/Prime) = 1 Roll
+        // Tier 2 = 2 Rolls
+        // Tier 3 = 4 Rolls (Double logic?) -> Nisathon was T3=2.0 NB (4x T1?). 
+        // Let's stick to user request: "same as Nisathon" logic.
+        // Nisathon: T1=0.5 NB, T2=1.0 NB, T3=2.0 NB. 
+        // 1 Roll = 0.5 NB? Or 1 Roll = 1 Sub?
+        // User said: "UserA already has 5 rolls queued and they gift another 5" -> 5 Gifts = 5 Rolls?
+        // Let's assume 1 Sub = 1 Roll.
+
+        if (['subscriber', 'sub', 'resub', 'subscription'].includes(type)) {
+            // Skip Recipient Events (trust bulk 'gift' event logic) unless manual
+            if (!isManual && (amount === 0)) return; // Recipient usually amount 0 or handled by bulk
+
+            // Tier Logic
+            // T1 = 1 Roll
+            // T2 = 2 Rolls
+            // T3 = 5 Rolls (Standard hype?) OR 
+            // Nisathon was: T1=0.5, T2=1.0 (2x), T3=2.0 (4x).
+            // Let's go with: T1=1, T2=2, T3=5 (Common) OR T1=1, T2=2, T3=4?
+            // "same exact system" might refer to the buffering/gift logic.
+            // I will default to: 1 Sub = 1 Roll.
+            let multiplier = 1;
+            const tStr = String(tier).toLowerCase();
+            if (tStr.includes('3000') || tStr === '3') multiplier = 5;
+            else if (tStr.includes('2000') || tStr === '2') multiplier = 2;
+
+            rolls = 1 * multiplier;
+
+            if (type === 'gift') {
+                // Gifts are sent as batches usually (10 gifts = amount 10)
+                // If it's a "sub" type with "gifted: true" in socket, it comes as individuals.
+                // But we have the GIFT BUFFER logic below in socket.
+                rolls = amount * 1; // 1 Roll per gift
+            }
+        }
+        else if (type === 'gift') {
+            rolls = amount; // 1 roll per gift
+        }
+
+        if (rolls > 0) {
+            console.log(`🐍 Queueing ${rolls} rolls for ${user} (Source: ${type})`);
+
+            // Create Batch
+            // We create `rolls` number of entries
+            // Use providerId as sourceEventId for grouping
+            const finalSourceId = providerId || `snakes-${Date.now()}-${Math.random()}`;
+
+            for (let i = 0; i < rolls; i++) {
+                await SnakesQueue.create({
+                    user: user || 'Anonymous',
+                    avatarUrl: `https://ui-avatars.com/api/?name=${encodeURIComponent(user || 'A')}&background=random`, // Will be resolved by worker/frontend
+                    amount: 1,
+                    type: type,
+                    sourceEventId: finalSourceId
+                });
+            }
+        }
+
+    } catch (e) {
+        console.error("Snakes Event Error:", e);
+    }
+};
+
+// SNAKES SETTINGS API
+app.get('/api/snakes/settings', async (req, res) => {
+    try {
+        let settings = await SnakesSettings.findOne({ key: 'main' });
+        if (!settings) settings = await SnakesSettings.create({ key: 'main' });
+        res.json(settings);
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/snakes/toggle-listener', auth, async (req, res) => {
+    try {
+        let settings = await SnakesSettings.findOne({ key: 'main' });
+        if (!settings) settings = await SnakesSettings.create({ key: 'main' });
+
+        settings.isActive = !settings.isActive;
+        await settings.save();
+
+        console.log(`🐍 Snakes Listener Toggled: ${settings.isActive ? 'ON' : 'OFF'}`);
+        res.json({ success: true, isActive: settings.isActive });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// SIMULATE FOR SNAKES (For Admin Testing)
+app.post('/api/snakes/simulate-event', auth, async (req, res) => {
+    const { type, user, amount, tier } = req.body;
+    try {
+        // providerId 'manual-timestamp'
+        const providerId = `man-snake-${Date.now()}`;
+        await processSnakesEvent(type, user, amount || 1, providerId, tier, true);
+        res.json({ success: true, message: "Simulated event processed" });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+
+// NEW: COUNTDOWN API (STANDALONE)
 
 app.post('/api/countdown/set', auth, async (req, res) => {
     const stats = await mongoose.model('CountdownStats').findOne({ key: 'main' });
