@@ -939,6 +939,33 @@ app.post('/api/snakes/move', auth, async (req, res) => {
     }
 });
 
+// Admin: Move player manually
+app.post('/api/snakes/admin/move', auth, async (req, res) => {
+    try {
+        const { user, spaces } = req.body;
+        if (!user || spaces === undefined) return res.status(400).json({ error: 'User and spaces required' });
+
+        // Case-insensitive search
+        let player = await SnakesPlayer.findOne({ user: new RegExp(`^${user}$`, 'i') });
+        if (!player) return res.status(404).json({ error: 'Player not found' });
+
+        let newPosition = player.position + parseInt(spaces);
+
+        // Clamp to valid board range 0-100
+        if (newPosition < 0) newPosition = 0;
+        if (newPosition > 100) newPosition = 100;
+
+        player.position = newPosition;
+        player.lastMovedAt = new Date();
+        await player.save();
+
+        console.log(`🔧 Admin moved ${player.user} by ${spaces} spaces to ${newPosition}`);
+        res.json({ success: true, newPosition });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
 // Add test event to queue (for testing without real subs)
 app.post('/api/snakes/test-event', auth, async (req, res) => {
     try {
