@@ -193,6 +193,12 @@ const SnakesSettings = mongoose.model('SnakesSettings', new mongoose.Schema({
     lastProcessedEventId: String
 }));
 
+const SnakesSpecialTile = mongoose.model('SnakesSpecialTile', new mongoose.Schema({
+    tile: { type: Number, required: true, unique: true, min: 1, max: 100 },
+    text: { type: String, required: true },
+    createdAt: { type: Date, default: Date.now }
+}));
+
 // Snakes and Ladders board configuration (standard layout)
 const SNAKES_AND_LADDERS = {
     // Ladders: start -> end (go UP)
@@ -836,21 +842,64 @@ app.post('/api/wheel/spin-result', auth, async (req, res) => {
 // Get full game state (players, queue, settings)
 app.get('/api/snakes/state', async (req, res) => {
     try {
-        const [queue, players, history, winners, settings] = await Promise.all([
+        const [queue, players, history, winners, settings, specialTiles] = await Promise.all([
             SnakesQueue.find().sort({ createdAt: 1 }),
             SnakesPlayer.find().sort({ lastMovedAt: -1 }),
             SnakesHistory.find().sort({ timestamp: -1 }).limit(50),
             SnakesWinner.find().sort({ winCount: -1 }).limit(10),
-            SnakesSettings.findOne({ key: 'main' })
+            SnakesSettings.findOne({ key: 'main' }),
+            SnakesSpecialTile.find().sort({ tile: 1 })
         ]);
         res.json({
             queue,
             players,
             history,
             winners,
+            specialTiles,
             isActive: settings?.isActive || false,
             board: SNAKES_AND_LADDERS
         });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// Get all special tiles (public)
+app.get('/api/snakes/special-tiles', async (req, res) => {
+    try {
+        const tiles = await SnakesSpecialTile.find().sort({ tile: 1 });
+        res.json(tiles);
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// Add/Update special tile (admin)
+app.post('/api/snakes/special-tiles', auth, async (req, res) => {
+    try {
+        const { tile, text } = req.body;
+        if (!tile || !text) return res.status(400).json({ error: 'Tile number and text required' });
+        if (tile < 1 || tile > 100) return res.status(400).json({ error: 'Tile must be 1-100' });
+
+        const specialTile = await SnakesSpecialTile.findOneAndUpdate(
+            { tile },
+            { tile, text },
+            { upsert: true, new: true }
+        );
+        console.log(`🎯 Special tile ${tile} set: "${text.substring(0, 50)}..."`);
+        res.json({ success: true, specialTile });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// Delete special tile (admin)
+app.delete('/api/snakes/special-tiles/:tile', auth, async (req, res) => {
+    try {
+        const tile = parseInt(req.params.tile);
+        await SnakesSpecialTile.deleteOne({ tile });
+        console.log(`🗑️ Special tile ${tile} removed`);
+        res.json({ success: true });
     } catch (e) {
         res.status(500).json({ error: e.message });
     }
@@ -952,6 +1001,14 @@ app.post('/api/snakes/move', auth, async (req, res) => {
             console.log(`🔄 Reset ${player.user} to start (position 0)`);
         }
 
+        // Check for special tile event
+        let specialTileEvent = null;
+        const specialTile = await SnakesSpecialTile.findOne({ tile: newPosition });
+        if (specialTile) {
+            specialTileEvent = { tile: specialTile.tile, text: specialTile.text };
+            console.log(`🎯 ${queueItem.user} landed on special tile ${newPosition}!`);
+        }
+
         console.log(`🎲 ${queueItem.user} rolled ${roll}: ${fromPosition} -> ${newPosition}${specialMove ? ` (${specialMove}!)` : ''}${isWinner ? ' 🏆 WINNER!' : ''}`);
 
         res.json({
@@ -961,6 +1018,7 @@ app.post('/api/snakes/move', auth, async (req, res) => {
             fromPosition,
             toPosition: newPosition,
             specialMove,
+            specialTileEvent,
             isWinner
         });
     } catch (e) {
@@ -1023,8 +1081,16 @@ app.post('/api/snakes/admin/move', auth, async (req, res) => {
             console.log(`🔄 Reset ${player.user} to start (position 0)`);
         }
 
+        // Check for special tile event
+        let specialTileEvent = null;
+        const specialTile = await SnakesSpecialTile.findOne({ tile: newPosition });
+        if (specialTile) {
+            specialTileEvent = { tile: specialTile.tile, text: specialTile.text };
+            console.log(`🎯 Admin move landed ${player.user} on special tile ${newPosition}!`);
+        }
+
         console.log(`🔧 Admin moved ${player.user} by ${spaces} to ${newPosition}${specialMove ? ` (${specialMove}!)` : ''}`);
-        res.json({ success: true, newPosition, specialMove });
+        res.json({ success: true, newPosition, specialMove, specialTileEvent, isWinner });
     } catch (e) {
         res.status(500).json({ error: e.message });
     }
