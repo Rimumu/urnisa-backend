@@ -887,20 +887,21 @@ app.post('/api/snakes/move', auth, async (req, res) => {
         let newPosition = fromPosition + roll;
         let specialMove = null;
 
-        // Can't go beyond 100
+        // Can't go beyond 100 - Bounce back
         if (newPosition > 100) {
-            newPosition = fromPosition; // Stay in place if roll exceeds 100
-        } else {
-            // Check for ladder
-            if (SNAKES_AND_LADDERS.ladders[newPosition]) {
-                specialMove = 'ladder';
-                newPosition = SNAKES_AND_LADDERS.ladders[newPosition];
-            }
-            // Check for snake
-            else if (SNAKES_AND_LADDERS.snakes[newPosition]) {
-                specialMove = 'snake';
-                newPosition = SNAKES_AND_LADDERS.snakes[newPosition];
-            }
+            const diff = newPosition - 100;
+            newPosition = 100 - diff;
+        }
+
+        // Check for ladder
+        if (SNAKES_AND_LADDERS.ladders[newPosition]) {
+            specialMove = 'ladder';
+            newPosition = SNAKES_AND_LADDERS.ladders[newPosition];
+        }
+        // Check for snake
+        else if (SNAKES_AND_LADDERS.snakes[newPosition]) {
+            specialMove = 'snake';
+            newPosition = SNAKES_AND_LADDERS.snakes[newPosition];
         }
 
         // Update player position
