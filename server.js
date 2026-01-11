@@ -1102,12 +1102,14 @@ app.post('/api/snakes/test-event', auth, async (req, res) => {
         const { user, amount = 1 } = req.body;
         if (!user) return res.status(400).json({ error: 'User required' });
 
+        const batchId = `test-${Date.now()}`;
         for (let i = 0; i < amount; i++) {
             await SnakesQueue.create({
                 user,
                 avatarUrl: `https://ui-avatars.com/api/?name=${encodeURIComponent(user)}&background=random`,
                 amount: 1,
-                type: 'test'
+                type: 'test',
+                sourceEventId: batchId
             });
         }
 
