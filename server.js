@@ -180,6 +180,13 @@ const SnakesHistory = mongoose.model('SnakesHistory', new mongoose.Schema({
     timestamp: { type: Date, default: Date.now }
 }));
 
+const SnakesWinner = mongoose.model('SnakesWinner', new mongoose.Schema({
+    user: { type: String, required: true, unique: true },
+    avatarUrl: String,
+    winCount: { type: Number, default: 1 },
+    lastWinAt: { type: Date, default: Date.now }
+}));
+
 const SnakesSettings = mongoose.model('SnakesSettings', new mongoose.Schema({
     key: { type: String, default: 'main', unique: true },
     isActive: { type: Boolean, default: false }, // Whether to process incoming events
@@ -829,16 +836,18 @@ app.post('/api/wheel/spin-result', auth, async (req, res) => {
 // Get full game state (players, queue, settings)
 app.get('/api/snakes/state', async (req, res) => {
     try {
-        const [queue, players, history, settings] = await Promise.all([
+        const [queue, players, history, winners, settings] = await Promise.all([
             SnakesQueue.find().sort({ createdAt: 1 }),
             SnakesPlayer.find().sort({ lastMovedAt: -1 }),
             SnakesHistory.find().sort({ timestamp: -1 }).limit(50),
+            SnakesWinner.find().sort({ winCount: -1 }).limit(10),
             SnakesSettings.findOne({ key: 'main' })
         ]);
         res.json({
             queue,
             players,
             history,
+            winners,
             isActive: settings?.isActive || false,
             board: SNAKES_AND_LADDERS
         });
@@ -923,6 +932,21 @@ app.post('/api/snakes/move', auth, async (req, res) => {
 
         const isWinner = newPosition === 100;
 
+        if (isWinner) {
+            const winner = await SnakesWinner.findOneAndUpdate(
+                { user: queueItem.user },
+                {
+                    $inc: { winCount: 1 },
+                    $set: {
+                        lastWinAt: new Date(),
+                        avatarUrl: queueItem.avatarUrl || player.avatarUrl
+                    }
+                },
+                { upsert: true, new: true }
+            );
+            console.log(`🏆 ${queueItem.user} recorded as winner! Total wins: ${winner.winCount}`);
+        }
+
         console.log(`🎲 ${queueItem.user} rolled ${roll}: ${fromPosition} -> ${newPosition}${specialMove ? ` (${specialMove}!)` : ''}${isWinner ? ' 🏆 WINNER!' : ''}`);
 
         res.json({
@@ -971,6 +995,23 @@ app.post('/api/snakes/admin/move', auth, async (req, res) => {
         player.position = newPosition;
         player.lastMovedAt = new Date();
         await player.save();
+
+        const isWinner = newPosition === 100;
+
+        if (isWinner) {
+            const winner = await SnakesWinner.findOneAndUpdate(
+                { user: player.user },
+                {
+                    $inc: { winCount: 1 },
+                    $set: {
+                        lastWinAt: new Date(),
+                        avatarUrl: player.avatarUrl
+                    }
+                },
+                { upsert: true, new: true }
+            );
+            console.log(`🏆 Admin move triggered win for ${player.user}! Total wins: ${winner.winCount}`);
+        }
 
         console.log(`🔧 Admin moved ${player.user} by ${spaces} to ${newPosition}${specialMove ? ` (${specialMove}!)` : ''}`);
         res.json({ success: true, newPosition, specialMove });
