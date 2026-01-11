@@ -1044,7 +1044,8 @@ app.post('/api/snakes/move', auth, async (req, res) => {
             toPosition: newPosition,
             specialMove,
             specialTileEvent,
-            isWinner
+            isWinner,
+            avatarUrl: player.avatarUrl // Return avatar for UI
         });
     } catch (e) {
         res.status(500).json({ error: e.message });
