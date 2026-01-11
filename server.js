@@ -152,6 +152,48 @@ const TournamentBracket = mongoose.model('TournamentBracket', new mongoose.Schem
     updatedAt: { type: Date, default: Date.now }
 }));
 
+// ==========================================
+// SNAKES AND LADDERS SCHEMAS
+// ==========================================
+const SnakesQueue = mongoose.model('SnakesQueue', new mongoose.Schema({
+    user: { type: String, required: true },
+    avatarUrl: String,
+    amount: { type: Number, default: 1 }, // How many rolls this entry represents
+    type: { type: String, default: 'sub' }, // 'sub' or 'gift'
+    sourceEventId: String,
+    createdAt: { type: Date, default: Date.now }
+}));
+
+const SnakesPlayer = mongoose.model('SnakesPlayer', new mongoose.Schema({
+    user: { type: String, required: true, unique: true },
+    avatarUrl: String,
+    position: { type: Number, default: 0 }, // 0 = not on board, 1-100 = tile
+    lastMovedAt: { type: Date, default: Date.now }
+}));
+
+const SnakesHistory = mongoose.model('SnakesHistory', new mongoose.Schema({
+    user: { type: String, required: true },
+    roll: { type: Number, required: true },
+    fromPosition: { type: Number, required: true },
+    toPosition: { type: Number, required: true },
+    specialMove: String, // 'ladder', 'snake', or null
+    timestamp: { type: Date, default: Date.now }
+}));
+
+const SnakesSettings = mongoose.model('SnakesSettings', new mongoose.Schema({
+    key: { type: String, default: 'main', unique: true },
+    isActive: { type: Boolean, default: false }, // Whether to process incoming events
+    lastProcessedEventId: String
+}));
+
+// Snakes and Ladders board configuration (standard layout)
+const SNAKES_AND_LADDERS = {
+    // Ladders: start -> end (go UP)
+    ladders: { 2: 38, 7: 14, 8: 31, 15: 26, 21: 42, 28: 84, 36: 44, 51: 67, 71: 91, 78: 98, 87: 94 },
+    // Snakes: start -> end (go DOWN)
+    snakes: { 16: 6, 46: 25, 49: 11, 62: 19, 64: 60, 74: 53, 89: 68, 92: 88, 95: 75, 99: 80 }
+};
+
 const roundOneDecimal = (num) => Math.round(num * 10) / 10;
 
 // ==========================================
@@ -778,6 +820,159 @@ app.post('/api/wheel/spin-result', auth, async (req, res) => {
     await SpinHistory.create({ user: req.body.user, reward: req.body.reward });
     if (req.body.queueId) await SpinQueue.findByIdAndDelete(req.body.queueId);
     res.json({ success: true });
+});
+
+// ==========================================
+// SNAKES AND LADDERS API
+// ==========================================
+
+// Get full game state (players, queue, settings)
+app.get('/api/snakes/state', async (req, res) => {
+    try {
+        const [queue, players, history, settings] = await Promise.all([
+            SnakesQueue.find().sort({ createdAt: 1 }),
+            SnakesPlayer.find().sort({ lastMovedAt: -1 }),
+            SnakesHistory.find().sort({ timestamp: -1 }).limit(50),
+            SnakesSettings.findOne({ key: 'main' })
+        ]);
+        res.json({
+            queue,
+            players,
+            history,
+            isActive: settings?.isActive || false,
+            board: SNAKES_AND_LADDERS
+        });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// Toggle game active state
+app.post('/api/snakes/toggle', auth, async (req, res) => {
+    try {
+        let settings = await SnakesSettings.findOne({ key: 'main' });
+        if (!settings) settings = await SnakesSettings.create({ key: 'main' });
+        settings.isActive = !settings.isActive;
+        await settings.save();
+        console.log(`🐍 Snakes Game ${settings.isActive ? 'ACTIVATED' : 'DEACTIVATED'}`);
+        res.json({ success: true, isActive: settings.isActive });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// Process a move (admin triggers this when ready)
+app.post('/api/snakes/move', auth, async (req, res) => {
+    try {
+        // Get first item in queue
+        const queueItem = await SnakesQueue.findOne().sort({ createdAt: 1 });
+        if (!queueItem) {
+            return res.status(400).json({ error: 'Queue is empty' });
+        }
+
+        // Roll dice (1-6)
+        const roll = Math.floor(Math.random() * 6) + 1;
+
+        // Get or create player
+        let player = await SnakesPlayer.findOne({ user: queueItem.user });
+        if (!player) {
+            player = await SnakesPlayer.create({
+                user: queueItem.user,
+                avatarUrl: queueItem.avatarUrl || `https://ui-avatars.com/api/?name=${encodeURIComponent(queueItem.user)}&background=random`,
+                position: 0
+            });
+        }
+
+        const fromPosition = player.position;
+        let newPosition = fromPosition + roll;
+        let specialMove = null;
+
+        // Can't go beyond 100
+        if (newPosition > 100) {
+            newPosition = fromPosition; // Stay in place if roll exceeds 100
+        } else {
+            // Check for ladder
+            if (SNAKES_AND_LADDERS.ladders[newPosition]) {
+                specialMove = 'ladder';
+                newPosition = SNAKES_AND_LADDERS.ladders[newPosition];
+            }
+            // Check for snake
+            else if (SNAKES_AND_LADDERS.snakes[newPosition]) {
+                specialMove = 'snake';
+                newPosition = SNAKES_AND_LADDERS.snakes[newPosition];
+            }
+        }
+
+        // Update player position
+        player.position = newPosition;
+        player.lastMovedAt = new Date();
+        await player.save();
+
+        // Log history
+        await SnakesHistory.create({
+            user: queueItem.user,
+            roll,
+            fromPosition,
+            toPosition: newPosition,
+            specialMove
+        });
+
+        // Remove from queue
+        await SnakesQueue.findByIdAndDelete(queueItem._id);
+
+        const isWinner = newPosition === 100;
+
+        console.log(`🎲 ${queueItem.user} rolled ${roll}: ${fromPosition} -> ${newPosition}${specialMove ? ` (${specialMove}!)` : ''}${isWinner ? ' 🏆 WINNER!' : ''}`);
+
+        res.json({
+            success: true,
+            user: queueItem.user,
+            roll,
+            fromPosition,
+            toPosition: newPosition,
+            specialMove,
+            isWinner
+        });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// Add test event to queue (for testing without real subs)
+app.post('/api/snakes/test-event', auth, async (req, res) => {
+    try {
+        const { user, amount = 1 } = req.body;
+        if (!user) return res.status(400).json({ error: 'User required' });
+
+        for (let i = 0; i < amount; i++) {
+            await SnakesQueue.create({
+                user,
+                avatarUrl: `https://ui-avatars.com/api/?name=${encodeURIComponent(user)}&background=random`,
+                amount: 1,
+                type: 'test'
+            });
+        }
+
+        console.log(`🧪 Added ${amount} test roll(s) for ${user}`);
+        res.json({ success: true, added: amount });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// Reset game (clear all data)
+app.post('/api/snakes/reset', auth, async (req, res) => {
+    try {
+        await Promise.all([
+            SnakesQueue.deleteMany({}),
+            SnakesPlayer.deleteMany({}),
+            SnakesHistory.deleteMany({})
+        ]);
+        console.log('🐍 Snakes game RESET');
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
 
 // NEW: COUNTDOWN API (STANDALONE)
