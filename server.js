@@ -1232,7 +1232,7 @@ const processSnakesEvent = async (type, user, amount, providerId, tier = '1000',
             // I will default to: 1 Sub = 1 Roll.
             let multiplier = 1;
             const tStr = String(tier).toLowerCase();
-            if (tStr.includes('3000') || tStr === '3') multiplier = 5;
+            if (tStr.includes('3000') || tStr === '3') multiplier = 3;
             else if (tStr.includes('2000') || tStr === '2') multiplier = 2;
 
             rolls = 1 * multiplier;
