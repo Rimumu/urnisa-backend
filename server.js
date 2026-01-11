@@ -242,8 +242,8 @@ const processBufferedGift = async (sender, data) => {
             }
         }
 
-        // Process for Snakes (Always try)
-        await processSnakesEvent('gift', sender, data.count, providerId, data.tier);
+        // Process for Snakes (Always try) - Pass avatar from buffer data
+        await processSnakesEvent('gift', sender, data.count, providerId, data.tier, false, data.avatar);
 
     } catch (e) {
         console.error("Gift Buffer Error:", e);
@@ -417,7 +417,7 @@ const connectSocket = () => {
                     giftBuffer[sender].count += 1;
                 } else {
                     // Start new buffer
-                    giftBuffer[sender] = { count: 1, tier: info.tier || '1000', timer: null };
+                    giftBuffer[sender] = { count: 1, tier: info.tier || '1000', timer: null, avatar: info.avatar };
                 }
 
                 // Set/Reset timeout to process the batch after 2 seconds of silence
@@ -448,7 +448,7 @@ const connectSocket = () => {
             }
 
             // Process Snakes (Always try)
-            await processSnakesEvent(type, username, amount, providerId, tier);
+            await processSnakesEvent(type, username, amount, providerId, tier, false, info.avatar);
 
         } catch (e) { console.error("Socket Error:", e); }
     });
@@ -561,7 +561,7 @@ const syncSessionFallback = async (channelId, stats) => {
                 type = 'gift';
             }
             if (stats) await processEvent(stats, type, username, 1, "", `session-sub-${username}`, lastSub.tier);
-            await processSnakesEvent(type, username, 1, `session-sub-${username}`, lastSub.tier);
+            await processSnakesEvent(type, username, 1, `session-sub-${username}`, lastSub.tier, false, lastSub.avatar);
             changes = true;
         }
 
@@ -951,6 +951,13 @@ app.post('/api/snakes/move', auth, async (req, res) => {
 
         // Get or create player
         let player = await SnakesPlayer.findOne({ user: queueItem.user });
+
+        // Sync Avatar if available in queue
+        if (player && queueItem.avatarUrl && player.avatarUrl !== queueItem.avatarUrl) {
+            player.avatarUrl = queueItem.avatarUrl;
+            // We'll save it later when updating position
+        }
+
         if (!player) {
             player = await SnakesPlayer.create({
                 user: queueItem.user,
@@ -1166,13 +1173,26 @@ app.get('/api/countdown/stats', async (req, res) => {
 // SNAKES REAL EVENT LISTENER LOGIC
 // ==========================================
 
-const processSnakesEvent = async (type, user, amount, providerId, tier = '1000', isManual = false) => {
+const processSnakesEvent = async (type, user, amount, providerId, tier = '1000', isManual = false, avatarUrl = "") => {
     try {
         // 1. Check if Listener is Active
         const settings = await SnakesSettings.findOne({ key: 'main' });
         if (!settings || (!settings.isActive && !isManual)) {
             if (isManual) console.log("⚠️ Snakes Listener is OFF, but proceeding (MANUAL override)");
             else return; // Ignore if inactive
+        }
+
+        // Fetch Avatar if missing (and not manual simulation which might skip it)
+        if (!avatarUrl) {
+            try {
+                // Try fetching from DecAPI
+                const avRes = await axios.get(`https://decapi.me/twitch/avatar/${encodeURIComponent(user)}`);
+                if (avRes.data && typeof avRes.data === 'string' && avRes.data.startsWith('http')) {
+                    avatarUrl = avRes.data.trim();
+                }
+            } catch (e) {
+                // Ignore fetch errors, fallback to empty/ui-avatars on frontend
+            }
         }
 
         // 2. Check Duplicates (if providerId exists)
@@ -1238,7 +1258,7 @@ const processSnakesEvent = async (type, user, amount, providerId, tier = '1000',
             for (let i = 0; i < rolls; i++) {
                 await SnakesQueue.create({
                     user: user || 'Anonymous',
-                    avatarUrl: `https://ui-avatars.com/api/?name=${encodeURIComponent(user || 'A')}&background=random`, // Will be resolved by worker/frontend
+                    avatarUrl: avatarUrl || `https://ui-avatars.com/api/?name=${encodeURIComponent(user || 'A')}&background=random`, // Use fetched avatar or fallback
                     amount: 1,
                     type: type,
                     sourceEventId: finalSourceId
@@ -1275,11 +1295,11 @@ app.post('/api/snakes/toggle-listener', auth, async (req, res) => {
 
 // SIMULATE FOR SNAKES (For Admin Testing)
 app.post('/api/snakes/simulate-event', auth, async (req, res) => {
-    const { type, user, amount, tier } = req.body;
+    const { type, user, amount, tier, avatarUrl } = req.body;
     try {
         // providerId 'manual-timestamp'
         const providerId = `man-snake-${Date.now()}`;
-        await processSnakesEvent(type, user, amount || 1, providerId, tier, true);
+        await processSnakesEvent(type, user, amount || 1, providerId, tier, true, avatarUrl);
         res.json({ success: true, message: "Simulated event processed" });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
