@@ -1627,9 +1627,19 @@ app.post('/api/tournament/register', async (req, res) => {
     try {
         const targetSeasonId = parseInt(seasonId) || 1;
 
-        // Check config for status
-        const config = await Setting.findOne({ key: 'tournament_config' });
-        if (config && config.value && (config.value.status === 'ONGOING' || config.value.status === 'ENDED')) {
+        // Check season status first
+        let status = 'DRAFTING';
+        const season = await TournamentSeason.findOne({ seasonId: targetSeasonId });
+
+        if (season) {
+            status = season.status || 'DRAFTING';
+        } else {
+            // Fallback to global config for backward compatibility
+            const config = await Setting.findOne({ key: 'tournament_config' });
+            if (config && config.value) status = config.value.status;
+        }
+
+        if (status === 'ONGOING' || status === 'ENDED') {
             return res.status(403).json({ error: "Tournament is ongoing/ended. Registration closed." });
         }
 
@@ -1697,16 +1707,24 @@ app.post('/api/tournament/lock', async (req, res) => {
     const { discordId, seasonId } = req.body;
     if (!discordId) return res.status(400).json({ error: "Missing ID" });
 
-    // Check if locking is enabled (Status MUST be LOCK_IN)
-    const config = await Setting.findOne({ key: 'tournament_config' });
-    const currentStatus = config?.value?.status || (config?.value?.lockEnabled ? 'LOCK_IN' : 'DRAFTING');
+    const targetSeasonId = parseInt(seasonId) || 1;
 
-    if (currentStatus !== 'LOCK_IN') {
-        return res.status(403).json({ error: "Lock-ins are currently unavailable." });
-    }
-
+    // Check status
+    let currentStatus = 'DRAFTING';
     try {
-        const entry = await TournamentEntry.findOne({ discordId, seasonId: parseInt(seasonId) || 1 });
+        const season = await TournamentSeason.findOne({ seasonId: targetSeasonId });
+        if (season) {
+            currentStatus = season.status || 'DRAFTING';
+        } else {
+            const config = await Setting.findOne({ key: 'tournament_config' });
+            currentStatus = config?.value?.status || (config?.value?.lockEnabled ? 'LOCK_IN' : 'DRAFTING');
+        }
+
+        if (currentStatus !== 'LOCK_IN') {
+            return res.status(403).json({ error: "Lock-ins are currently unavailable." });
+        }
+
+        const entry = await TournamentEntry.findOne({ discordId, seasonId: targetSeasonId });
         if (!entry) return res.status(404).json({ error: "No team found to lock." });
 
         // Basic Validation: Ensure team is somewhat valid (not completely empty)
