@@ -1593,10 +1593,10 @@ app.post('/api/tournament/register', async (req, res) => {
     if (!discordId || !minecraftUsername || !team) return res.status(400).json({ error: "Missing Data" });
 
     try {
-        // Check config for ONGOING status
+        // Check config for status
         const config = await Setting.findOne({ key: 'tournament_config' });
-        if (config && config.value && config.value.status === 'ONGOING') {
-            return res.status(403).json({ error: "Tournament is ongoing. Registration closed." });
+        if (config && config.value && (config.value.status === 'ONGOING' || config.value.status === 'ENDED')) {
+            return res.status(403).json({ error: "Tournament is ongoing/ended. Registration closed." });
         }
 
         // Check if locked
