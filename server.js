@@ -2317,6 +2317,105 @@ app.post('/api/admin/tournament/clear', auth, async (req, res) => {
 });
 
 // ==========================================
+// TOURNAMENT STATE & WINNERS (NEW)
+// ==========================================
+
+// Get Tournament Config (Status)
+app.get('/api/tournament/config', async (req, res) => {
+    try {
+        const config = await Setting.findOne({ key: 'tournament_config' });
+        if (!config || !config.value) {
+            return res.json({ status: 'No Tournament' });
+        }
+        res.json({ status: config.value.status });
+    } catch (e) {
+        res.status(500).json({ error: "Fetch failed" });
+    }
+});
+
+// Get Tournament Winners
+app.get('/api/tournament/winners', async (req, res) => {
+    try {
+        const config = await Setting.findOne({ key: 'tournament_config' });
+        if (!config || !config.value || !config.value.winners) {
+            return res.json([]);
+        }
+        res.json(config.value.winners);
+    } catch (e) {
+        res.status(500).json({ error: "Fetch failed" });
+    }
+});
+
+// End Tournament (Admin)
+app.post('/api/admin/tournament/end', auth, async (req, res) => {
+    const { winners } = req.body; // Expects array of winner objects
+    try {
+        await Setting.findOneAndUpdate(
+            { key: 'tournament_config' },
+            {
+                key: 'tournament_config',
+                value: {
+                    status: 'ENDED',
+                    winners: winners || [],
+                    endedAt: new Date()
+                }
+            },
+            { upsert: true, new: true }
+        );
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: "Failed to end tournament" });
+    }
+});
+
+// Set Tournament Status (Admin) e.g. Start, Pause
+app.post('/api/admin/tournament/status', auth, async (req, res) => {
+    const { status } = req.body;
+    try {
+        const config = await Setting.findOne({ key: 'tournament_config' });
+        const currentVal = config ? config.value : { winners: [] };
+
+        await Setting.findOneAndUpdate(
+            { key: 'tournament_config' },
+            {
+                key: 'tournament_config',
+                value: { ...currentVal, status: status }
+            },
+            { upsert: true, new: true }
+        );
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: "Failed update status" });
+    }
+});
+
+// Publish Bracket to Production (Admin)
+app.post('/api/admin/tournament/publish', auth, async (req, res) => {
+    try {
+        // 1. Get Dev Bracket
+        const devBracket = await TournamentBracket.findOne({ key: 'main' });
+        if (!devBracket) return res.status(404).json({ error: "Dev bracket empty" });
+
+        // 2. Overwrite Production Bracket
+        await TournamentBracket.findOneAndUpdate(
+            { key: 'production' },
+            {
+                key: 'production',
+                type: devBracket.type,
+                matches: devBracket.matches,
+                updatedAt: new Date()
+            },
+            { upsert: true, new: true }
+        );
+
+        res.json({ success: true, message: "Bracket Published to Public" });
+    } catch (e) {
+        console.error(e);
+        res.status(500).json({ error: "Publish failed" });
+    }
+});
+
+// ==========================================
 // COBBLEMON RANKED SYSTEM
 // ==========================================
 
