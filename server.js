@@ -1620,6 +1620,44 @@ app.post('/api/tournament/register', async (req, res) => {
     }
 });
 
+// NEW: End Tournament & Save Winners
+app.post('/api/admin/tournament/end', auth, async (req, res) => {
+    const { winners } = req.body;
+
+    if (!winners || !Array.isArray(winners) || winners.length < 1) {
+        return res.status(400).json({ error: "Invalid winners data" });
+    }
+
+    try {
+        await Setting.findOneAndUpdate(
+            { key: 'tournament_winners' },
+            { value: winners },
+            { upsert: true }
+        );
+
+        await Setting.findOneAndUpdate(
+            { key: 'tournament_config' },
+            { value: { status: 'ENDED', lockEnabled: false } },
+            { upsert: true }
+        );
+
+        res.json({ success: true, message: "Tournament Ended & Winners Saved" });
+    } catch (e) {
+        console.error("End Tournament Error:", e);
+        res.status(500).json({ error: "Failed to end tournament" });
+    }
+});
+
+// NEW: Get Tournament Winners (Public)
+app.get('/api/tournament/winners', async (req, res) => {
+    try {
+        const setting = await Setting.findOne({ key: 'tournament_winners' });
+        res.json(setting ? setting.value : []);
+    } catch (e) {
+        res.status(500).json({ error: "Fetch failed" });
+    }
+});
+
 // Lock Team
 app.post('/api/tournament/lock', async (req, res) => {
     const { discordId } = req.body;
