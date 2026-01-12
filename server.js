@@ -2473,6 +2473,19 @@ app.post('/api/admin/tournament/season/:id/update', auth, async (req, res) => {
     }
 });
 
+// FIX LEGACY PLAYERS (One-time migration)
+app.post('/api/admin/fix-legacy-players', auth, async (req, res) => {
+    try {
+        const result = await TournamentEntry.updateMany(
+            { seasonId: { $exists: false } },
+            { $set: { seasonId: 1 } }
+        );
+        res.json({ success: true, modified: result.modifiedCount });
+    } catch (e) {
+        res.status(500).json({ error: "Migration failed" });
+    }
+});
+
 // Archive Season (Admin)
 app.post('/api/admin/tournament/season/:id/archive', auth, async (req, res) => {
     try {
