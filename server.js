@@ -44,7 +44,16 @@ console.log("--- URNISA HYBRID BACKEND STARTING ---");
 if (MONGO_URI) {
     mongoose.set('strictQuery', false);
     mongoose.connect(MONGO_URI)
-        .then(() => console.log("✅ MongoDB Connected"))
+        .then(async () => {
+            console.log("✅ MongoDB Connected");
+            try {
+                // Fix for Season 2: Ensure proper compound index exists and old unique index is dropped
+                await TournamentEntry.syncIndexes();
+                console.log("✅ TournamentEntry Indexes Synced");
+            } catch (e) {
+                console.error("⚠️ Index Sync Warning:", e.message);
+            }
+        })
         .catch(e => console.error("❌ MongoDB Error:", e));
 }
 
@@ -1660,7 +1669,11 @@ app.post('/api/tournament/register', async (req, res) => {
         );
         res.json({ success: true });
     } catch (e) {
-        res.status(500).json({ error: "Save failed" });
+        console.error("Register Error:", e);
+        if (e.code === 11000) {
+            return res.status(400).json({ error: "You are already registered for this season. Please refresh." });
+        }
+        res.status(500).json({ error: "Save failed: " + e.message });
     }
 });
 
