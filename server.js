@@ -1603,11 +1603,11 @@ app.post('/api/admin/tournament/config', auth, async (req, res) => {
 
 // Get My Team
 app.get('/api/tournament/my-team', async (req, res) => {
-    const { discordId } = req.query;
+    const { discordId, seasonId } = req.query;
     if (!discordId) return res.status(400).json({ error: "Missing Discord ID" });
 
     try {
-        const entry = await TournamentEntry.findOne({ discordId });
+        const entry = await TournamentEntry.findOne({ discordId, seasonId: parseInt(seasonId) || 1 });
         if (!entry) {
             // Not registered
             return res.json({ registered: false, team: new Array(6).fill(null), isLocked: false });
@@ -1621,10 +1621,12 @@ app.get('/api/tournament/my-team', async (req, res) => {
 
 // Register/Save Team
 app.post('/api/tournament/register', async (req, res) => {
-    const { discordId, minecraftUsername, team } = req.body;
+    const { discordId, minecraftUsername, team, seasonId } = req.body;
     if (!discordId || !minecraftUsername || !team) return res.status(400).json({ error: "Missing Data" });
 
     try {
+        const targetSeasonId = parseInt(seasonId) || 1;
+
         // Check config for status
         const config = await Setting.findOne({ key: 'tournament_config' });
         if (config && config.value && (config.value.status === 'ONGOING' || config.value.status === 'ENDED')) {
@@ -1632,13 +1634,13 @@ app.post('/api/tournament/register', async (req, res) => {
         }
 
         // Check if locked
-        const existing = await TournamentEntry.findOne({ discordId });
+        const existing = await TournamentEntry.findOne({ discordId, seasonId: targetSeasonId });
         if (existing && existing.isLocked) {
             return res.status(403).json({ error: "Team is locked and cannot be edited." });
         }
 
         await TournamentEntry.findOneAndUpdate(
-            { discordId },
+            { discordId, seasonId: targetSeasonId },
             {
                 minecraftUsername,
                 team,
@@ -1692,7 +1694,7 @@ app.get('/api/tournament/winners', async (req, res) => {
 
 // Lock Team
 app.post('/api/tournament/lock', async (req, res) => {
-    const { discordId } = req.body;
+    const { discordId, seasonId } = req.body;
     if (!discordId) return res.status(400).json({ error: "Missing ID" });
 
     // Check if locking is enabled (Status MUST be LOCK_IN)
@@ -1704,7 +1706,7 @@ app.post('/api/tournament/lock', async (req, res) => {
     }
 
     try {
-        const entry = await TournamentEntry.findOne({ discordId });
+        const entry = await TournamentEntry.findOne({ discordId, seasonId: parseInt(seasonId) || 1 });
         if (!entry) return res.status(404).json({ error: "No team found to lock." });
 
         // Basic Validation: Ensure team is somewhat valid (not completely empty)
