@@ -119,8 +119,9 @@ const BingoWinner = mongoose.model('BingoWinner', new mongoose.Schema({
 
 // NEW: Tournament Entry Schema
 const TournamentEntry = mongoose.model('TournamentEntry', new mongoose.Schema({
-    discordId: { type: String, required: true, unique: true },
+    discordId: { type: String, required: true },
     minecraftUsername: { type: String, required: true },
+    seasonId: { type: Number, default: 1 },
     team: [{
         id: Number,
         name: String
@@ -129,6 +130,9 @@ const TournamentEntry = mongoose.model('TournamentEntry', new mongoose.Schema({
     isDev: { type: Boolean, default: false }, // Flag for dummy players
     updatedAt: { type: Date, default: Date.now }
 }));
+
+// Compound unique key: one registration per user per season
+TournamentEntry.schema.index({ discordId: 1, seasonId: 1 }, { unique: true });
 
 // NEW: Tournament Bracket Schema
 const TournamentMatchSchema = new mongoose.Schema({
@@ -147,9 +151,22 @@ const TournamentMatchSchema = new mongoose.Schema({
 
 const TournamentBracket = mongoose.model('TournamentBracket', new mongoose.Schema({
     key: { type: String, default: 'main', unique: true }, // 'production' or 'dev'
+    seasonId: { type: Number, default: 1 },
     type: { type: String, default: 'SINGLE_ELIMINATION' },
     matches: [TournamentMatchSchema],
     updatedAt: { type: Date, default: Date.now }
+}));
+
+// NEW: Tournament Season Schema
+const TournamentSeason = mongoose.model('TournamentSeason', new mongoose.Schema({
+    seasonId: { type: Number, unique: true, required: true },
+    name: { type: String, default: 'Season 1' },
+    format: { type: String, default: 'Singles 4v4' },
+    status: { type: String, default: 'DRAFTING' }, // DRAFTING, LOCK_IN, ONGOING, ENDED
+    winners: [{ rank: Number, username: String, score: String }],
+    isArchived: { type: Boolean, default: false },
+    challongeUrl: { type: String, default: '' },
+    createdAt: { type: Date, default: Date.now }
 }));
 
 // ==========================================
@@ -1687,12 +1704,16 @@ app.post('/api/tournament/lock', async (req, res) => {
     }
 });
 
-// Get All Players (Public - Masked Drafts)
+// Get All Players (Public - Masked Drafts) - Season Aware
 // Updated to filter out Dev players by default unless specified
 app.get('/api/tournament/players', async (req, res) => {
-    const { dev } = req.query;
+    const { dev, seasonId } = req.query;
     // If ?dev=true is NOT present, we filter out isDev: true players
     const filter = dev === 'true' ? {} : { isDev: { $ne: true } };
+
+    // Add seasonId filter
+    if (seasonId) filter.seasonId = parseInt(seasonId);
+    else filter.seasonId = 1; // Default to Season 1
 
     try {
         const players = await TournamentEntry.find(filter).sort({ updatedAt: -1 });
@@ -1703,6 +1724,7 @@ app.get('/api/tournament/players', async (req, res) => {
                 _id: p._id,
                 discordId: p.discordId,
                 minecraftUsername: p.minecraftUsername,
+                seasonId: p.seasonId,
                 team: new Array(6).fill(null), // Mask team
                 isLocked: false,
                 isDev: p.isDev, // Include for dev tools if needed
@@ -2209,12 +2231,13 @@ app.post('/api/dev/tournament/inject-players', auth, async (req, res) => {
 // TOURNAMENT BRACKET PRODUCTION ENDPOINTS (KEY='production')
 // ==========================================
 
-// Get Current Bracket (Production)
+// Get Current Bracket (Production) - Season Aware
 app.get('/api/tournament/bracket', async (req, res) => {
     try {
-        let bracket = await TournamentBracket.findOne({ key: 'production' });
+        const seasonId = parseInt(req.query.seasonId) || 1;
+        let bracket = await TournamentBracket.findOne({ key: 'production', seasonId });
         if (!bracket) {
-            return res.json({ type: 'SINGLE_ELIMINATION', matches: [] });
+            return res.json({ type: 'SINGLE_ELIMINATION', matches: [], seasonId });
         }
         res.json(bracket);
     } catch (e) {
@@ -2317,50 +2340,168 @@ app.post('/api/admin/tournament/clear', auth, async (req, res) => {
 });
 
 // ==========================================
-// TOURNAMENT STATE & WINNERS (NEW)
+// TOURNAMENT SEASON SYSTEM
 // ==========================================
 
-// Get Tournament Config (Status)
+// Initialize Default Season (Season 1) if none exists
+const initDefaultSeason = async () => {
+    const existing = await TournamentSeason.findOne({ seasonId: 1 });
+    if (!existing) {
+        await TournamentSeason.create({
+            seasonId: 1,
+            name: 'Season 1',
+            format: 'Singles 4v4',
+            status: 'ENDED',
+            isArchived: true,
+            challongeUrl: 'https://challonge.com/nisamon1/module'
+        });
+        console.log("✅ Created default Season 1");
+    }
+};
+if (MONGO_URI) setTimeout(initDefaultSeason, 3000);
+
+// Get All Seasons
+app.get('/api/tournament/seasons', async (req, res) => {
+    try {
+        const seasons = await TournamentSeason.find().sort({ seasonId: -1 });
+        res.json(seasons);
+    } catch (e) {
+        res.status(500).json({ error: "Fetch failed" });
+    }
+});
+
+// Get Active Season (latest non-archived, or most recent)
+app.get('/api/tournament/active-season', async (req, res) => {
+    try {
+        let season = await TournamentSeason.findOne({ isArchived: false }).sort({ seasonId: -1 });
+        if (!season) {
+            season = await TournamentSeason.findOne().sort({ seasonId: -1 });
+        }
+        res.json(season || { seasonId: 1, name: 'Season 1', status: 'ENDED', format: 'Singles 4v4' });
+    } catch (e) {
+        res.status(500).json({ error: "Fetch failed" });
+    }
+});
+
+// Get Specific Season
+app.get('/api/tournament/season/:id', async (req, res) => {
+    try {
+        const season = await TournamentSeason.findOne({ seasonId: parseInt(req.params.id) });
+        if (!season) return res.status(404).json({ error: "Season not found" });
+        res.json(season);
+    } catch (e) {
+        res.status(500).json({ error: "Fetch failed" });
+    }
+});
+
+// Get Tournament Config (Status) - Now Season Aware
 app.get('/api/tournament/config', async (req, res) => {
     try {
-        const config = await Setting.findOne({ key: 'tournament_config' });
-        if (!config || !config.value) {
-            return res.json({ status: 'No Tournament' });
+        const seasonId = parseInt(req.query.seasonId) || null;
+        let season;
+        if (seasonId) {
+            season = await TournamentSeason.findOne({ seasonId });
+        } else {
+            season = await TournamentSeason.findOne({ isArchived: false }).sort({ seasonId: -1 });
+            if (!season) season = await TournamentSeason.findOne().sort({ seasonId: -1 });
         }
-        res.json({ status: config.value.status });
+        if (!season) return res.json({ status: 'No Tournament', seasonId: 1 });
+        res.json({
+            status: season.status,
+            seasonId: season.seasonId,
+            name: season.name,
+            format: season.format,
+            challongeUrl: season.challongeUrl
+        });
     } catch (e) {
         res.status(500).json({ error: "Fetch failed" });
     }
 });
 
-// Get Tournament Winners
+// Get Tournament Winners - Season Aware
 app.get('/api/tournament/winners', async (req, res) => {
     try {
-        const config = await Setting.findOne({ key: 'tournament_config' });
-        if (!config || !config.value || !config.value.winners) {
-            return res.json([]);
-        }
-        res.json(config.value.winners);
+        const seasonId = parseInt(req.query.seasonId) || 1;
+        const season = await TournamentSeason.findOne({ seasonId });
+        if (!season || !season.winners) return res.json([]);
+        res.json(season.winners);
     } catch (e) {
         res.status(500).json({ error: "Fetch failed" });
     }
 });
 
-// End Tournament (Admin)
-app.post('/api/admin/tournament/end', auth, async (req, res) => {
-    const { winners } = req.body; // Expects array of winner objects
+// Create New Season (Admin)
+app.post('/api/admin/tournament/season/create', auth, async (req, res) => {
+    const { name, format, challongeUrl } = req.body;
     try {
-        await Setting.findOneAndUpdate(
-            { key: 'tournament_config' },
+        const lastSeason = await TournamentSeason.findOne().sort({ seasonId: -1 });
+        const newId = lastSeason ? lastSeason.seasonId + 1 : 1;
+
+        const season = await TournamentSeason.create({
+            seasonId: newId,
+            name: name || `Season ${newId}`,
+            format: format || 'Singles 4v4',
+            status: 'DRAFTING',
+            challongeUrl: challongeUrl || ''
+        });
+        res.json({ success: true, season });
+    } catch (e) {
+        console.error(e);
+        res.status(500).json({ error: "Failed to create season" });
+    }
+});
+
+// Update Season (Admin)
+app.post('/api/admin/tournament/season/:id/update', auth, async (req, res) => {
+    const { name, format, challongeUrl, status } = req.body;
+    try {
+        const update = {};
+        if (name) update.name = name;
+        if (format) update.format = format;
+        if (challongeUrl !== undefined) update.challongeUrl = challongeUrl;
+        if (status) update.status = status;
+
+        const season = await TournamentSeason.findOneAndUpdate(
+            { seasonId: parseInt(req.params.id) },
+            update,
+            { new: true }
+        );
+        if (!season) return res.status(404).json({ error: "Season not found" });
+        res.json({ success: true, season });
+    } catch (e) {
+        res.status(500).json({ error: "Update failed" });
+    }
+});
+
+// Archive Season (Admin)
+app.post('/api/admin/tournament/season/:id/archive', auth, async (req, res) => {
+    try {
+        const season = await TournamentSeason.findOneAndUpdate(
+            { seasonId: parseInt(req.params.id) },
+            { isArchived: true, status: 'ENDED' },
+            { new: true }
+        );
+        if (!season) return res.status(404).json({ error: "Season not found" });
+        res.json({ success: true, season });
+    } catch (e) {
+        res.status(500).json({ error: "Archive failed" });
+    }
+});
+
+// End Tournament (Admin) - Now saves to TournamentSeason
+app.post('/api/admin/tournament/end', auth, async (req, res) => {
+    const { winners, seasonId } = req.body;
+    try {
+        const targetSeasonId = seasonId || (await TournamentSeason.findOne({ isArchived: false }).sort({ seasonId: -1 }))?.seasonId || 1;
+
+        await TournamentSeason.findOneAndUpdate(
+            { seasonId: targetSeasonId },
             {
-                key: 'tournament_config',
-                value: {
-                    status: 'ENDED',
-                    winners: winners || [],
-                    endedAt: new Date()
-                }
+                status: 'ENDED',
+                winners: winners || [],
+                isArchived: true
             },
-            { upsert: true, new: true }
+            { upsert: true }
         );
         res.json({ success: true });
     } catch (e) {
@@ -2368,20 +2509,16 @@ app.post('/api/admin/tournament/end', auth, async (req, res) => {
     }
 });
 
-// Set Tournament Status (Admin) e.g. Start, Pause
+// Set Tournament Status (Admin) - Season Aware
 app.post('/api/admin/tournament/status', auth, async (req, res) => {
-    const { status } = req.body;
+    const { status, seasonId } = req.body;
     try {
-        const config = await Setting.findOne({ key: 'tournament_config' });
-        const currentVal = config ? config.value : { winners: [] };
+        const targetSeasonId = seasonId || (await TournamentSeason.findOne({ isArchived: false }).sort({ seasonId: -1 }))?.seasonId || 1;
 
-        await Setting.findOneAndUpdate(
-            { key: 'tournament_config' },
-            {
-                key: 'tournament_config',
-                value: { ...currentVal, status: status }
-            },
-            { upsert: true, new: true }
+        await TournamentSeason.findOneAndUpdate(
+            { seasonId: targetSeasonId },
+            { status },
+            { upsert: true }
         );
         res.json({ success: true });
     } catch (e) {
@@ -2389,18 +2526,20 @@ app.post('/api/admin/tournament/status', auth, async (req, res) => {
     }
 });
 
-// Publish Bracket to Production (Admin)
+// Publish Bracket to Production (Admin) - Season Aware
 app.post('/api/admin/tournament/publish', auth, async (req, res) => {
+    const { seasonId } = req.body;
     try {
-        // 1. Get Dev Bracket
-        const devBracket = await TournamentBracket.findOne({ key: 'main' });
-        if (!devBracket) return res.status(404).json({ error: "Dev bracket empty" });
+        const targetSeasonId = seasonId || (await TournamentSeason.findOne({ isArchived: false }).sort({ seasonId: -1 }))?.seasonId || 1;
 
-        // 2. Overwrite Production Bracket
+        const devBracket = await TournamentBracket.findOne({ key: 'main', seasonId: targetSeasonId });
+        if (!devBracket) return res.status(404).json({ error: "Dev bracket empty for this season" });
+
         await TournamentBracket.findOneAndUpdate(
-            { key: 'production' },
+            { key: 'production', seasonId: targetSeasonId },
             {
                 key: 'production',
+                seasonId: targetSeasonId,
                 type: devBracket.type,
                 matches: devBracket.matches,
                 updatedAt: new Date()
