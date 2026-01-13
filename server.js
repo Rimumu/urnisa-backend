@@ -1748,11 +1748,218 @@ app.post('/api/tournament/lock', async (req, res) => {
         await entry.save();
         res.json({ success: true });
     } catch (e) {
+        console.error("Lock Error:", e);
         res.status(500).json({ error: "Lock failed" });
     }
 });
 
-// Get All Players (Public - Masked Drafts) - Season Aware
+// ==========================================
+// DUO TEAM MANAGEMENT ENDPOINTS
+// ==========================================
+
+// Save/Update Duo Team (Captain Only)
+app.post('/api/tournament/duo/save-team', async (req, res) => {
+    const { discordId, duoId, team } = req.body;
+    if (!discordId || !duoId || !team) return res.status(400).json({ error: "Missing data" });
+
+    try {
+        const duo = await TournamentDuo.findOne({ duoId });
+        if (!duo) return res.status(404).json({ error: "Duo not found" });
+
+        // Verify user is captain
+        if (duo.captainDiscordId !== discordId) {
+            return res.status(403).json({ error: "Only the Captain can edit the team." });
+        }
+
+        // Check if locked
+        if (duo.isLocked) {
+            return res.status(403).json({ error: "Team is locked and cannot be edited." });
+        }
+
+        duo.team = team;
+        await duo.save();
+        res.json({ success: true });
+    } catch (e) {
+        console.error("Duo Save Team Error:", e);
+        res.status(500).json({ error: "Failed to save team" });
+    }
+});
+
+// Lock Duo Team (Captain Only)
+app.post('/api/tournament/duo/lock', async (req, res) => {
+    const { discordId, duoId } = req.body;
+    if (!discordId || !duoId) return res.status(400).json({ error: "Missing data" });
+
+    try {
+        const duo = await TournamentDuo.findOne({ duoId });
+        if (!duo) return res.status(404).json({ error: "Duo not found" });
+
+        // Verify user is captain
+        if (duo.captainDiscordId !== discordId) {
+            return res.status(403).json({ error: "Only the Captain can lock the team." });
+        }
+
+        // Check season status
+        const season = await TournamentSeason.findOne({ seasonId: duo.seasonId });
+        if (season && season.status !== 'LOCK_IN') {
+            return res.status(403).json({ error: "Lock-ins are currently unavailable." });
+        }
+
+        // Validate team has 6 Pokemon
+        const validCount = (duo.team || []).filter(p => p !== null).length;
+        if (validCount < 6) {
+            return res.status(400).json({ error: "Team must have 6 Pokemon to lock." });
+        }
+
+        duo.isLocked = true;
+        await duo.save();
+        res.json({ success: true });
+    } catch (e) {
+        console.error("Duo Lock Error:", e);
+        res.status(500).json({ error: "Failed to lock team" });
+    }
+});
+
+// Admin: Unlock Duo Team
+app.post('/api/admin/tournament/duo/unlock', auth, async (req, res) => {
+    const { duoId } = req.body;
+    if (!duoId) return res.status(400).json({ error: "Missing duoId" });
+
+    try {
+        const duo = await TournamentDuo.findOne({ duoId });
+        if (!duo) return res.status(404).json({ error: "Duo not found" });
+
+        duo.isLocked = false;
+        await duo.save();
+        res.json({ success: true });
+    } catch (e) {
+        console.error("Duo Unlock Error:", e);
+        res.status(500).json({ error: "Failed to unlock duo" });
+    }
+});
+
+// Admin: Revoke/Delete Duo
+app.post('/api/admin/tournament/duo/revoke', auth, async (req, res) => {
+    const { duoId } = req.body;
+    if (!duoId) return res.status(400).json({ error: "Missing duoId" });
+
+    try {
+        await TournamentDuo.deleteOne({ duoId });
+        res.json({ success: true });
+    } catch (e) {
+        console.error("Duo Revoke Error:", e);
+        res.status(500).json({ error: "Failed to revoke duo" });
+    }
+});
+
+// Get User's Duo (for "My Team" section)
+app.get('/api/tournament/my-duo', async (req, res) => {
+    const { discordId, seasonId } = req.query;
+    if (!discordId) return res.status(400).json({ error: "Missing discordId" });
+
+    const targetSeasonId = parseInt(seasonId) || 1;
+
+    try {
+        const duo = await TournamentDuo.findOne({
+            seasonId: targetSeasonId,
+            $or: [
+                { player1DiscordId: discordId },
+                { player2DiscordId: discordId }
+            ]
+        });
+
+        if (!duo) return res.json(null);
+        res.json(duo);
+    } catch (e) {
+        console.error("Fetch My Duo Error:", e);
+        res.status(500).json({ error: "Failed to fetch duo" });
+    }
+});
+
+// Get All Duos for a Season (Public)
+app.get('/api/tournament/duos', async (req, res) => {
+    const { seasonId } = req.query;
+    const targetSeasonId = parseInt(seasonId) || 1;
+
+    try {
+        const duos = await TournamentDuo.find({ seasonId: targetSeasonId }).sort({ createdAt: -1 });
+        res.json(duos);
+    } catch (e) {
+        console.error("Fetch Duos Error:", e);
+        res.status(500).json({ error: "Failed to fetch duos" });
+    }
+});
+
+// Admin: Create Duo (Pair two players)
+app.post('/api/admin/tournament/duo/create', auth, async (req, res) => {
+    const { seasonId, player1, player2, captain } = req.body;
+    // player1, player2 = { discordId, username }
+    // captain = 'player1' | 'player2'
+
+    if (!player1 || !player2 || !captain || !seasonId) {
+        return res.status(400).json({ error: "Missing data" });
+    }
+
+    try {
+        const duoId = `duo-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+        const captainDiscordId = captain === 'player1' ? player1.discordId : player2.discordId;
+
+        const newDuo = new TournamentDuo({
+            duoId,
+            seasonId,
+            player1DiscordId: player1.discordId,
+            player1Username: player1.username,
+            player2DiscordId: player2.discordId,
+            player2Username: player2.username,
+            captainDiscordId,
+            team: [],
+            isLocked: false
+        });
+
+        await newDuo.save();
+        res.json({ success: true, duo: newDuo });
+    } catch (e) {
+        console.error("Create Duo Error:", e);
+        res.status(500).json({ error: "Failed to create duo" });
+    }
+});
+
+// Admin: Delete Duo
+app.post('/api/admin/tournament/duo/delete', auth, async (req, res) => {
+    const { duoId } = req.body;
+    if (!duoId) return res.status(400).json({ error: "Missing duoId" });
+
+    try {
+        await TournamentDuo.deleteOne({ duoId });
+        res.json({ success: true });
+    } catch (e) {
+        console.error("Delete Duo Error:", e);
+        res.status(500).json({ error: "Failed to delete duo" });
+    }
+});
+
+// Admin: Update Duo Captain
+app.post('/api/admin/tournament/duo/update-captain', auth, async (req, res) => {
+    const { duoId, newCaptainDiscordId } = req.body;
+    if (!duoId || !newCaptainDiscordId) return res.status(400).json({ error: "Missing data" });
+
+    try {
+        const duo = await TournamentDuo.findOne({ duoId });
+        if (!duo) return res.status(404).json({ error: "Duo not found" });
+
+        // Verify new captain is in the duo
+        if (newCaptainDiscordId !== duo.player1DiscordId && newCaptainDiscordId !== duo.player2DiscordId) {
+            return res.status(400).json({ error: "New captain must be a duo member" });
+        }
+
+        duo.captainDiscordId = newCaptainDiscordId;
+        await duo.save();
+        res.json({ success: true });
+    } catch (e) {
+        console.error("Update Captain Error:", e);
+        res.status(500).json({ error: "Failed to update captain" });
+    }
+});
 // Updated to filter out Dev players by default unless specified
 app.get('/api/tournament/players', async (req, res) => {
     const { dev, seasonId } = req.query;
