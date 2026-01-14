@@ -1854,6 +1854,29 @@ app.post('/api/admin/tournament/duo/revoke', auth, async (req, res) => {
     }
 });
 
+// Admin: Update Duo Captain (Swap Captain)
+app.post('/api/admin/tournament/duo/update-captain', auth, async (req, res) => {
+    const { duoId, newCaptainDiscordId } = req.body;
+    if (!duoId || !newCaptainDiscordId) return res.status(400).json({ error: "Missing duoId or newCaptainDiscordId" });
+
+    try {
+        const duo = await TournamentDuo.findOne({ duoId });
+        if (!duo) return res.status(404).json({ error: "Duo not found" });
+
+        // Verify newCaptainDiscordId is one of the duo members
+        if (newCaptainDiscordId !== duo.player1DiscordId && newCaptainDiscordId !== duo.player2DiscordId) {
+            return res.status(400).json({ error: "New captain must be a duo member" });
+        }
+
+        duo.captainDiscordId = newCaptainDiscordId;
+        await duo.save();
+        res.json({ success: true });
+    } catch (e) {
+        console.error("Duo Update Captain Error:", e);
+        res.status(500).json({ error: "Failed to update captain" });
+    }
+});
+
 // Get User's Duo (for "My Team" section)
 app.get('/api/tournament/my-duo', async (req, res) => {
     const { discordId, seasonId } = req.query;
