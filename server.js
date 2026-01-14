@@ -187,6 +187,7 @@ const TournamentDuo = mongoose.model('TournamentDuo', new mongoose.Schema({
     player2DiscordId: { type: String, required: true },
     player2Username: { type: String, required: true },
     captainDiscordId: { type: String, required: true }, // Which player is captain
+    teamName: { type: String, default: '' }, // Custom team name set by captain
     team: [{ id: Number, name: String }], // 6 Pokemon for the duo
     isLocked: { type: Boolean, default: false },
     createdAt: { type: Date, default: Date.now }
@@ -1759,7 +1760,7 @@ app.post('/api/tournament/lock', async (req, res) => {
 
 // Save/Update Duo Team (Captain Only)
 app.post('/api/tournament/duo/save-team', async (req, res) => {
-    const { discordId, duoId, team } = req.body;
+    const { discordId, duoId, team, teamName } = req.body;
     if (!discordId || !duoId || !team) return res.status(400).json({ error: "Missing data" });
 
     try {
@@ -1777,6 +1778,7 @@ app.post('/api/tournament/duo/save-team', async (req, res) => {
         }
 
         duo.team = team;
+        if (teamName !== undefined) duo.teamName = teamName;
         await duo.save();
         res.json({ success: true });
     } catch (e) {
