@@ -36,6 +36,45 @@ const app = express();
 app.use(express.json({ limit: '50mb' }));
 app.use(cors({ origin: '*' }));
 
+// Serve static files from 'public' directory
+const path = require('path');
+const fs = require('fs');
+
+// Ensure cards directory exists
+const CARDS_DIR = path.join(__dirname, 'public', 'cards');
+if (!fs.existsSync(CARDS_DIR)) {
+    fs.mkdirSync(CARDS_DIR, { recursive: true });
+}
+
+app.use('/cards', express.static(CARDS_DIR));
+
+// Upload Card Endpoint (Base64)
+app.post('/api/public/upload-card', async (req, res) => {
+    try {
+        const { image, filename } = req.body;
+        if (!image || !filename) return res.status(400).json({ error: "Missing image/filename" });
+
+        // Remove header if present (data:image/png;base64,...)
+        const base64Data = image.replace(/^data:image\/\w+;base64,/, "");
+
+        // Sanitize filename
+        const safeName = filename.replace(/[^a-z0-9_-]/gi, '_') + '.png';
+        const filePath = path.join(CARDS_DIR, safeName);
+
+        fs.writeFileSync(filePath, base64Data, 'base64');
+
+        // Return the public URL
+        // If running locally: http://localhost:3001/cards/filename.png
+        // If prod: https://urnisa-backend-3b3m.onrender.com/cards/filename.png
+        const publicUrl = `${process.env.PUBLIC_URL || (req.protocol + '://' + req.get('host'))}/cards/${safeName}`;
+
+        res.json({ success: true, url: publicUrl });
+    } catch (e) {
+        console.error("Upload Error:", e);
+        res.status(500).json({ error: "Upload failed" });
+    }
+});
+
 console.log("--- URNISA HYBRID BACKEND STARTING ---");
 
 // ==========================================
