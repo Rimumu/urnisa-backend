@@ -232,6 +232,17 @@ const TournamentDuo = mongoose.model('TournamentDuo', new mongoose.Schema({
     createdAt: { type: Date, default: Date.now }
 }));
 
+// NEW: Live Duo Party Data (Pokemon picks from in-game server logs)
+const DuoPartyData = mongoose.model('DuoPartyData', new mongoose.Schema({
+    duoId: { type: String, required: true, unique: true },
+    player1Username: { type: String },
+    player2Username: { type: String },
+    player1Picks: [{ name: String, level: Number }], // 3 Pokemon
+    player2Picks: [{ name: String, level: Number }], // 3 Pokemon
+    rawLogData: { type: String }, // Original log text for debugging
+    lastUpdated: { type: Date, default: Date.now }
+}));
+
 
 // ==========================================
 // SNAKES AND LADDERS SCHEMAS
@@ -4258,6 +4269,154 @@ app.post('/api/ranked/admin/clear-all-opponent-history', async (req, res) => {
             deletedCount: result.deletedCount,
             message: `Cleared ALL ${result.deletedCount} opponent history records. All diminishing returns reset.`
         });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// ==========================================
+// DUO PARTY DATA API (Live Party Picks from Server Logs)
+// ==========================================
+
+// GET: Fetch all duo party data
+app.get('/api/tournament/duo-parties', async (req, res) => {
+    try {
+        const parties = await DuoPartyData.find({}).sort({ lastUpdated: -1 });
+        res.json(parties);
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// POST: Parse log text and extract party data
+// Expected log format from mod:
+// "=== SAVING DUO PARTY ===" or "Duo party saved" 
+// "p1=Username1" or player names, Pokemon lists like "Pikachu (Lv.50)"
+app.post('/api/admin/tournament/parse-duo-logs', auth, async (req, res) => {
+    try {
+        const { logText, duoId, player1Username, player2Username } = req.body;
+
+        if (!logText) {
+            return res.status(400).json({ error: 'Log text is required' });
+        }
+
+        // Parse Pokemon names from log lines
+        // Matches patterns like: "- Pikachu (Lv.50)" or "  Pikachu Lv50" or "Pikachu (Level 50)"
+        const pokemonRegex = /(?:^|\s*-?\s*)([A-Z][a-z]+(?:[A-Z][a-z]*)*)\s*(?:\()?(?:Lv\.?|Level\s*)(\d+)/gmi;
+
+        const allPokemon = [];
+        let match;
+        while ((match = pokemonRegex.exec(logText)) !== null) {
+            allPokemon.push({ name: match[1], level: parseInt(match[2]) });
+        }
+
+        // Split Pokemon between players (first 3 = player1, next 3 = player2)
+        const player1Picks = allPokemon.slice(0, 3);
+        const player2Picks = allPokemon.slice(3, 6);
+
+        if (player1Picks.length === 0 && player2Picks.length === 0) {
+            return res.status(400).json({
+                error: 'Could not parse any Pokemon from logs. Expected format: "Pikachu (Lv.50)"',
+                parsed: allPokemon
+            });
+        }
+
+        // If duoId provided, update that specific duo
+        if (duoId) {
+            const data = await DuoPartyData.findOneAndUpdate(
+                { duoId },
+                {
+                    duoId,
+                    player1Username: player1Username || 'Player 1',
+                    player2Username: player2Username || 'Player 2',
+                    player1Picks,
+                    player2Picks,
+                    rawLogData: logText,
+                    lastUpdated: new Date()
+                },
+                { upsert: true, new: true }
+            );
+            return res.json({ success: true, data, parsed: { player1Picks, player2Picks } });
+        }
+
+        // Auto-match by player username if no duoId
+        // Try to find a duo with matching player names
+        let matchedDuo = null;
+        if (player1Username || player2Username) {
+            matchedDuo = await TournamentDuo.findOne({
+                $or: [
+                    { player1Username: { $regex: new RegExp(player1Username || '', 'i') } },
+                    { player2Username: { $regex: new RegExp(player2Username || '', 'i') } }
+                ]
+            });
+        }
+
+        if (matchedDuo) {
+            const data = await DuoPartyData.findOneAndUpdate(
+                { duoId: matchedDuo.duoId },
+                {
+                    duoId: matchedDuo.duoId,
+                    player1Username: matchedDuo.player1Username,
+                    player2Username: matchedDuo.player2Username,
+                    player1Picks,
+                    player2Picks,
+                    rawLogData: logText,
+                    lastUpdated: new Date()
+                },
+                { upsert: true, new: true }
+            );
+            return res.json({ success: true, data, matched: matchedDuo.duoId, parsed: { player1Picks, player2Picks } });
+        }
+
+        res.json({
+            success: true,
+            message: 'Parsed but no duo matched - provide duoId or matching username',
+            parsed: { player1Picks, player2Picks }
+        });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// POST: Manually set party picks for a duo
+app.post('/api/admin/tournament/duo-party/set', auth, async (req, res) => {
+    try {
+        const { duoId, player1Username, player2Username, player1Picks, player2Picks } = req.body;
+
+        if (!duoId) {
+            return res.status(400).json({ error: 'duoId is required' });
+        }
+
+        const data = await DuoPartyData.findOneAndUpdate(
+            { duoId },
+            {
+                duoId,
+                player1Username: player1Username || '',
+                player2Username: player2Username || '',
+                player1Picks: player1Picks || [],
+                player2Picks: player2Picks || [],
+                lastUpdated: new Date()
+            },
+            { upsert: true, new: true }
+        );
+
+        res.json({ success: true, data });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// POST: Clear party data for a duo
+app.post('/api/admin/tournament/duo-party/clear', auth, async (req, res) => {
+    try {
+        const { duoId } = req.body;
+
+        if (!duoId) {
+            return res.status(400).json({ error: 'duoId is required' });
+        }
+
+        await DuoPartyData.deleteOne({ duoId });
+        res.json({ success: true, message: 'Party data cleared' });
     } catch (e) {
         res.status(500).json({ error: e.message });
     }
