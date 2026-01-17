@@ -211,7 +211,14 @@ const TournamentSeason = mongoose.model('TournamentSeason', new mongoose.Schema(
     name: { type: String, default: 'Season 1' },
     format: { type: String, default: 'Singles 4v4' },
     status: { type: String, default: 'DRAFTING' }, // DRAFTING, LOCK_IN, ONGOING, ENDED
-    winners: [{ rank: Number, username: String, score: String }],
+    winners: [{
+        rank: Number,
+        username: String, // Singles format
+        teamName: String, // Duos format
+        player1: String,  // Duos format
+        player2: String,  // Duos format
+        score: String
+    }],
     isArchived: { type: Boolean, default: false },
     challongeUrl: { type: String, default: '' },
     createdAt: { type: Date, default: Date.now }
@@ -2828,6 +2835,57 @@ app.post('/api/admin/tournament/season/:id/archive', auth, async (req, res) => {
         res.json({ success: true, season });
     } catch (e) {
         res.status(500).json({ error: "Archive failed" });
+    }
+});
+
+// End Tournament with Winners (Admin)
+app.post('/api/admin/tournament/end', auth, async (req, res) => {
+    try {
+        const { seasonId, winners, isDuos } = req.body;
+
+        if (!seasonId || !winners) {
+            return res.status(400).json({ error: "seasonId and winners are required" });
+        }
+
+        // Update season with winners and set status to ENDED
+        const season = await TournamentSeason.findOneAndUpdate(
+            { seasonId: parseInt(seasonId) },
+            {
+                winners: winners,
+                status: 'ENDED'
+            },
+            { new: true }
+        );
+
+        if (!season) {
+            return res.status(404).json({ error: "Season not found" });
+        }
+
+        console.log(`🏆 Tournament ended for Season ${seasonId}. Winners:`, winners);
+        res.json({ success: true, season });
+    } catch (e) {
+        console.error("End tournament error:", e);
+        res.status(500).json({ error: "Failed to end tournament" });
+    }
+});
+
+// Get Tournament Winners (Public)
+app.get('/api/tournament/winners', async (req, res) => {
+    try {
+        const seasonId = parseInt(req.query.seasonId);
+        if (!seasonId) {
+            return res.status(400).json({ error: "seasonId is required" });
+        }
+
+        const season = await TournamentSeason.findOne({ seasonId });
+        if (!season) {
+            return res.status(404).json({ error: "Season not found" });
+        }
+
+        res.json(season.winners || []);
+    } catch (e) {
+        console.error("Get winners error:", e);
+        res.status(500).json({ error: "Failed to fetch winners" });
     }
 });
 
