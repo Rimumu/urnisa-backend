@@ -2873,15 +2873,19 @@ app.post('/api/admin/tournament/end', auth, async (req, res) => {
 app.get('/api/tournament/winners', async (req, res) => {
     try {
         const seasonId = parseInt(req.query.seasonId);
+        console.log(`📊 Winners requested for seasonId: ${seasonId}`);
+
         if (!seasonId) {
             return res.status(400).json({ error: "seasonId is required" });
         }
 
         const season = await TournamentSeason.findOne({ seasonId });
         if (!season) {
+            console.log(`❌ Season ${seasonId} not found`);
             return res.status(404).json({ error: "Season not found" });
         }
 
+        console.log(`✅ Season ${seasonId} winners:`, JSON.stringify(season.winners));
         res.json(season.winners || []);
     } catch (e) {
         console.error("Get winners error:", e);
