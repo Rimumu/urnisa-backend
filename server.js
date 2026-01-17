@@ -2893,6 +2893,33 @@ app.get('/api/tournament/winners', async (req, res) => {
     }
 });
 
+// Clear Tournament Winners (Admin) - Use to reset corrupted data
+app.post('/api/admin/tournament/clear-winners', auth, async (req, res) => {
+    try {
+        const { seasonId } = req.body;
+
+        if (!seasonId) {
+            return res.status(400).json({ error: "seasonId is required" });
+        }
+
+        const season = await TournamentSeason.findOneAndUpdate(
+            { seasonId: parseInt(seasonId) },
+            { winners: [] },
+            { new: true }
+        );
+
+        if (!season) {
+            return res.status(404).json({ error: "Season not found" });
+        }
+
+        console.log(`🗑️ Cleared winners for Season ${seasonId}`);
+        res.json({ success: true, message: `Winners cleared for season ${seasonId}` });
+    } catch (e) {
+        console.error("Clear winners error:", e);
+        res.status(500).json({ error: "Failed to clear winners" });
+    }
+});
+
 // ==========================================
 // DUOS ENDPOINTS (Season 2)
 // ==========================================
