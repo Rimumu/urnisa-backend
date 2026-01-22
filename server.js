@@ -288,7 +288,9 @@ const SnakesWinner = mongoose.model('SnakesWinner', new mongoose.Schema({
 
 const SnakesSettings = mongoose.model('SnakesSettings', new mongoose.Schema({
     key: { type: String, default: 'main', unique: true },
-    isActive: { type: Boolean, default: false }, // Whether to process incoming events
+    isActive: { type: Boolean, default: false }, // General Master Switch (Legacy/Master)
+    subsActive: { type: Boolean, default: false }, // Toggles Subs/Gifts
+    donationsActive: { type: Boolean, default: false }, // Toggles Tips/Donations
     lastProcessedEventId: String
 }));
 
@@ -1277,9 +1279,22 @@ const processSnakesEvent = async (type, user, amount, providerId, tier = '1000',
     try {
         // 1. Check if Listener is Active
         const settings = await SnakesSettings.findOne({ key: 'main' });
-        if (!settings || (!settings.isActive && !isManual)) {
-            if (isManual) console.log("⚠️ Snakes Listener is OFF, but proceeding (MANUAL override)");
-            else return; // Ignore if inactive
+
+        let shouldProcess = false;
+
+        // Determine if we should process based on Type & Specific Toggles
+        // Note: Simulation (isManual) MUST ALSO RESPECT these toggles as per user request.
+        if (['subscriber', 'sub', 'resub', 'subscription', 'gift'].includes(type)) {
+            if (settings && settings.subsActive) shouldProcess = true;
+        }
+        else if (['tip', 'donation'].includes(type)) {
+            if (settings && settings.donationsActive) shouldProcess = true;
+        }
+
+        // Check if we should block
+        if (!shouldProcess) {
+            if (isManual) console.log(`⚠️ Blocked ${type} simulation: Listener is OFF.`);
+            return;
         }
 
         // Fetch Avatar if missing (and not manual simulation which might skip it)
@@ -1346,6 +1361,11 @@ const processSnakesEvent = async (type, user, amount, providerId, tier = '1000',
         else if (type === 'gift') {
             rolls = amount; // 1 roll per gift
         }
+        else if (type === 'tip' || type === 'donation') {
+            // Donation Logic: $5 = 1 Roll
+            // amount is in dollars/currency value
+            rolls = Math.floor(amount / 5);
+        }
 
         if (rolls > 0) {
             console.log(`🐍 Queueing ${rolls} rolls for ${user} (Source: ${type})`);
@@ -1382,14 +1402,29 @@ app.get('/api/snakes/settings', async (req, res) => {
 
 app.post('/api/snakes/toggle-listener', auth, async (req, res) => {
     try {
+        const { target } = req.body; // 'subs' or 'donations'
         let settings = await SnakesSettings.findOne({ key: 'main' });
         if (!settings) settings = await SnakesSettings.create({ key: 'main' });
 
-        settings.isActive = !settings.isActive;
+        if (target === 'subs') {
+            settings.subsActive = !settings.subsActive;
+        } else if (target === 'donations') {
+            settings.donationsActive = !settings.donationsActive;
+        } else {
+            // Fallback / Start-Stop All? Or Legacy
+            // For now, if no target, toggle Main (which might imply both?)
+            // Let's just default to toggling both if unspecified, or handle error.
+            // But for safety, let's toggle both if generic 'isActive' was used previously.
+            // Or just do nothing. Let's assume frontend sends target.
+        }
+
+        // Update legacy isActive for good measure/display summary, though logic uses specific fields now.
+        settings.isActive = settings.subsActive || settings.donationsActive;
+
         await settings.save();
 
-        console.log(`🐍 Snakes Listener Toggled: ${settings.isActive ? 'ON' : 'OFF'}`);
-        res.json({ success: true, isActive: settings.isActive });
+        console.log(`🐍 Snakes Listener Toggled [${target}]: Subs=${settings.subsActive}, Donos=${settings.donationsActive}`);
+        res.json({ success: true, settings });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
