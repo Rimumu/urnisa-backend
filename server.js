@@ -1263,6 +1263,18 @@ app.post('/api/snakes/reset', auth, async (req, res) => {
     }
 });
 
+// Delete single queue item (admin)
+app.delete('/api/snakes/queue/:id', auth, async (req, res) => {
+    try {
+        const { id } = req.params;
+        await SnakesQueue.findByIdAndDelete(id);
+        console.log(`🗑️ Removed queue item ${id}`);
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
 // NEW: COUNTDOWN API (STANDALONE)
 app.get('/api/countdown/stats', async (req, res) => {
     if (mongoose.connection.readyState !== 1) return res.json({});
