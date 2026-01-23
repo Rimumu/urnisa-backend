@@ -176,6 +176,9 @@ const TournamentEntry = mongoose.model('TournamentEntry', new mongoose.Schema({
     }],
     isLocked: { type: Boolean, default: false },
     isDev: { type: Boolean, default: false }, // Flag for dummy players
+    // Season 3 Gimmick Selection
+    gimmickType: { type: String, default: null }, // 'tera', 'dynamax', 'mega', 'zmove', or null
+    gimmickPokemonId: { type: Number, default: null }, // ID of Pokemon using the gimmick
     updatedAt: { type: Date, default: Date.now }
 }));
 
