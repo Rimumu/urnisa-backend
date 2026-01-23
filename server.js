@@ -1802,22 +1802,32 @@ app.post('/api/tournament/register', async (req, res) => {
 });
 
 // NEW: End Tournament & Save Winners
+// NEW: End Tournament & Save Winners
 app.post('/api/admin/tournament/end', auth, async (req, res) => {
-    const { winners } = req.body;
+    const { winners, seasonId } = req.body;
 
     if (!winners || !Array.isArray(winners) || winners.length < 1) {
         return res.status(400).json({ error: "Invalid winners data" });
     }
 
     try {
+        // Save to specific key for Season 3+, legacy for others
+        let key = 'tournament_winners';
+        if (seasonId && parseInt(seasonId) > 2) {
+            key = `tournament_winners_${seasonId}`;
+        }
+
         await Setting.findOneAndUpdate(
-            { key: 'tournament_winners' },
+            { key },
             { value: winners },
             { upsert: true }
         );
 
         await Setting.findOneAndUpdate(
-            { key: 'tournament_config' },
+            { key: 'tournament_config' }, // This might also need to be season specific? 
+            // The config seems global. For now let's keep it global or the prompt didn't ask to fix status.
+            // Actually, if we end Season 3, we don't want to mess up status if it's shared.
+            // But usually only one tournament is active.
             { value: { status: 'ENDED', lockEnabled: false } },
             { upsert: true }
         );
@@ -1830,9 +1840,23 @@ app.post('/api/admin/tournament/end', auth, async (req, res) => {
 });
 
 // NEW: Get Tournament Winners (Public)
+// NEW: Get Tournament Winners (Public)
 app.get('/api/tournament/winners', async (req, res) => {
     try {
-        const setting = await Setting.findOne({ key: 'tournament_winners' });
+        const { seasonId } = req.query;
+        // Season 1 & 2 used the generic 'tournament_winners' key.
+        // From Season 3 onwards, we use specific keys to multiple seasons.
+        let key = 'tournament_winners';
+        if (seasonId && parseInt(seasonId) > 2) {
+            key = `tournament_winners_${seasonId}`;
+        }
+
+        const setting = await Setting.findOne({ key });
+        // If specific key not found for > 2, return empty (so it doesn't show old winners)
+        if (!setting && parseInt(seasonId) > 2) {
+            return res.json([]);
+        }
+
         res.json(setting ? setting.value : []);
     } catch (e) {
         res.status(500).json({ error: "Fetch failed" });
