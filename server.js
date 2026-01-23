@@ -1287,8 +1287,24 @@ app.get('/api/countdown/stats', async (req, res) => {
 // SNAKES REAL EVENT LISTENER LOGIC
 // ==========================================
 
+// In-memory cache to prevent race condition duplicates (socket + REST polling both processing same event)
+const snakesProcessedCache = new Set();
+const SNAKES_CACHE_EXPIRY_MS = 60000; // 1 minute
+
 const processSnakesEvent = async (type, user, amount, providerId, tier = '1000', isManual = false, avatarUrl = "") => {
     try {
+        // RACE CONDITION FIX: Immediately check and add to in-memory cache
+        if (providerId && !isManual) {
+            if (snakesProcessedCache.has(providerId)) {
+                // Already being/been processed, skip
+                return;
+            }
+            // Mark as processing immediately to prevent race condition
+            snakesProcessedCache.add(providerId);
+            // Auto-expire after 1 minute to prevent memory leak
+            setTimeout(() => snakesProcessedCache.delete(providerId), SNAKES_CACHE_EXPIRY_MS);
+        }
+
         // 1. Check if Listener is Active
         const settings = await SnakesSettings.findOne({ key: 'main' });
 
