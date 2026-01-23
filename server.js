@@ -2187,6 +2187,80 @@ app.post('/api/admin/tournament/revoke-registration', auth, async (req, res) => 
 });
 
 // ==========================================
+// POKEMON DATA CACHE
+// ==========================================
+let POKEMON_CACHE = [];
+
+// Helper to format names for Cobblemon Tools (e.g. "Tapu Koko" -> "tapu-koko")
+const getFormattedName = (name) => {
+    return name.toLowerCase()
+        .replace(/[.']/g, '')
+        .replace(/♀/g, '-f')
+        .replace(/♂/g, '-m')
+        .replace(/\s+/g, '-');
+};
+
+const fetchPokemonData = async () => {
+    if (POKEMON_CACHE.length > 0) return POKEMON_CACHE;
+    try {
+        console.log("Downloading Pokemon Data...");
+        // Fetch all Pokemon from PokeAPI (~1025)
+        // We only fetch basic info (name + url) to be fast.
+        const { data } = await axios.get('https://pokeapi.co/api/v2/pokemon?limit=1025');
+
+        // We assume most Gen 1-9 mons are in Cobblemon, or will use fallback.
+        // We construct the object to match what the frontend expects.
+
+        POKEMON_CACHE = data.results.map((p, index) => {
+            const id = index + 1;
+            const formattedName = getFormattedName(p.name);
+
+            // Primary: Cobblemon Tools Sprite
+            // Fallback: PokeAPI Home Render (High Quality 3D)
+            const cobbleSprite = `https://cobblemon.tools/pokedex/pokemon/${formattedName}/sprite.png`;
+            const homeSprite = `https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/home/${id}.png`;
+
+            return {
+                id: id,
+                name: p.name.charAt(0).toUpperCase() + p.name.slice(1), // Capitalize
+                sprite: homeSprite, // Default to known working URL to avoid broken images on load
+                cobbleSprite: cobbleSprite, // Frontend checks validity of this
+                types: [] // Types would require individual fetches or a large static map. 
+                // For now, we leave empty to speed up server start. 
+                // Frontend handles display without types if missing.
+            };
+        });
+
+        console.log(`✅ Cached ${POKEMON_CACHE.length} Pokemon`);
+        return POKEMON_CACHE;
+    } catch (e) {
+        console.error("Pokemon Fetch Error:", e);
+        return [];
+    }
+};
+
+// Image Validity Checker Endpoint (Used by Frontend)
+app.get('/api/utils/check-image', async (req, res) => {
+    const { url } = req.query;
+    if (!url) return res.json({ valid: false });
+
+    try {
+        const response = await axios.head(url);
+        res.json({ valid: response.status === 200 });
+    } catch (e) {
+        res.json({ valid: false });
+    }
+});
+
+// Initialize Cache (Background)
+fetchPokemonData();
+
+app.get('/api/pokemon', async (req, res) => {
+    if (POKEMON_CACHE.length === 0) await fetchPokemonData();
+    res.json(POKEMON_CACHE);
+});
+
+// ==========================================
 // TOURNAMENT GENERATOR HELPERS
 // ==========================================
 
