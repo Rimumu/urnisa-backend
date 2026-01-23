@@ -1754,7 +1754,7 @@ app.get('/api/tournament/my-team', async (req, res) => {
 
 // Register/Save Team
 app.post('/api/tournament/register', async (req, res) => {
-    const { discordId, minecraftUsername, team, seasonId } = req.body;
+    const { discordId, minecraftUsername, team, seasonId, gimmickType, gimmickPokemonId } = req.body;
     if (!discordId || !minecraftUsername || !team) return res.status(400).json({ error: "Missing Data" });
 
     try {
@@ -1787,6 +1787,8 @@ app.post('/api/tournament/register', async (req, res) => {
             {
                 minecraftUsername,
                 team,
+                gimmickType: gimmickType || null,
+                gimmickPokemonId: gimmickPokemonId || null,
                 updatedAt: new Date()
             },
             { upsert: true, new: true }
