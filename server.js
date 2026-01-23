@@ -1374,9 +1374,9 @@ const processSnakesEvent = async (type, user, amount, providerId, tier = '1000',
             rolls = amount; // 1 roll per gift
         }
         else if (type === 'tip' || type === 'donation') {
-            // Donation Logic: $5 = 1 Roll
+            // Donation Logic: $3 = 1 Roll
             // amount is in dollars/currency value
-            rolls = Math.floor(amount / 5);
+            rolls = Math.floor(amount / 3);
         }
 
         if (rolls > 0) {
