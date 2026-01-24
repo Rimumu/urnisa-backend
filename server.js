@@ -1804,7 +1804,6 @@ app.post('/api/tournament/register', async (req, res) => {
 });
 
 // NEW: End Tournament & Save Winners
-// NEW: End Tournament & Save Winners
 app.post('/api/admin/tournament/end', auth, async (req, res) => {
     const { winners, seasonId } = req.body;
 
@@ -1813,11 +1812,9 @@ app.post('/api/admin/tournament/end', auth, async (req, res) => {
     }
 
     try {
-        // Save to specific key for Season 3+, legacy for others
-        let key = 'tournament_winners';
-        if (seasonId && parseInt(seasonId) > 2) {
-            key = `tournament_winners_${seasonId}`;
-        }
+        const parsedSeasonId = parseInt(seasonId) || 1;
+        // Always use season-specific key for all seasons going forward
+        const key = `tournament_winners_${parsedSeasonId}`;
 
         await Setting.findOneAndUpdate(
             { key },
@@ -1842,20 +1839,25 @@ app.post('/api/admin/tournament/end', auth, async (req, res) => {
 });
 
 // NEW: Get Tournament Winners (Public)
-// NEW: Get Tournament Winners (Public)
 app.get('/api/tournament/winners', async (req, res) => {
     try {
         const { seasonId } = req.query;
-        // Season 1 & 2 used the generic 'tournament_winners' key.
-        // From Season 3 onwards, we use specific keys to multiple seasons.
-        let key = 'tournament_winners';
-        if (seasonId && parseInt(seasonId) > 2) {
-            key = `tournament_winners_${seasonId}`;
-        }
+        const parsedSeasonId = parseInt(seasonId) || 1;
 
-        const setting = await Setting.findOne({ key });
-        // If specific key not found for > 2, return empty (so it doesn't show old winners)
-        if (!setting && parseInt(seasonId) > 2) {
+        // Use season-specific key for all seasons
+        const key = `tournament_winners_${parsedSeasonId}`;
+
+        let setting = await Setting.findOne({ key });
+
+        // Fallback: For Season 1 & 2, try the legacy generic key if specific key not found
+        if (!setting && parsedSeasonId <= 2) {
+            const legacySetting = await Setting.findOne({ key: 'tournament_winners' });
+            // Only use legacy if it exists and this is the most recent concluded season
+            // For proper fix, we should migrate data. For now, return legacy for Season 2 only (most recent)
+            if (legacySetting && parsedSeasonId === 2) {
+                return res.json(legacySetting.value || []);
+            }
+            // For Season 1, return empty if no specific key (likely no data was stored separately)
             return res.json([]);
         }
 
