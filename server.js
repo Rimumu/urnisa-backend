@@ -224,6 +224,7 @@ const TournamentSeason = mongoose.model('TournamentSeason', new mongoose.Schema(
     }],
     isArchived: { type: Boolean, default: false },
     challongeUrl: { type: String, default: '' },
+    archivedAt: { type: Date, default: null }, // When the season was archived
     createdAt: { type: Date, default: Date.now }
 }));
 
@@ -1693,6 +1694,322 @@ app.post('/api/admin/bingo/winner/delete', auth, async (req, res) => {
 });
 
 // ==========================================
+// ARCHIVE API ROUTES
+// ==========================================
+
+// Archive Snapshot Schema - stores frozen Nisathon data when event ends
+const ArchiveSnapshot = mongoose.model('ArchiveSnapshot', new mongoose.Schema({
+    archiveId: { type: String, required: true, unique: true },
+    eventName: { type: String, default: 'Birthday Nisathon' },
+    archivedAt: { type: Date, default: Date.now },
+    finalStats: {
+        currentSubs: { type: Number, default: 0 },
+        currentBits: { type: Number, default: 0 },
+        currentDonations: { type: Number, default: 0 },
+        totalNisaballs: { type: Number, default: 0 }
+    },
+    topContributors: [{
+        rank: Number,
+        user: String,
+        totalNisaballs: Number
+    }],
+    events: [{
+        _id: String,
+        user: String,
+        type: String,
+        amountDisplay: String,
+        message: String,
+        createdAt: Date,
+        nisaballAmount: Number
+    }],
+    goalsAchieved: [{
+        count: Number,
+        reward: String,
+        status: String
+    }]
+}));
+
+// Archive Ranked Player Schema - stores frozen rankings when season ends
+const ArchiveRankedPlayer = mongoose.model('ArchiveRankedPlayer', new mongoose.Schema({
+    archiveId: { type: String, required: true }, // e.g., 'rankings_s1' for season 1
+    seasonName: { type: String, default: 'Season 1' },
+    archivedAt: { type: Date, default: Date.now },
+    uuid: { type: String, required: true },
+    minecraftName: { type: String, required: true },
+    elo: { type: Number, default: 1000 },
+    wins: { type: Number, default: 0 },
+    losses: { type: Number, default: 0 },
+    tier: { type: String, default: 'UNRANKED' },
+    winRate: { type: Number, default: 0 },
+    winStreak: { type: Number, default: 0 },
+    bestWinStreak: { type: Number, default: 0 }
+}));
+
+// GET /api/archive/nisathon/stats - Get archived Nisathon stats
+app.get('/api/archive/nisathon/stats', async (req, res) => {
+    try {
+        // Get the most recent archive snapshot
+        const snapshot = await ArchiveSnapshot.findOne().sort({ archivedAt: -1 });
+        if (!snapshot) {
+            return res.status(404).json({ error: "No archived Nisathon data found" });
+        }
+        res.json({
+            archiveId: snapshot.archiveId,
+            eventName: snapshot.eventName,
+            archivedAt: snapshot.archivedAt,
+            ...snapshot.finalStats
+        });
+    } catch (e) {
+        console.error("Archive Nisathon Stats Error:", e);
+        res.status(500).json({ error: "Failed to fetch archived stats" });
+    }
+});
+
+// GET /api/archive/nisathon/leaderboard - Get archived Nisathon leaderboard
+app.get('/api/archive/nisathon/leaderboard', async (req, res) => {
+    try {
+        const snapshot = await ArchiveSnapshot.findOne().sort({ archivedAt: -1 });
+        if (!snapshot) {
+            return res.json([]);
+        }
+        res.json(snapshot.topContributors || []);
+    } catch (e) {
+        console.error("Archive Nisathon Leaderboard Error:", e);
+        res.status(500).json({ error: "Failed to fetch archived leaderboard" });
+    }
+});
+
+// GET /api/archive/nisathon/events - Get archived Nisathon events
+app.get('/api/archive/nisathon/events', async (req, res) => {
+    try {
+        const snapshot = await ArchiveSnapshot.findOne().sort({ archivedAt: -1 });
+        if (!snapshot) {
+            return res.json([]);
+        }
+        res.json(snapshot.events || []);
+    } catch (e) {
+        console.error("Archive Nisathon Events Error:", e);
+        res.status(500).json({ error: "Failed to fetch archived events" });
+    }
+});
+
+// POST /api/admin/archive/nisathon/create - Create archive snapshot (admin)
+app.post('/api/admin/archive/nisathon/create', auth, async (req, res) => {
+    try {
+        const { archiveId, eventName, goalsAchieved } = req.body;
+
+        // Get current stats
+        const stats = await NisathonStats.findOne({ key: 'main' });
+        if (!stats) {
+            return res.status(404).json({ error: "No Nisathon stats found" });
+        }
+
+        // Get leaderboard
+        const lb = await NisathonEvent.aggregate([
+            { $group: { _id: "$user", total: { $sum: "$nisaballAmount" } } },
+            { $sort: { total: -1 } },
+            { $limit: 10 }
+        ]);
+        const topContributors = lb.map((x, i) => ({
+            rank: i + 1,
+            user: x._id,
+            totalNisaballs: roundOneDecimal(x.total)
+        }));
+
+        // Get events
+        const events = await NisathonEvent.find().sort({ createdAt: -1 }).limit(100);
+
+        // Create archive snapshot
+        const snapshot = await ArchiveSnapshot.create({
+            archiveId: archiveId || `nisathon-${Date.now()}`,
+            eventName: eventName || 'Birthday Nisathon',
+            archivedAt: new Date(),
+            finalStats: {
+                currentSubs: stats.currentSubs,
+                currentBits: stats.currentBits,
+                currentDonations: stats.currentDonations,
+                totalNisaballs: stats.totalNisaballs
+            },
+            topContributors,
+            events: events.map(e => ({
+                _id: e._id,
+                user: e.user,
+                type: e.type,
+                amountDisplay: e.amountDisplay,
+                message: e.message,
+                createdAt: e.createdAt,
+                nisaballAmount: e.nisaballAmount
+            })),
+            goalsAchieved: goalsAchieved || []
+        });
+
+        console.log(`📦 Archive snapshot created: ${snapshot.archiveId}`);
+        res.json({ success: true, archiveId: snapshot.archiveId });
+    } catch (e) {
+        console.error("Create Archive Snapshot Error:", e);
+        res.status(500).json({ error: "Failed to create archive snapshot" });
+    }
+});
+
+// GET /api/archive/wheel/history - Get archived wheel spin history
+app.get('/api/archive/wheel/history', async (req, res) => {
+    try {
+        const history = await SpinHistory.find().sort({ timestamp: -1 }).limit(200);
+        const info = await Setting.findOne({ key: 'wheel_items' });
+
+        // Calculate archive date (most recent spin)
+        const archivedAt = history.length > 0 ? history[0].timestamp : new Date();
+
+        res.json({
+            spins: history,
+            info: {
+                eventName: 'Spin The Wheel Archive',
+                archivedAt,
+                totalSpins: history.length
+            }
+        });
+    } catch (e) {
+        console.error("Archive Wheel History Error:", e);
+        res.status(500).json({ error: "Failed to fetch archived wheel data" });
+    }
+});
+
+// GET /api/archive/tournament/seasons - Get all archived tournament seasons
+app.get('/api/archive/tournament/seasons', async (req, res) => {
+    try {
+        const seasons = await TournamentSeason.find({ isArchived: true })
+            .sort({ seasonId: -1 })
+            .select('seasonId name format status winners archivedAt challongeUrl createdAt');
+
+        // Add archivedAt field if not present (use createdAt as fallback)
+        const seasonsWithArchivedAt = seasons.map(s => ({
+            seasonId: s.seasonId,
+            name: s.name,
+            format: s.format,
+            status: s.status,
+            winners: s.winners || [],
+            archivedAt: s.archivedAt || s.createdAt,
+            challongeUrl: s.challongeUrl
+        }));
+
+        res.json(seasonsWithArchivedAt.length > 0 ? seasonsWithArchivedAt : []);
+    } catch (e) {
+        console.error("Archive Tournament Seasons Error:", e);
+        res.status(500).json({ error: "Failed to fetch archived tournaments" });
+    }
+});
+
+// GET /api/archive/rankings - Get archived Cobblemon rankings
+app.get('/api/archive/rankings', async (req, res) => {
+    try {
+        const seasonId = parseInt(req.query.seasonId) || 1;
+
+        // Try to find archived ranked players first
+        const archivedPlayers = await ArchiveRankedPlayer.find({ archiveId: `rankings_s${seasonId}` })
+            .sort({ elo: -1, wins: -1 });
+
+        if (archivedPlayers.length > 0) {
+            // Return archived data
+            const players = archivedPlayers.map((p, i) => ({
+                rank: i + 1,
+                uuid: p.uuid,
+                minecraftName: p.minecraftName,
+                elo: p.elo,
+                wins: p.wins,
+                losses: p.losses,
+                tier: p.tier,
+                tierInfo: TIERS[p.tier] || TIERS.DIRT,
+                winRate: p.winRate,
+                winStreak: p.winStreak,
+                bestWinStreak: p.bestWinStreak
+            }));
+
+            return res.json({
+                players,
+                archiveInfo: {
+                    seasonName: archivedPlayers[0].seasonName,
+                    archivedAt: archivedPlayers[0].archivedAt,
+                    totalMatches: players.reduce((sum, p) => sum + p.wins + p.losses, 0)
+                }
+            });
+        }
+
+        // Fallback: Get current ranked players (for live view fallback)
+        const players = await RankedPlayer.find({})
+            .sort({ elo: -1, wins: -1 })
+            .select('uuid minecraftName elo wins losses tier winStreak bestWinStreak');
+
+        const formattedPlayers = players.map((p, i) => ({
+            rank: i + 1,
+            uuid: p.uuid,
+            minecraftName: p.minecraftName,
+            elo: p.elo,
+            wins: p.wins,
+            losses: p.losses,
+            tier: p.tier,
+            tierInfo: TIERS[p.tier] || TIERS.DIRT,
+            winRate: p.wins + p.losses > 0 ? Math.round((p.wins / (p.wins + p.losses)) * 100) : 0,
+            winStreak: p.winStreak,
+            bestWinStreak: p.bestWinStreak
+        }));
+
+        res.json({
+            players: formattedPlayers,
+            archiveInfo: {
+                seasonName: 'Current Season',
+                archivedAt: new Date().toISOString(),
+                totalMatches: formattedPlayers.reduce((sum, p) => sum + p.wins + p.losses, 0)
+            }
+        });
+    } catch (e) {
+        console.error("Archive Rankings Error:", e);
+        res.status(500).json({ error: "Failed to fetch archived rankings" });
+    }
+});
+
+// POST /api/admin/archive/rankings/create - Create archive of current rankings (admin)
+app.post('/api/admin/archive/rankings/create', auth, async (req, res) => {
+    try {
+        const { seasonId, seasonName } = req.body;
+        const targetSeasonId = seasonId || 1;
+
+        // Get current ranked players
+        const players = await RankedPlayer.find({}).sort({ elo: -1, wins: -1 });
+
+        if (players.length === 0) {
+            return res.status(404).json({ error: "No ranked players found" });
+        }
+
+        // Create archive entries
+        const archiveEntries = players.map(p => ({
+            archiveId: `rankings_s${targetSeasonId}`,
+            seasonName: seasonName || 'Season 1',
+            archivedAt: new Date(),
+            uuid: p.uuid,
+            minecraftName: p.minecraftName,
+            elo: p.elo,
+            wins: p.wins,
+            losses: p.losses,
+            tier: p.tier,
+            winRate: p.wins + p.losses > 0 ? Math.round((p.wins / (p.wins + p.losses)) * 100) : 0,
+            winStreak: p.winStreak,
+            bestWinStreak: p.bestWinStreak
+        }));
+
+        // Delete old archives for this season and insert new
+        await ArchiveRankedPlayer.deleteMany({ archiveId: `rankings_s${targetSeasonId}` });
+        await ArchiveRankedPlayer.insertMany(archiveEntries);
+
+        console.log(`📦 Archived rankings created for Season ${targetSeasonId} (${archiveEntries.length} players)`);
+        res.json({ success: true, count: archiveEntries.length });
+    } catch (e) {
+        console.error("Create Archive Rankings Error:", e);
+        res.status(500).json({ error: "Failed to create archive rankings" });
+    }
+});
+
+
+// ==========================================
 // TOURNAMENT API ROUTES
 // ==========================================
 
@@ -2996,10 +3313,11 @@ app.post('/api/admin/tournament/season/:id/archive', auth, async (req, res) => {
     try {
         const season = await TournamentSeason.findOneAndUpdate(
             { seasonId: parseInt(req.params.id) },
-            { isArchived: true, status: 'ENDED' },
+            { isArchived: true, status: 'ENDED', archivedAt: new Date() },
             { new: true }
         );
         if (!season) return res.status(404).json({ error: "Season not found" });
+        console.log(`📦 Season ${req.params.id} archived`);
         res.json({ success: true, season });
     } catch (e) {
         res.status(500).json({ error: "Archive failed" });
