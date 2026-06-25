@@ -1520,7 +1520,86 @@ app.get('/api/schedule', async (req, res) => res.json({ url: (await Setting.find
 app.post('/api/schedule', auth, async (req, res) => { await Setting.findOneAndUpdate({ key: 'schedule_url' }, { value: req.body.url }, { upsert: true }); res.json({ success: true }); });
 app.post('/api/stream-status', auth, async (req, res) => { await Setting.findOneAndUpdate({ key: 'stream_status_override' }, { value: req.body.override }, { upsert: true }); res.json({ success: true }); });
 app.get('/api/stream-status', async (req, res) => { const s = await Setting.findOne({ key: 'stream_status_override' }); res.json({ override: s?.value || 'auto' }); });
-app.post('/api/upload', async (req, res) => { const { image } = req.body; if (!image) return res.status(400).send(); if (CLOUDINARY_CLOUD_NAME) { try { const ts = Math.round(new Date().getTime() / 1000); const sig = crypto.createHash('sha1').update(`timestamp=${ts}${CLOUDINARY_API_SECRET}`).digest('hex'); const f = new FormData(); f.append('file', `data:image/jpeg;base64,${image}`); f.append('api_key', CLOUDINARY_API_KEY); f.append('timestamp', ts); f.append('signature', sig); const r = await axios.post(`https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/image/upload`, f); return res.json({ success: true, data: { url: r.data.secure_url } }); } catch (e) { return res.status(500).send(); } } return res.status(500).send(); });
+
+const multer = require('multer');
+const { createClient } = require('@supabase/supabase-js');
+
+// 1. Initialize Supabase Admin Client
+const supabaseUrl = process.env.SUPABASE_URL;
+const supabaseServiceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const bucketName = process.env.SUPABASE_BUCKET_NAME || 'urnisa-media';
+
+let supabase = null;
+if (supabaseUrl && supabaseServiceRoleKey) {
+    supabase = createClient(supabaseUrl, supabaseServiceRoleKey, {
+        auth: {
+            persistSession: false
+        }
+    });
+    console.log("Supabase Client initialized successfully.");
+} else {
+    console.warn("⚠️ Supabase credentials are missing! Uploads will be disabled.");
+}
+
+// 2. Configure Multer to handle incoming files in-memory
+const upload = multer({
+    storage: multer.memoryStorage(),
+    limits: {
+        fileSize: 50 * 1024 * 1024 // 50MB file limit
+    }
+});
+
+// 3. New Unified Multipart Upload Route
+app.post('/api/upload', auth, upload.single('file'), async (req, res) => {
+    try {
+        if (!req.file) {
+            return res.status(400).json({ success: false, error: "No file was uploaded." });
+        }
+
+        if (!supabase) {
+            return res.status(500).json({ success: false, error: "Storage client is not configured." });
+        }
+
+        const file = req.file;
+        const originalName = file.originalname;
+        const fileExtension = originalName.substring(originalName.lastIndexOf('.'));
+        
+        // Generate a clean, unique name to prevent collisions
+        const uniqueFileName = `${Date.now()}-${Math.random().toString(36).substring(2, 8)}${fileExtension}`;
+
+        // Upload the raw buffer to Supabase Storage
+        const { data, error } = await supabase.storage
+            .from(bucketName)
+            .upload(uniqueFileName, file.buffer, {
+                contentType: file.mimetype,
+                cacheControl: '3600',
+                upsert: false
+            });
+
+        if (error) {
+            console.error("Supabase Upload Error:", error);
+            return res.status(500).json({ success: false, error: error.message });
+        }
+
+        // Generate the Public Access URL
+        const { data: urlData } = supabase.storage
+            .from(bucketName)
+            .getPublicUrl(uniqueFileName);
+
+        console.log(`Successfully uploaded: ${uniqueFileName} -> ${urlData.publicUrl}`);
+
+        return res.json({ 
+            success: true, 
+            url: urlData.publicUrl,
+            data: { url: urlData.publicUrl } // Kept for backwards compatibility
+        });
+
+    } catch (err) {
+        console.error("File upload crash:", err);
+        return res.status(500).json({ success: false, error: "Internal server error during upload." });
+    }
+});
+
 const imageValidationCache = new Map();
 app.get('/api/utils/check-image', async (req, res) => { const { url } = req.query; if (!url) return res.json({ valid: false }); if (imageValidationCache.has(url)) { return res.json({ valid: imageValidationCache.get(url) }); } try { const response = await axios.head(url, { timeout: 5000 }); const length = parseInt(response.headers['content-length'] || '0'); const isValid = length > 2048; imageValidationCache.set(url, isValid); res.json({ valid: isValid }); } catch (e) { imageValidationCache.set(url, false); res.json({ valid: false }); } });
 
