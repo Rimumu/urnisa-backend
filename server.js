@@ -5,6 +5,8 @@ const axios = require('axios');
 const mongoose = require('mongoose');
 const crypto = require('crypto');
 const io = require('socket.io-client');
+const { createClient } = require('@supabase/supabase-js');
+const multer = require('multer');
 require('dotenv').config();
 
 // ==========================================
@@ -13,6 +15,29 @@ require('dotenv').config();
 const PORT = process.env.PORT || 3001;
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "admin";
 const MONGO_URI = process.env.MONGO_URI;
+
+// Supabase Storage Setup
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
+const SUPABASE_BUCKET = process.env.SUPABASE_BUCKET || 'images'; // Allow custom bucket, default to 'images'
+
+let supabase = null;
+if (SUPABASE_URL && SUPABASE_KEY) {
+    try {
+        supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+        console.log("🔌 Supabase Client Initialized for Storage:", SUPABASE_URL);
+    } catch (e) {
+        console.error("❌ Failed to initialize Supabase client:", e.message);
+    }
+} else {
+    console.warn("⚠️ SUPABASE_URL or SUPABASE_KEY is missing from environment variables.");
+}
+
+// Multer Memory Storage Configuration for raw file uploads (GIF, PNG, JPEG, MP4 etc)
+const upload = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: 50 * 1024 * 1024 } // Max 50MB
+});
 
 // StreamElements Config
 let SE_JWT = process.env.STREAMELEMENTS_JWT || "";
@@ -1520,86 +1545,94 @@ app.get('/api/schedule', async (req, res) => res.json({ url: (await Setting.find
 app.post('/api/schedule', auth, async (req, res) => { await Setting.findOneAndUpdate({ key: 'schedule_url' }, { value: req.body.url }, { upsert: true }); res.json({ success: true }); });
 app.post('/api/stream-status', auth, async (req, res) => { await Setting.findOneAndUpdate({ key: 'stream_status_override' }, { value: req.body.override }, { upsert: true }); res.json({ success: true }); });
 app.get('/api/stream-status', async (req, res) => { const s = await Setting.findOne({ key: 'stream_status_override' }); res.json({ override: s?.value || 'auto' }); });
-
-const multer = require('multer');
-const { createClient } = require('@supabase/supabase-js');
-
-// 1. Initialize Supabase Admin Client
-const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseServiceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-const bucketName = process.env.SUPABASE_BUCKET_NAME || 'urnisa-media';
-
-let supabase = null;
-if (supabaseUrl && supabaseServiceRoleKey) {
-    supabase = createClient(supabaseUrl, supabaseServiceRoleKey, {
-        auth: {
-            persistSession: false
-        }
-    });
-    console.log("Supabase Client initialized successfully.");
-} else {
-    console.warn("⚠️ Supabase credentials are missing! Uploads will be disabled.");
-}
-
-// 2. Configure Multer to handle incoming files in-memory
-const upload = multer({
-    storage: multer.memoryStorage(),
-    limits: {
-        fileSize: 50 * 1024 * 1024 // 50MB file limit
-    }
-});
-
-// 3. New Unified Multipart Upload Route
-app.post('/api/upload', auth, upload.single('file'), async (req, res) => {
+app.post('/api/upload', upload.single('file'), async (req, res) => {
     try {
-        if (!req.file) {
-            return res.status(400).json({ success: false, error: "No file was uploaded." });
+        let buffer;
+        let fileName;
+        let mimeType = 'image/png';
+
+        if (req.file) {
+            buffer = req.file.buffer;
+            mimeType = req.file.mimetype;
+            const originalName = req.file.originalname || 'upload.png';
+            const ext = path.extname(originalName) || '.png';
+            const baseName = path.basename(originalName, ext).replace(/[^a-z0-9_-]/gi, '_');
+            fileName = `${baseName}_${Date.now()}${ext}`;
+        } else if (req.body && req.body.image) {
+            const { image } = req.body;
+            // Extract mimetype if present, e.g. data:image/png;base64,...
+            const mimeMatch = image.match(/^data:([^;]+);base64,/);
+            if (mimeMatch) {
+                mimeType = mimeMatch[1];
+            }
+            const base64Data = image.replace(/^data:image\/\w+;base64,/, "");
+            buffer = Buffer.from(base64Data, 'base64');
+            fileName = `upload_${Date.now()}_${crypto.randomBytes(4).toString('hex')}.png`;
+        } else {
+            return res.status(400).json({ error: "No file or image data provided" });
         }
 
-        if (!supabase) {
-            return res.status(500).json({ success: false, error: "Storage client is not configured." });
+        // 1. SUPABASE STORAGE UPLOAD
+        if (supabase) {
+            console.log(`Uploading ${fileName} (${mimeType}) to Supabase bucket: ${SUPABASE_BUCKET}`);
+            const { data, error } = await supabase.storage
+                .from(SUPABASE_BUCKET)
+                .upload(fileName, buffer, {
+                    contentType: mimeType,
+                    upsert: true
+                });
+
+            if (error) {
+                console.error("Supabase Storage Error:", error);
+                // Fall through to other providers if this fails
+            } else {
+                const { data: { publicUrl } } = supabase.storage
+                    .from(SUPABASE_BUCKET)
+                    .getPublicUrl(fileName);
+                
+                console.log("✅ Uploaded successfully to Supabase! Public URL:", publicUrl);
+                return res.json({ success: true, url: publicUrl, data: { url: publicUrl } });
+            }
         }
 
-        const file = req.file;
-        const originalName = file.originalname;
-        const fileExtension = originalName.substring(originalName.lastIndexOf('.'));
+        // 2. CLOUDINARY FALLBACK
+        if (CLOUDINARY_CLOUD_NAME) {
+            try {
+                console.log("Using Cloudinary fallback...");
+                const ts = Math.round(new Date().getTime() / 1000);
+                const sig = crypto.createHash('sha1').update(`timestamp=${ts}${CLOUDINARY_API_SECRET}`).digest('hex');
+                
+                // Convert buffer to base64 for Cloudinary API
+                const base64Image = `data:${mimeType};base64,${buffer.toString('base64')}`;
+                
+                const f = new FormData();
+                f.append('file', base64Image);
+                f.append('api_key', CLOUDINARY_API_KEY);
+                f.append('timestamp', ts);
+                f.append('signature', sig);
+                
+                const r = await axios.post(`https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/image/upload`, f);
+                return res.json({ success: true, url: r.data.secure_url, data: { url: r.data.secure_url } });
+            } catch (e) {
+                console.error("Cloudinary Fallback Error:", e.message);
+            }
+        }
+
+        // 3. LOCAL FILE SYSTEM FALLBACK
+        console.log("Using local filesystem fallback...");
+        const safeName = fileName.replace(/[^a-z0-9_.-]/gi, '_');
+        const filePath = path.join(CARDS_DIR, safeName);
+        fs.writeFileSync(filePath, buffer);
         
-        // Generate a clean, unique name to prevent collisions
-        const uniqueFileName = `${Date.now()}-${Math.random().toString(36).substring(2, 8)}${fileExtension}`;
+        const publicUrl = `${process.env.PUBLIC_URL || (req.protocol + '://' + req.get('host'))}/cards/${safeName}`;
+        console.log("✅ Saved to local cards directory:", publicUrl);
+        return res.json({ success: true, url: publicUrl, data: { url: publicUrl } });
 
-        // Upload the raw buffer to Supabase Storage
-        const { data, error } = await supabase.storage
-            .from(bucketName)
-            .upload(uniqueFileName, file.buffer, {
-                contentType: file.mimetype,
-                cacheControl: '3600',
-                upsert: false
-            });
-
-        if (error) {
-            console.error("Supabase Upload Error:", error);
-            return res.status(500).json({ success: false, error: error.message });
-        }
-
-        // Generate the Public Access URL
-        const { data: urlData } = supabase.storage
-            .from(bucketName)
-            .getPublicUrl(uniqueFileName);
-
-        console.log(`Successfully uploaded: ${uniqueFileName} -> ${urlData.publicUrl}`);
-
-        return res.json({ 
-            success: true, 
-            url: urlData.publicUrl,
-            data: { url: urlData.publicUrl } // Kept for backwards compatibility
-        });
-
-    } catch (err) {
-        console.error("File upload crash:", err);
-        return res.status(500).json({ success: false, error: "Internal server error during upload." });
+    } catch (e) {
+        console.error("Critical Upload Route Error:", e);
+        res.status(500).json({ error: "Upload failed: " + e.message });
     }
 });
-
 const imageValidationCache = new Map();
 app.get('/api/utils/check-image', async (req, res) => { const { url } = req.query; if (!url) return res.json({ valid: false }); if (imageValidationCache.has(url)) { return res.json({ valid: imageValidationCache.get(url) }); } try { const response = await axios.head(url, { timeout: 5000 }); const length = parseInt(response.headers['content-length'] || '0'); const isValid = length > 2048; imageValidationCache.set(url, isValid); res.json({ valid: isValid }); } catch (e) { imageValidationCache.set(url, false); res.json({ valid: false }); } });
 
