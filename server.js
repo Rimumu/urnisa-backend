@@ -19,7 +19,7 @@ const MONGO_URI = process.env.MONGO_URI;
 // Supabase Storage Setup
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
-const SUPABASE_BUCKET = process.env.SUPABASE_BUCKET || 'images'; // Allow custom bucket, default to 'images'
+const SUPABASE_BUCKET = process.env.SUPABASE_BUCKET || 'urnisa-media'; // <--- CHANGE THIS FROM 'images'
 
 let supabase = null;
 if (SUPABASE_URL && SUPABASE_KEY) {
@@ -29,8 +29,6 @@ if (SUPABASE_URL && SUPABASE_KEY) {
     } catch (e) {
         console.error("❌ Failed to initialize Supabase client:", e.message);
     }
-} else {
-    console.warn("⚠️ SUPABASE_URL or SUPABASE_KEY is missing from environment variables.");
 }
 
 // Multer Memory Storage Configuration for raw file uploads (GIF, PNG, JPEG, MP4 etc)
