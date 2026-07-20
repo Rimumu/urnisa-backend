@@ -879,7 +879,7 @@ app.post('/api/webhooks/sociabuzz', async (req, res) => {
         }
 
         // Parse fields supportively across different property formats used by donation platforms
-        const name = payload.nama || payload.nama_penyumbang || payload.name || payload.supporter_name || payload.donor_name || payload.username || payload.sender || 'Anonymous';
+        const name = payload.nama || payload.nama_penyumbang || payload.supporter || payload.name || payload.supporter_name || payload.donor_name || payload.username || payload.sender || 'Anonymous';
         const message = payload.pesan || payload.message || payload.pesan_penyumbang || payload.comment || "";
         const rawNominal = payload.nominal || payload.amount || payload.nominal_received || payload.gross_amount || payload.total || 0;
         const amount = parseFloat(rawNominal);
