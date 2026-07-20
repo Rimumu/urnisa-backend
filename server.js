@@ -826,6 +826,114 @@ const auth = (req, res, next) => {
 };
 app.post('/api/verify', (req, res) => res.json(req.body.password === ADMIN_PASSWORD ? { success: true } : { error: 'Invalid' }));
 
+// ==========================================
+// SOCIABUZZ WEBHOOK & CURRENCY CONVERTER
+// ==========================================
+let cachedRates = null;
+let lastCacheTime = 0;
+
+const getUSDRate = async (currency) => {
+    const cur = String(currency || 'IDR').toUpperCase();
+    if (cur === 'USD') return 1;
+
+    const now = Date.now();
+    // Cache for 1 hour to prevent redundant requests
+    if (cachedRates && (now - lastCacheTime < 3600000)) {
+        return cachedRates[cur] || null;
+    }
+
+    try {
+        console.log("🔌 [Exchange Rate] Fetching live rates from open.er-api.com...");
+        const res = await axios.get('https://open.er-api.com/v6/latest/USD', { timeout: 5000 });
+        if (res.data && res.data.rates) {
+            cachedRates = res.data.rates;
+            lastCacheTime = now;
+            return cachedRates[cur] || null;
+        }
+    } catch (e) {
+        console.error("❌ [Exchange Rate] Error fetching exchange rates:", e.message);
+    }
+
+    // Comprehensive offline exchange rate fallbacks if API is down
+    const fallbacks = {
+        'IDR': 15000,
+        'SGD': 1.34,
+        'MYR': 4.70,
+        'PHP': 56.00,
+        'THB': 35.00,
+        'JPY': 155.00,
+        'KRW': 13500.00,
+        'EUR': 0.92,
+        'GBP': 0.79,
+    };
+    return fallbacks[cur] || null;
+};
+
+app.post('/api/webhooks/sociabuzz', async (req, res) => {
+    try {
+        const payload = req.body;
+        console.log("📥 [SociaBuzz Webhook] Received payload:", JSON.stringify(payload, null, 2));
+
+        if (!payload) {
+            return res.status(400).json({ error: "Missing payload body" });
+        }
+
+        // Parse fields supportively across different property formats used by donation platforms
+        const name = payload.nama || payload.nama_penyumbang || payload.name || payload.supporter_name || payload.donor_name || payload.username || payload.sender || 'Anonymous';
+        const message = payload.pesan || payload.message || payload.pesan_penyumbang || payload.comment || "";
+        const rawNominal = payload.nominal || payload.amount || payload.nominal_received || payload.gross_amount || payload.total || 0;
+        const amount = parseFloat(rawNominal);
+
+        // Detect currency (default to IDR as it is the primary SociaBuzz currency)
+        const currency = String(payload.currency || payload.mata_uang || payload.currency_code || 'IDR').toUpperCase();
+
+        if (isNaN(amount) || amount <= 0) {
+            console.log("⚠️ [SociaBuzz Webhook] Ignored non-positive or invalid donation amount:", rawNominal);
+            return res.json({ success: true, message: "No active donation amount processed" });
+        }
+
+        // Convert currency using live exchange rate
+        const rate = await getUSDRate(currency);
+        let usdAmount = amount;
+        if (rate && rate > 0) {
+            usdAmount = amount / rate;
+            console.log(`💵 [SociaBuzz Webhook] Converted ${amount} ${currency} to ${usdAmount.toFixed(2)} USD using rate 1 USD = ${rate} ${currency}`);
+        } else {
+            console.log(`⚠️ [SociaBuzz Webhook] Rate not found for currency ${currency}. Defaulting to fallbacks.`);
+            if (currency === 'IDR') {
+                usdAmount = amount / 15000;
+            } else {
+                usdAmount = amount; // default 1:1 if unknown
+            }
+        }
+
+        // Process Nisathon (if active)
+        const stats = await NisathonStats.findOne({ key: 'main' });
+        const providerId = payload.id || payload.transaction_id || payload.order_id || `sociabuzz-${Date.now()}-${Math.random()}`;
+
+        if (stats) {
+            await processEvent(stats, 'tip', name, usdAmount, message, providerId);
+            await stats.save();
+            console.log(`✅ [SociaBuzz Webhook] Processed Nisathon donation: ${name} | $${usdAmount.toFixed(2)} USD | msg: ${message}`);
+        } else {
+            console.log("⚠️ [SociaBuzz Webhook] Nisathon stats not found in database.");
+        }
+
+        // Process Snakes (Always try, just like StreamElements socket.on('event'))
+        try {
+            await processSnakesEvent('tip', name, usdAmount, providerId, '1000', false, '');
+            console.log(`✅ [SociaBuzz Webhook] Routed to Snakes event queue for ${name}`);
+        } catch (snakesErr) {
+            console.error("❌ [SociaBuzz Webhook] Error routing to Snakes:", snakesErr.message);
+        }
+
+        res.json({ success: true });
+    } catch (err) {
+        console.error("❌ [SociaBuzz Webhook] Critical Error processing webhook:", err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
 // NISATHON
 app.get('/api/nisathon/stats', async (req, res) => {
     if (mongoose.connection.readyState !== 1) return res.json({});
