@@ -131,6 +131,10 @@ const NisathonStats = mongoose.model('NisathonStats', new mongoose.Schema({
     remainingTimeMs: { type: Number, default: 0 },
     isPaused: { type: Boolean, default: false },
     isEnded: { type: Boolean, default: false }, // New field to track if Nisathon is ended
+    subsRate: { type: Number, default: 2 },
+    bitsRate: { type: Number, default: 500 },
+    donationRate: { type: Number, default: 5 },
+    timePerNb: { type: Number, default: 10 },
     activeEvent: { type: String, default: null },
     lastActivityTime: { type: String, default: new Date().toISOString() }
 }));
@@ -410,12 +414,12 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
             return 0;
         }
 
-        let tVal = 0.5;
+        let tVal = 1 / (stats.subsRate || 2);
         let tLbl = "Tier 1";
         const tStr = String(tier).toLowerCase();
-        if (tStr.includes('3000') || tStr === '3') { tVal = 2.0; tLbl = "Tier 3"; }
-        else if (tStr.includes('2000') || tStr === '2') { tVal = 1.0; tLbl = "Tier 2"; }
-        else if (tStr.includes('prime')) { tVal = 0.5; tLbl = "Prime"; }
+        if (tStr.includes('3000') || tStr === '3') { tVal = 4 * (1 / (stats.subsRate || 2)); tLbl = "Tier 3"; }
+        else if (tStr.includes('2000') || tStr === '2') { tVal = 2 * (1 / (stats.subsRate || 2)); tLbl = "Tier 2"; }
+        else if (tStr.includes('prime')) { tVal = 1 / (stats.subsRate || 2); tLbl = "Prime"; }
 
         earnedNisaballs = tVal;
         amountDisplay = `${tLbl} Sub`;
@@ -423,18 +427,18 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
         if (isNewEvent) stats.currentSubs += 1;
     }
     else if (type === 'gift') {
-        earnedNisaballs = 0.5 * amount; // 0.5 NB per gift sub
+        earnedNisaballs = (1 / (stats.subsRate || 2)) * amount; // NB per gift sub
         amountDisplay = `${amount} Gift Sub${amount > 1 ? 's' : ''}`;
         if (isNewEvent) stats.currentSubs += amount;
     }
     else if (['cheer', 'bits'].includes(type)) {
-        earnedNisaballs = amount * 0.002;
+        earnedNisaballs = amount / (stats.bitsRate || 500);
         amountDisplay = `${amount} Bits`;
         eventType = 'bits';
         if (isNewEvent) stats.currentBits += amount;
     }
     else if (['tip', 'donation'].includes(type)) {
-        earnedNisaballs = amount * 0.2;
+        earnedNisaballs = amount / (stats.donationRate || 5);
         amountDisplay = `$${amount.toFixed(2)}`;
         eventType = 'donation';
         if (isNewEvent) stats.currentDonations += amount;
@@ -449,7 +453,7 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
     if (isNewEvent) {
         stats.totalNisaballs = roundOneDecimal(stats.totalNisaballs + earnedNisaballs);
         const mult = stats.activeEvent === 'DOUBLE_TIMER' ? 2 : 1;
-        const msAdd = earnedNisaballs * 10 * mult * 60000;
+        const msAdd = earnedNisaballs * (stats.timePerNb || 10) * mult * 60000;
 
         if (earnedNisaballs > 0) {
             if (!stats.isPaused) {
@@ -885,6 +889,22 @@ app.post('/api/nisathon/event', auth, async (req, res) => {
     await NisathonStats.findOneAndUpdate({ key: 'main' }, { activeEvent: req.body.activeEvent });
     res.json({ success: true });
 });
+
+app.post('/api/nisathon/settings', auth, async (req, res) => {
+    try {
+        const { subsRate, bitsRate, donationRate, timePerNb } = req.body;
+        await NisathonStats.findOneAndUpdate({ key: 'main' }, {
+            subsRate: subsRate || 2,
+            bitsRate: bitsRate || 500,
+            donationRate: donationRate || 5,
+            timePerNb: timePerNb || 10
+        });
+        res.json({ success: true, message: "Settings Updated" });
+    } catch (e) {
+        res.status(500).json({ error: "Failed to update settings" });
+    }
+});
+
 app.post('/api/nisathon/reset', auth, async (req, res) => {
     await NisathonEvent.deleteMany({}); await SpinQueue.deleteMany({}); await SpinHistory.deleteMany({});
     await NisathonStats.findOneAndUpdate({ key: 'main' }, {
@@ -929,7 +949,7 @@ app.post('/api/nisathon/delete-event', auth, async (req, res) => {
 
                 stats.totalNisaballs = Math.max(0, roundOneDecimal(stats.totalNisaballs - event.nisaballAmount));
 
-                const msToRemove = event.nisaballAmount * 10 * 60 * 1000;
+                const msToRemove = event.nisaballAmount * (stats.timePerNb || 10) * 60 * 1000;
                 if (stats.isPaused) stats.remainingTimeMs = Math.max(0, stats.remainingTimeMs - msToRemove);
                 else stats.timerEndTime = new Date(new Date(stats.timerEndTime).getTime() - msToRemove);
                 await stats.save();
