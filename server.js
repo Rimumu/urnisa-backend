@@ -601,7 +601,11 @@ let cachedChannelId = null;
 
 const resolveChannelId = async () => {
     if (cachedChannelId) return cachedChannelId;
-    if (!SE_JWT) return null;
+    if (!SE_JWT) {
+        console.log("❌ [resolveChannelId] STREAMELEMENTS_JWT is missing or empty.");
+        return null;
+    }
+    console.log("🔌 [resolveChannelId] Resolving StreamElements channel ID...");
     try {
         const res = await axios.get(`https://api.streamelements.com/kappa/v2/channels/${TARGET_USERNAME}`, {
             headers: { 
@@ -611,18 +615,24 @@ const resolveChannelId = async () => {
         });
         if (res.data && res.data._id) {
             cachedChannelId = res.data._id;
+            console.log(`✅ [resolveChannelId] Resolved channel ID: ${cachedChannelId} (Target: ${TARGET_USERNAME})`);
             return cachedChannelId;
         }
-    } catch (e) { }
+    } catch (e) { 
+        console.error(`⚠️ [resolveChannelId] Failed to resolve channel for ${TARGET_USERNAME}:`, e.response ? `Status ${e.response.status} - ${JSON.stringify(e.response.data)}` : e.message);
+    }
     try {
         const me = await axios.get('https://api.streamelements.com/kappa/v2/channels/me', {
             headers: { 'Authorization': `Bearer ${SE_JWT}` }
         });
         if (me.data && me.data._id) {
             cachedChannelId = me.data._id;
+            console.log(`✅ [resolveChannelId] Resolved "me" channel ID: ${cachedChannelId}`);
             return cachedChannelId;
         }
-    } catch (e) { }
+    } catch (e) { 
+        console.error(`❌ [resolveChannelId] Failed to resolve channel for "me":`, e.response ? `Status ${e.response.status} - ${JSON.stringify(e.response.data)}` : e.message);
+    }
     return null;
 };
 
@@ -1063,8 +1073,11 @@ app.post('/api/nisathon/end', auth, async (req, res) => {
 app.post('/api/nisathon/start', auth, async (req, res) => {
     try {
         await NisathonStats.findOneAndUpdate({ key: 'main' }, { isEnded: false, isPaused: false });
+        console.log("🟢 [Nisathon] Started / Resumed! Triggering sync...");
+        runSync(true).catch(err => console.error("Error during manual startup sync:", err));
         res.json({ success: true, message: "Nisathon Started" });
     } catch (e) {
+        console.error("❌ Failed to start Nisathon:", e);
         res.status(500).json({ error: "Failed to start Nisathon" });
     }
 });
