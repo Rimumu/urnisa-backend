@@ -4,7 +4,19 @@ const cors = require('cors');
 const axios = require('axios');
 const mongoose = require('mongoose');
 const crypto = require('crypto');
+
+// Bypass Node 21+ native WebSocket (undici) bug with older socket.io-client
+const oldWebSocket = global.WebSocket;
+delete global.WebSocket;
+if (globalThis) {
+    delete globalThis.WebSocket;
+}
 const io = require('socket.io-client');
+if (oldWebSocket) {
+    global.WebSocket = oldWebSocket;
+    globalThis.WebSocket = oldWebSocket;
+}
+
 const { createClient } = require('@supabase/supabase-js');
 const multer = require('multer');
 require('dotenv').config();
@@ -509,7 +521,7 @@ const connectSocket = () => {
 
     // StreamElements uses Socket.IO v2. 
     socket = io('https://realtime.streamelements.com', {
-        transports: ['websocket', 'polling'],
+        transports: ['websocket'],
         forceNew: true,
         autoConnect: true,
         reconnection: true
