@@ -6,16 +6,18 @@ const mongoose = require('mongoose');
 const crypto = require('crypto');
 
 // Bypass Node 21+ native WebSocket (undici) bug with older socket.io-client
-const oldWebSocket = global.WebSocket;
 delete global.WebSocket;
-if (globalThis) {
+if (typeof globalThis !== 'undefined') {
     delete globalThis.WebSocket;
 }
-const io = require('socket.io-client');
-if (oldWebSocket) {
-    global.WebSocket = oldWebSocket;
-    globalThis.WebSocket = oldWebSocket;
+try {
+    const ws = require('ws');
+    global.WebSocket = ws;
+    globalThis.WebSocket = ws;
+} catch (e) {
+    // Fall back to engine.io-client's internal node fallback if ws cannot be imported
 }
+const io = require('socket.io-client');
 
 const { createClient } = require('@supabase/supabase-js');
 const multer = require('multer');
