@@ -524,9 +524,17 @@ const connectSocket = () => {
         console.log(`✅ [Socket] Authenticated! (Channel: ${data.channelId})`);
     });
 
+    socket.on('disconnect', (reason) => {
+        console.log(`🔌 [Socket] Disconnected: ${reason}`);
+    });
+
+    socket.on('error', (err) => {
+        console.error(`❌ [Socket] Error:`, err);
+    });
+
     socket.on('event', async (data) => {
         if (!data || !data.type) return;
-        if (!['subscriber', 'tip', 'cheer', 'follower', 'follow'].includes(data.type)) return;
+        if (!['subscriber', 'sub', 'resub', 'subscription', 'gift', 'tip', 'cheer', 'follower', 'follow'].includes(data.type)) return;
 
         try {
             const stats = await NisathonStats.findOne({ key: 'main' });
@@ -541,7 +549,7 @@ const connectSocket = () => {
             let username = info.username;
 
             // GIFT BUFFERING LOGIC
-            if (type === 'subscriber' && info.gifted) {
+            if ((type === 'subscriber' || type === 'sub' || type === 'resub' || type === 'subscription') && info.gifted) {
                 const sender = info.sender;
                 // If we have a pending buffer for this sender, clear its timeout
                 if (giftBuffer[sender]) {
@@ -561,7 +569,7 @@ const connectSocket = () => {
             }
 
             // Normal Processing
-            if (type === 'subscriber') {
+            if (type === 'subscriber' || type === 'sub' || type === 'resub' || type === 'subscription') {
                 tier = info.tier || '1000';
                 amount = info.amount || 1;
             } else if (type === 'tip' || type === 'cheer') {
@@ -589,22 +597,33 @@ const connectSocket = () => {
 // ==========================================
 // 2. REST POLLING & RESOLVER
 // ==========================================
+let cachedChannelId = null;
+
 const resolveChannelId = async () => {
+    if (cachedChannelId) return cachedChannelId;
     if (!SE_JWT) return null;
     try {
         const res = await axios.get(`https://api.streamelements.com/kappa/v2/channels/${TARGET_USERNAME}`, {
-            headers: { 'User-Agent': 'Mozilla/5.0' }
+            headers: { 
+                'Authorization': `Bearer ${SE_JWT}`,
+                'User-Agent': 'Mozilla/5.0' 
+            }
         });
         if (res.data && res.data._id) {
-            return res.data._id;
+            cachedChannelId = res.data._id;
+            return cachedChannelId;
         }
     } catch (e) { }
     try {
         const me = await axios.get('https://api.streamelements.com/kappa/v2/channels/me', {
             headers: { 'Authorization': `Bearer ${SE_JWT}` }
         });
-        return me.data._id;
-    } catch (e) { return null; }
+        if (me.data && me.data._id) {
+            cachedChannelId = me.data._id;
+            return cachedChannelId;
+        }
+    } catch (e) { }
+    return null;
 };
 
 const fetchAndProcess = async (channelId, label, stats, limit = 25, offset = 0) => {
@@ -621,7 +640,7 @@ const fetchAndProcess = async (channelId, label, stats, limit = 25, offset = 0) 
                 'Accept': 'application/json',
                 'User-Agent': 'UrnisaBot/1.0'
             },
-            params: { limit, offset, types: 'subscriber,tip,cheer,follow' },
+            params: { limit, offset, types: 'subscriber,subscription,tip,cheer,follow,gift' },
             timeout: 10000
         });
 
@@ -637,7 +656,7 @@ const fetchAndProcess = async (channelId, label, stats, limit = 25, offset = 0) 
                 let username = act.data.username;
 
                 // Handle Gifts in REST
-                if (['subscriber', 'sub', 'resub'].includes(act.type)) {
+                if (['subscriber', 'sub', 'resub', 'subscription'].includes(act.type)) {
                     amt = 1;
                     tier = act.data.tier || '1000';
                     if (act.data.gifted) {
@@ -1037,6 +1056,16 @@ app.post('/api/nisathon/end', auth, async (req, res) => {
         res.json({ success: true, message: "Nisathon Ended" });
     } catch (e) {
         res.status(500).json({ error: "Failed to end Nisathon" });
+    }
+});
+
+// NEW: START / RESUME NISATHON ENDPOINT
+app.post('/api/nisathon/start', auth, async (req, res) => {
+    try {
+        await NisathonStats.findOneAndUpdate({ key: 'main' }, { isEnded: false, isPaused: false });
+        res.json({ success: true, message: "Nisathon Started" });
+    } catch (e) {
+        res.status(500).json({ error: "Failed to start Nisathon" });
     }
 });
 
