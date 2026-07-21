@@ -519,7 +519,10 @@ let socket = null;
 const connectSocket = () => {
     if (!SE_JWT) { console.log("❌ [Socket] No JWT"); return; }
 
-    console.log("🔌 [Socket] Connecting...");
+    const maskedJwt = SE_JWT.length > 20 
+        ? SE_JWT.substring(0, 10) + "..." + SE_JWT.substring(SE_JWT.length - 10)
+        : "[Too Short / Invalid]";
+    console.log(`🔌 [Socket] Connecting with JWT (Length: ${SE_JWT.length}, Masked: ${maskedJwt})`);
 
     // StreamElements uses Socket.IO v2. 
     socket = io('https://realtime.streamelements.com', {
@@ -536,6 +539,10 @@ const connectSocket = () => {
 
     socket.on('authenticated', (data) => {
         console.log(`✅ [Socket] Authenticated! (Channel: ${data.channelId})`);
+    });
+
+    socket.on('unauthorized', (err) => {
+        console.error(`❌ [Socket] Unauthorized error:`, err);
     });
 
     socket.on('disconnect', (reason) => {
