@@ -509,7 +509,7 @@ const connectSocket = () => {
 
     // StreamElements uses Socket.IO v2. 
     socket = io('https://realtime.streamelements.com', {
-        transports: ['websocket'],
+        transports: ['websocket', 'polling'],
         forceNew: true,
         autoConnect: true,
         reconnection: true
