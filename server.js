@@ -3483,6 +3483,65 @@ const initDefaultSeason = async () => {
 };
 if (MONGO_URI) setTimeout(initDefaultSeason, 3000);
 
+// Maintenance Wipe Endpoint for Minecraft/Bingo/Tournament (DANGER ZONE)
+// Wipes only non-archived tournament data and all bingo data
+app.post('/api/admin/maintenance/wipe-minecraft-data', auth, async (req, res) => {
+    const { scope } = req.body; // 'all', 'bingo', 'tournament'
+    try {
+        console.log(`⚠️ Admin triggered Minecraft/Bingo/Tournament Wipe on Main Server. Scope: ${scope}`);
+        const results = {};
+
+        if (!scope || scope === 'all' || scope === 'bingo') {
+            const cardRes = await BingoCard.deleteMany({});
+            const defRes = await BingoDefinition.deleteMany({});
+            const winRes = await BingoWinner.deleteMany({});
+            results.bingo = { 
+                success: true, 
+                cardsDeleted: cardRes.deletedCount, 
+                definitionsDeleted: defRes.deletedCount,
+                winnersDeleted: winRes.deletedCount
+            };
+        }
+
+        if (!scope || scope === 'all' || scope === 'tournament') {
+            // Find all active (non-archived) seasons
+            const activeSeasons = await TournamentSeason.find({ isArchived: { $ne: true } });
+            const activeSeasonIds = activeSeasons.map(s => s.seasonId);
+
+            // Delete tournament entries (registrations) for these active seasons
+            const entryRes = await TournamentEntry.deleteMany({ seasonId: { $in: activeSeasonIds } });
+
+            // Delete tournament brackets for these active seasons
+            const bracketRes = await TournamentBracket.deleteMany({ seasonId: { $in: activeSeasonIds } });
+
+            // Delete duo records and their associated party data
+            const activeDuos = await TournamentDuo.find({ seasonId: { $in: activeSeasonIds } });
+            const activeDuoIds = activeDuos.map(d => d.duoId);
+            
+            const partyRes = await DuoPartyData.deleteMany({ duoId: { $in: activeDuoIds } });
+            const duoRes = await TournamentDuo.deleteMany({ seasonId: { $in: activeSeasonIds } });
+
+            // Delete the active seasons themselves
+            const seasonRes = await TournamentSeason.deleteMany({ isArchived: { $ne: true } });
+
+            results.tournament = {
+                success: true,
+                activeSeasonIdsCleared: activeSeasonIds,
+                entriesDeleted: entryRes.deletedCount,
+                bracketsDeleted: bracketRes.deletedCount,
+                duosDeleted: duoRes.deletedCount,
+                partiesDeleted: partyRes.deletedCount,
+                seasonsDeleted: seasonRes.deletedCount
+            };
+        }
+
+        res.json({ success: true, results });
+    } catch (e) {
+        console.error("❌ Failed to wipe Minecraft/Bingo/Tournament data on Main Server:", e);
+        res.status(500).json({ error: "Failed to wipe data", details: e.message });
+    }
+});
+
 // Get All Seasons
 app.get('/api/tournament/seasons', async (req, res) => {
     try {
