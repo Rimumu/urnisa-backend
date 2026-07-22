@@ -4638,11 +4638,6 @@ app.post('/api/ranked/match', async (req, res) => {
             await ForfeitHistory.deleteMany({ forfeitedAt: { $lt: twelveHoursAgo } });
         }
 
-        // Fire-and-forget call to Discord Bot to sync ranks immediately
-        // On Render, we must use the remote URL provided in env, else fallback to localhost
-        const botUrl = process.env.BOT_API_URL || `http://localhost:${process.env.BOT_PORT || 3002}`;
-        axios.post(`${botUrl}/api/internal/sync-ranks`)
-            .catch(err => console.error("⚠️ Failed to trigger Bot Rank Sync:", err.message));
 
         res.json({
             success: true,
