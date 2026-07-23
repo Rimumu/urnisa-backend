@@ -457,6 +457,11 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
         eventType = 'donation';
         if (isNewEvent) stats.currentDonations += amount;
     }
+    else if (['nisall', 'nisaball', 'nisaballs', 'code', 'redeem'].includes(type)) {
+        earnedNisaballs = amount;
+        amountDisplay = `${amount} Nisaballs`;
+        eventType = 'nisaball';
+    }
     else if (['follower', 'follow'].includes(type)) {
         earnedNisaballs = 0;
         amountDisplay = "New Follower";
