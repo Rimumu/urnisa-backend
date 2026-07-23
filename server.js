@@ -167,7 +167,8 @@ const NisathonEvent = mongoose.model('NisathonEvent', new mongoose.Schema({
     amountDisplay: { type: String, required: true },
     message: String,
     nisaballAmount: { type: Number, default: 0 },
-    createdAt: { type: Date, default: Date.now }
+    createdAt: { type: Date, default: Date.now },
+    hidden: { type: Boolean, default: false }
 }));
 
 const SpinQueue = mongoose.model('SpinQueue', new mongoose.Schema({
@@ -462,14 +463,19 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
         amountDisplay = `${amount} Nisaballs`;
         eventType = 'nisaball';
     }
+    else if (type === 'reward') {
+        earnedNisaballs = amount;
+        amountDisplay = message || `${amount} Nisaballs (Reward)`;
+        eventType = 'reward';
+    }
     else if (['follower', 'follow'].includes(type)) {
         earnedNisaballs = 0;
         amountDisplay = "New Follower";
         eventType = 'follower';
     }
 
-    // Update Stats & Timer
-    if (isNewEvent) {
+    // Update Stats & Timer (Skip for 'reward' type to avoid affecting the Nisathon)
+    if (isNewEvent && type !== 'reward') {
         stats.totalNisaballs = roundOneDecimal(stats.totalNisaballs + earnedNisaballs);
         const mult = stats.activeEvent === 'DOUBLE_TIMER' ? 2 : 1;
         const msAdd = earnedNisaballs * (stats.timePerNb || 10) * mult * 60000;
@@ -493,6 +499,7 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
         amountDisplay,
         message,
         nisaballAmount: earnedNisaballs,
+        hidden: type === 'reward' ? true : undefined,
         createdAt: isNewEvent ? new Date() : undefined
     };
     Object.keys(eventData).forEach(k => eventData[k] === undefined && delete eventData[k]);
@@ -503,8 +510,8 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
         { upsert: true, new: true }
     );
 
-    // Wheel Logic (Single Transaction >= 5 NB)
-    if (isNewEvent && earnedNisaballs >= 5) {
+    // Wheel Logic (Single Transaction >= 5 NB, Skip for rewards)
+    if (isNewEvent && earnedNisaballs >= 5 && type !== 'reward') {
         const spins = Math.floor(earnedNisaballs / 5);
         console.log(`🎡 Queueing ${spins} spins for ${user}`);
         for (let i = 0; i < spins; i++) {
@@ -1006,7 +1013,7 @@ app.get('/api/nisathon/leaderboard', async (req, res) => {
 
 app.get('/api/nisathon/recent', async (req, res) => {
     const limit = parseInt(req.query.limit) || 50;
-    res.json(await NisathonEvent.find().sort({ createdAt: -1 }).limit(limit));
+    res.json(await NisathonEvent.find({ hidden: { $ne: true } }).sort({ createdAt: -1 }).limit(limit));
 });
 
 app.get('/api/nisathon/user/:username', async (req, res) => {
