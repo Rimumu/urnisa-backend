@@ -1004,6 +1004,37 @@ app.get('/api/nisathon/recent', async (req, res) => {
     res.json(await NisathonEvent.find().sort({ createdAt: -1 }).limit(limit));
 });
 
+app.get('/api/nisathon/user/:username', async (req, res) => {
+    try {
+        const { username } = req.params;
+        if (!username) return res.status(400).json({ error: "Missing username" });
+
+        // Query all Nisathon events for this specific user
+        // We do a case-insensitive regex search to ensure we catch minor casing mismatches
+        const events = await NisathonEvent.find({ 
+            user: { $regex: new RegExp(`^${username.trim()}$`, 'i') } 
+        }).sort({ createdAt: -1 });
+
+        const totalNisaballs = events.reduce((sum, e) => sum + (e.nisaballAmount || 0), 0);
+
+        res.json({
+            user: username,
+            totalNisaballs: roundOneDecimal(totalNisaballs),
+            events: events.map(e => ({
+                id: e._id || e.providerId,
+                type: e.type,
+                amountDisplay: e.amountDisplay,
+                message: e.message,
+                nisaballAmount: e.nisaballAmount,
+                createdAt: e.createdAt
+            }))
+        });
+    } catch (e) {
+        console.error("Error fetching user nisaball balance:", e);
+        res.status(500).json({ error: e.message });
+    }
+});
+
 app.post('/api/nisathon/test-event', auth, async (req, res) => {
     const stats = await NisathonStats.findOne({ key: 'main' });
     await processEvent(stats, req.body.type, req.body.user, parseFloat(req.body.amount), "Manual", null, req.body.tier, true);
