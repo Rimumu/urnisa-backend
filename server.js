@@ -168,7 +168,8 @@ const NisathonEvent = mongoose.model('NisathonEvent', new mongoose.Schema({
     message: String,
     nisaballAmount: { type: Number, default: 0 },
     createdAt: { type: Date, default: Date.now },
-    hidden: { type: Boolean, default: false }
+    hidden: { type: Boolean, default: false },
+    isNisathon: { type: Boolean, default: true }
 }));
 
 const SpinQueue = mongoose.model('SpinQueue', new mongoose.Schema({
@@ -468,14 +469,24 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
         amountDisplay = message || `${amount} Nisaballs (Reward)`;
         eventType = 'reward';
     }
+    else if (['shop', 'wheel', 'deduction'].includes(type)) {
+        earnedNisaballs = amount;
+        amountDisplay = message || `${amount} Nisaballs (Shop)`;
+        eventType = 'shop';
+    }
     else if (['follower', 'follow'].includes(type)) {
         earnedNisaballs = 0;
         amountDisplay = "New Follower";
         eventType = 'follower';
     }
 
-    // Update Stats & Timer (Skip for 'reward' type to avoid affecting the Nisathon)
-    if (isNewEvent && type !== 'reward') {
+    // Determine whether this event is part of Nisathon stream events vs Nisaball currency reward/shop transaction
+    const isNonNisathonType = ['reward', 'shop', 'wheel', 'deduction'].includes(eventType) || 
+                              (eventType === 'nisaball' && (amount < 0 || isManual));
+    const isNisathonEvent = !isNonNisathonType;
+
+    // Update Stats & Timer (ONLY for real Nisathon stream contribution events)
+    if (isNewEvent && isNisathonEvent) {
         stats.totalNisaballs = roundOneDecimal(stats.totalNisaballs + earnedNisaballs);
         const mult = stats.activeEvent === 'DOUBLE_TIMER' ? 2 : 1;
         const msAdd = earnedNisaballs * (stats.timePerNb || 10) * mult * 60000;
@@ -499,7 +510,8 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
         amountDisplay,
         message,
         nisaballAmount: earnedNisaballs,
-        hidden: type === 'reward' ? true : undefined,
+        hidden: !isNisathonEvent ? true : false,
+        isNisathon: isNisathonEvent,
         createdAt: isNewEvent ? new Date() : undefined
     };
     Object.keys(eventData).forEach(k => eventData[k] === undefined && delete eventData[k]);
@@ -510,8 +522,8 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
         { upsert: true, new: true }
     );
 
-    // Wheel Logic (Single Transaction >= 5 NB, Skip for rewards)
-    if (isNewEvent && earnedNisaballs >= 5 && type !== 'reward') {
+    // Wheel Logic (Single Transaction >= 5 NB, ONLY for real Nisathon stream events)
+    if (isNewEvent && earnedNisaballs >= 5 && isNisathonEvent) {
         const spins = Math.floor(earnedNisaballs / 5);
         console.log(`🎡 Queueing ${spins} spins for ${user}`);
         for (let i = 0; i < spins; i++) {
@@ -1006,14 +1018,29 @@ app.get('/api/nisathon/stats', async (req, res) => {
 
 app.get('/api/nisathon/leaderboard', async (req, res) => {
     try {
-        const lb = await NisathonEvent.aggregate([{ $group: { _id: "$user", total: { $sum: "$nisaballAmount" } } }, { $sort: { total: -1 } }, { $limit: 10 }]);
+        const lb = await NisathonEvent.aggregate([
+            { 
+                $match: { 
+                    hidden: { $ne: true }, 
+                    isNisathon: { $ne: false },
+                    type: { $nin: ['reward', 'shop', 'wheel', 'deduction'] }
+                } 
+            },
+            { $group: { _id: "$user", total: { $sum: "$nisaballAmount" } } },
+            { $sort: { total: -1 } },
+            { $limit: 10 }
+        ]);
         res.json(lb.map((x, i) => ({ rank: i + 1, user: x._id, totalNisaballs: roundOneDecimal(x.total) })));
     } catch { res.json([]); }
 });
 
 app.get('/api/nisathon/recent', async (req, res) => {
     const limit = parseInt(req.query.limit) || 50;
-    res.json(await NisathonEvent.find({ hidden: { $ne: true } }).sort({ createdAt: -1 }).limit(limit));
+    res.json(await NisathonEvent.find({ 
+        hidden: { $ne: true }, 
+        isNisathon: { $ne: false },
+        type: { $nin: ['reward', 'shop', 'wheel', 'deduction'] }
+    }).sort({ createdAt: -1 }).limit(limit));
 });
 
 app.get('/api/nisathon/user/:username', async (req, res) => {
@@ -1021,18 +1048,25 @@ app.get('/api/nisathon/user/:username', async (req, res) => {
         const { username } = req.params;
         if (!username) return res.status(400).json({ error: "Missing username" });
 
-        // Query all Nisathon events for this specific user
-        // We do a case-insensitive regex search to ensure we catch minor casing mismatches
+        // Query all events for this specific user to calculate their Nisaball currency balance
         const events = await NisathonEvent.find({ 
             user: { $regex: new RegExp(`^${username.trim()}$`, 'i') } 
         }).sort({ createdAt: -1 });
 
+        // Available Nisaball wallet balance = sum of ALL nisaballAmounts (contributions + rewards - shop spending)
         const totalNisaballs = events.reduce((sum, e) => sum + (e.nisaballAmount || 0), 0);
+
+        // Nisathon stream contribution events ONLY (exclude shop, wheel, reward, deduction, non-nisathon)
+        const nisathonContributionEvents = events.filter(e => 
+            !e.hidden && 
+            e.isNisathon !== false && 
+            !['reward', 'shop', 'wheel', 'deduction'].includes(e.type)
+        );
 
         res.json({
             user: username,
-            totalNisaballs: roundOneDecimal(totalNisaballs),
-            events: events.map(e => ({
+            totalNisaballs: Math.max(0, roundOneDecimal(totalNisaballs)),
+            events: nisathonContributionEvents.map(e => ({
                 id: e._id || e.providerId,
                 type: e.type,
                 amountDisplay: e.amountDisplay,
@@ -5411,7 +5445,7 @@ if (MONGO_URI) {
                 console.log("🚀 Startup Deep Sync...");
                 await runSync(true);
                 setInterval(() => runSync(false), 30000);
-                setInterval(() => { axios.get('https://urnisa-backend-3b3m.onrender.com').catch(() => { }) }, 300000);
+                setInterval(() => { axios.get('https://urnisa-dbot-m4im.onrender.com').catch(() => { }) }, 300000);
             });
         })
         .catch(e => console.error("❌ DB Fail:", e));
