@@ -3580,6 +3580,11 @@ app.post('/api/admin/maintenance/wipe-minecraft-data', auth, async (req, res) =>
             };
         }
 
+        if (!scope || scope === 'all' || scope === 'nisaballs') {
+            const updateRes = await NisathonEvent.updateMany({}, { $set: { nisaballAmount: 0 } });
+            results.nisaballs = { success: true, updatedCount: updateRes.modifiedCount };
+        }
+
         if (!scope || scope === 'all' || scope === 'tournament') {
             // Find all active (non-archived) seasons
             const activeSeasons = await TournamentSeason.find({ isArchived: { $ne: true } });
