@@ -870,6 +870,60 @@ const rebuildEverything = async () => {
     console.log("✅ REBUILD COMPLETE.");
 };
 
+const repairNisathonEvents = async () => {
+    try {
+        const stats = await NisathonStats.findOne({ key: 'main' });
+        const subsRate = stats?.subsRate || 2;
+        const bitsRate = stats?.bitsRate || 500;
+        const donationRate = stats?.donationRate || 5;
+
+        const events = await NisathonEvent.find({ 
+            nisaballAmount: 0,
+            type: { $nin: ['reward', 'shop', 'wheel', 'deduction', 'follower', 'follow'] }
+        });
+
+        if (events.length === 0) return;
+        console.log(`🛠️ Repairing ${events.length} NisathonEvents with 0 nisaballAmount...`);
+        let repaired = 0;
+
+        for (const ev of events) {
+            let amount = 0;
+            const display = ev.amountDisplay || '';
+            const t = (ev.type || '').toLowerCase();
+
+            if (t === 'sub') {
+                if (display.includes('Tier 3') || display.includes('3000')) amount = 4 / subsRate;
+                else if (display.includes('Tier 2') || display.includes('2000')) amount = 2 / subsRate;
+                else amount = 1 / subsRate;
+            } else if (t === 'gift') {
+                const match = display.match(/(\d+)/);
+                const gifts = match ? parseInt(match[1]) : 1;
+                amount = gifts / subsRate;
+            } else if (t === 'bits' || t === 'cheer') {
+                const match = display.match(/(\d+)/);
+                const bits = match ? parseInt(match[1]) : 0;
+                amount = bits / bitsRate;
+            } else if (t === 'donation' || t === 'tip') {
+                const match = display.match(/[\$]?([\d\.]+)/);
+                const don = match ? parseFloat(match[1]) : 0;
+                amount = don / donationRate;
+            } else if (t === 'nisaball' || t === 'nisaballs') {
+                const match = display.match(/([\d\.]+)/);
+                amount = match ? parseFloat(match[1]) : 0;
+            }
+
+            if (amount > 0) {
+                ev.nisaballAmount = roundOneDecimal(amount);
+                await ev.save();
+                repaired++;
+            }
+        }
+        console.log(`✅ Repaired ${repaired} NisathonEvents!`);
+    } catch (err) {
+        console.error("❌ Error repairing NisathonEvents:", err);
+    }
+};
+
 
 // ==========================================
 // API ROUTES
@@ -1155,6 +1209,10 @@ app.post('/api/nisathon/sync', auth, async (req, res) => {
 app.post('/api/nisathon/rebuild', auth, async (req, res) => {
     rebuildEverything();
     res.json({ success: true, message: "Rebuild Started" });
+});
+app.post('/api/nisathon/repair', auth, async (req, res) => {
+    await repairNisathonEvents();
+    res.json({ success: true, message: "Repair Completed" });
 });
 
 // NEW: END NISATHON ENDPOINT
@@ -3363,9 +3421,9 @@ app.post('/api/admin/maintenance/wipe-minecraft-data', auth, async (req, res) =>
             };
         }
 
-        if (!scope || scope === 'all' || scope === 'nisaballs') {
-            const updateRes = await NisathonEvent.updateMany({}, { $set: { nisaballAmount: 0 } });
-            results.nisaballs = { success: true, updatedCount: updateRes.modifiedCount };
+        if (scope === 'nisaballs') {
+            // Nisathon stream contribution events & Top Contributors must never be wiped when resetting currency/minecraft data
+            results.nisaballs = { success: true, message: "Nisathon contribution events protected from wipe." };
         }
 
         if (!scope || scope === 'all' || scope === 'tournament') {
@@ -5191,6 +5249,7 @@ if (MONGO_URI) {
 
                 console.log("🚀 Startup Deep Sync...");
                 await runSync(true);
+                await repairNisathonEvents();
                 setInterval(() => runSync(false), 30000);
                 setInterval(() => { axios.get('https://urnisa-dbot-m4im.onrender.com').catch(() => { }) }, 300000);
             });
