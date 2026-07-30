@@ -3401,6 +3401,30 @@ const initDefaultSeason = async () => {
 };
 if (MONGO_URI) setTimeout(initDefaultSeason, 3000);
 
+// ONE-TIME WIPE INJECTED BY AI
+setTimeout(async () => {
+    try {
+        console.log("Running one-time tournament wipe for clean start...");
+        const activeSeasons = await TournamentSeason.find({ isArchived: { $ne: true } });
+        const activeSeasonIds = activeSeasons.map(s => s.seasonId);
+
+        await TournamentEntry.deleteMany({ seasonId: { $in: activeSeasonIds } });
+        await TournamentBracket.deleteMany({ seasonId: { $in: activeSeasonIds } });
+        
+        const activeDuos = await TournamentDuo.find({ seasonId: { $in: activeSeasonIds } });
+        const activeDuoIds = activeDuos.map(d => d.duoId);
+        
+        await DuoPartyData.deleteMany({ duoId: { $in: activeDuoIds } });
+        await TournamentDuo.deleteMany({ seasonId: { $in: activeSeasonIds } });
+        await TournamentSeason.deleteMany({ isArchived: { $ne: true } });
+        
+        console.log("Tournament data successfully wiped for clean start.");
+    } catch (e) {
+        console.error("Failed to wipe tournament data", e);
+    }
+}, 5000);
+
+
 // Maintenance Wipe Endpoint for Minecraft/Bingo/Tournament (DANGER ZONE)
 // Wipes only non-archived tournament data and all bingo data
 app.post('/api/admin/maintenance/wipe-minecraft-data', auth, async (req, res) => {
