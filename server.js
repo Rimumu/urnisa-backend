@@ -3401,36 +3401,33 @@ const initDefaultSeason = async () => {
 };
 if (MONGO_URI) setTimeout(initDefaultSeason, 3000);
 
-// ONE-TIME WIPE INJECTED BY AI
-setTimeout(async () => {
+
+// Admin-triggered Complete Tournament Reset to Season 1
+app.post('/api/admin/maintenance/full-tournament-reset', auth, async (req, res) => {
     try {
-        // If Season 1 is archived, or Season 2 exists in the database, wipe the collections
-        // and create a clean active Season 1 to reset for a clean start.
-        const archivedSeason1 = await TournamentSeason.findOne({ seasonId: 1, isArchived: true });
-        const hasSeason2 = await TournamentSeason.findOne({ seasonId: 2 });
+        console.log("⚠️ Admin triggered complete tournament reset to active Season 1...");
+        await TournamentEntry.deleteMany({});
+        await TournamentBracket.deleteMany({});
+        await DuoPartyData.deleteMany({});
+        await TournamentDuo.deleteMany({});
+        await TournamentSeason.deleteMany({});
 
-        if (archivedSeason1 || hasSeason2) {
-            console.log("Running one-time tournament wipe for clean start...");
-            await TournamentEntry.deleteMany({});
-            await TournamentBracket.deleteMany({});
-            await DuoPartyData.deleteMany({});
-            await TournamentDuo.deleteMany({});
-            await TournamentSeason.deleteMany({});
+        await TournamentSeason.create({
+            seasonId: 1,
+            name: 'Season 1',
+            format: 'Singles 4v4',
+            status: 'DRAFTING',
+            isArchived: false,
+            challongeUrl: ''
+        });
 
-            await TournamentSeason.create({
-                seasonId: 1,
-                name: 'Season 1',
-                format: 'Singles 4v4',
-                status: 'DRAFTING',
-                isArchived: false,
-                challongeUrl: ''
-            });
-            console.log("Tournament data successfully wiped and re-initialized to active Season 1 for clean start.");
-        }
+        console.log("Tournament data successfully wiped and re-initialized to active Season 1 by admin.");
+        res.json({ success: true, message: "Tournament data successfully wiped and reset to active Season 1." });
     } catch (e) {
-        console.error("Failed to wipe tournament data", e);
+        console.error("Failed to reset tournament data:", e);
+        res.status(500).json({ error: "Failed to reset tournament data", details: e.message });
     }
-}, 5000);
+});
 
 
 // Maintenance Wipe Endpoint for Minecraft/Bingo/Tournament (DANGER ZONE)
@@ -5281,7 +5278,6 @@ if (MONGO_URI) {
 
                 console.log("🚀 Startup Deep Sync...");
                 await runSync(true);
-                await repairNisathonEvents();
                 setInterval(() => runSync(false), 30000);
                 setInterval(() => { axios.get('https://urnisa-dbot-m4im.onrender.com').catch(() => { }) }, 300000);
             });
