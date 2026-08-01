@@ -2763,6 +2763,38 @@ app.post('/api/admin/tournament/revoke-registration', auth, async (req, res) => 
 // ==========================================
 let POKEMON_CACHE = [];
 
+// Helper to format display names properly
+const getDisplayName = (name) => {
+    if (name === 'ho-oh') return 'Ho-Oh';
+    if (name === 'porygon-z') return 'Porygon-Z';
+    if (name === 'jangmo-o') return 'Jangmo-o';
+    if (name === 'hakamo-o') return 'Hakamo-o';
+    if (name === 'kommo-o') return 'Kommo-o';
+    if (name === 'type-null') return 'Type: Null';
+    if (name === 'mr-mime') return 'Mr. Mime';
+    if (name === 'mr-rime') return 'Mr. Rime';
+    if (name === 'mime-jr') return 'Mime Jr.';
+    if (name === 'tapu-koko') return 'Tapu Koko';
+    if (name === 'tapu-lele') return 'Tapu Lele';
+    if (name === 'tapu-bulu') return 'Tapu Bulu';
+    if (name === 'tapu-fini') return 'Tapu Fini';
+    if (name === 'chi-yu') return 'Chi-Yu';
+    if (name === 'chien-pao') return 'Chien-Pao';
+    if (name === 'ting-lu') return 'Ting-Lu';
+    if (name === 'wo-chien') return 'Wo-Chien';
+
+    // Strip forms (e.g. palafin-zero -> palafin)
+    const baseName = name.split('-')[0];
+    const bases = ['palafin', 'minior', 'aegislash', 'giratina', 'darmanitan', 'basculin', 'keldeo', 'meloetta', 'meowstic', 'pumpkaboo', 'gourgeist', 'oricorio', 'lycanroc', 'wishiwashi', 'mimikyu', 'toxtricity', 'eiscue', 'morpeko', 'urshifu', 'enamorus', 'oinkologne', 'maushold', 'squawkabilly', 'dudunsparce', 'gimmighoul', 'tatsugiri', 'deoxys', 'wormadam', 'shaymin', 'tornadus', 'thundurus', 'landorus'];
+    
+    if (bases.includes(baseName)) {
+        return baseName.charAt(0).toUpperCase() + baseName.slice(1);
+    }
+
+    return name.split('-').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+};
+
+
 // Helper to format names for Cobblemon Tools (e.g. "Tapu Koko" -> "tapu-koko")
 const getFormattedName = (name) => {
     return name.toLowerCase()
@@ -2794,7 +2826,7 @@ const fetchPokemonData = async () => {
 
             return {
                 id: id,
-                name: p.name.charAt(0).toUpperCase() + p.name.slice(1), // Capitalize
+                name: getDisplayName(p.name), // Capitalize
                 sprite: homeSprite, // Default to known working URL to avoid broken images on load
                 cobbleSprite: cobbleSprite, // Frontend checks validity of this
                 types: [] // Types would require individual fetches or a large static map. 
