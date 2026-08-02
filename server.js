@@ -3891,8 +3891,7 @@ app.post('/api/admin/tournament/end', auth, async (req, res) => {
             { seasonId: targetSeasonId },
             {
                 status: 'ENDED',
-                winners: winners || [],
-                isArchived: true
+                winners: winners || []
             },
             { upsert: true }
         );
