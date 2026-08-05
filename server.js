@@ -1226,9 +1226,15 @@ app.post('/api/nisathon/repair', auth, async (req, res) => {
 // NEW: END NISATHON ENDPOINT
 app.post('/api/nisathon/end', auth, async (req, res) => {
     try {
-        await NisathonStats.findOneAndUpdate({ key: 'main' }, { isEnded: true, isPaused: true });
-        res.json({ success: true, message: "Nisathon Ended" });
+        const stats = await NisathonStats.findOneAndUpdate(
+            { key: 'main' }, 
+            { isEnded: true, isPaused: true }, 
+            { upsert: true, new: true }
+        );
+        console.log("🛑 Nisathon Ended successfully!");
+        res.json({ success: true, message: "Nisathon Ended", stats });
     } catch (e) {
+        console.error("❌ Failed to end Nisathon:", e);
         res.status(500).json({ error: "Failed to end Nisathon" });
     }
 });
@@ -1236,10 +1242,14 @@ app.post('/api/nisathon/end', auth, async (req, res) => {
 // NEW: START / RESUME NISATHON ENDPOINT
 app.post('/api/nisathon/start', auth, async (req, res) => {
     try {
-        await NisathonStats.findOneAndUpdate({ key: 'main' }, { isEnded: false, isPaused: false });
+        const stats = await NisathonStats.findOneAndUpdate(
+            { key: 'main' }, 
+            { isEnded: false, isPaused: false }, 
+            { upsert: true, new: true }
+        );
         console.log("🟢 [Nisathon] Started / Resumed! Triggering sync...");
         runSync(true).catch(err => console.error("Error during manual startup sync:", err));
-        res.json({ success: true, message: "Nisathon Started" });
+        res.json({ success: true, message: "Nisathon Started", stats });
     } catch (e) {
         console.error("❌ Failed to start Nisathon:", e);
         res.status(500).json({ error: "Failed to start Nisathon" });
