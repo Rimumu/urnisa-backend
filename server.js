@@ -187,7 +187,7 @@ const BingoCard = mongoose.model('BingoCard', new mongoose.Schema({
     cardId: { type: String, required: true }, // The seed ID
     gridData: { type: Array, required: true }, // Snapshot of cells to ensure consistency
     marked: { type: [Boolean], required: true }, // Array of booleans
-    updatedAt: { type: Date, default: Date.now }
+    updatedAt: { type: Date, default: Date.now },
     syncCode: { type: String, unique: true, sparse: true } // Mod integration code
 }));
 
@@ -223,7 +223,7 @@ const TournamentEntry = mongoose.model('TournamentEntry', new mongoose.Schema({
     // Season 3 Gimmick Selection
     gimmickType: { type: String, default: null }, // 'tera', 'dynamax', 'mega', 'zmove', or null
     gimmickPokemonId: { type: Number, default: null }, // ID of Pokemon using the gimmick
-    updatedAt: { type: Date, default: Date.now }
+    updatedAt: { type: Date, default: Date.now },
     syncCode: { type: String, unique: true, sparse: true } // Mod integration code
 }));
 
@@ -250,7 +250,7 @@ const TournamentBracket = mongoose.model('TournamentBracket', new mongoose.Schem
     seasonId: { type: Number, default: 1 },
     type: { type: String, default: 'SINGLE_ELIMINATION' },
     matches: [TournamentMatchSchema],
-    updatedAt: { type: Date, default: Date.now }
+    updatedAt: { type: Date, default: Date.now },
     syncCode: { type: String, unique: true, sparse: true } // Mod integration code
 }));
 
@@ -4084,7 +4084,7 @@ const RankedPlayer = mongoose.model('RankedPlayer', new mongoose.Schema({
 
     lastMatchAt: { type: Date, default: null },
     createdAt: { type: Date, default: Date.now },
-    updatedAt: { type: Date, default: Date.now }
+    updatedAt: { type: Date, default: Date.now },
     syncCode: { type: String, unique: true, sparse: true } // Mod integration code
 }));
 
