@@ -1041,7 +1041,14 @@ app.post('/api/webhooks/sociabuzz', async (req, res) => {
         const name = payload.nama || payload.nama_penyumbang || payload.supporter || payload.name || payload.supporter_name || payload.donor_name || payload.username || payload.sender || 'Anonymous';
         const message = payload.pesan || payload.message || payload.pesan_penyumbang || payload.comment || "";
         const rawNominal = payload.nominal || payload.amount || payload.nominal_received || payload.gross_amount || payload.total || 0;
-        const amount = parseFloat(rawNominal);
+        let amount = 0;
+        if (typeof rawNominal === 'string') {
+            // Convert commas to dots for decimals, then strip out RM/MYR letters and symbols
+            const cleaned = rawNominal.replace(/,/g, '.').replace(/[^\d.-]/g, '');
+            amount = parseFloat(cleaned);
+        } else {
+            amount = parseFloat(rawNominal);
+        }
 
         // Detect currency (default to IDR as it is the primary SociaBuzz currency)
         const currency = String(payload.currency || payload.mata_uang || payload.currency_code || 'IDR').toUpperCase();
