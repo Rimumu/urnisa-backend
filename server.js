@@ -3730,9 +3730,9 @@ app.get('/api/tournament/seasons', async (req, res) => {
 // Get Active Season (latest non-archived, or most recent)
 app.get('/api/tournament/active-season', async (req, res) => {
     try {
-        let season = await TournamentSeason.findOne({ isArchived: false }).sort({ seasonId: -1 });
+        let season = await TournamentSeason.findOne({ isArchived: false, isHidden: { $ne: true } }).sort({ seasonId: -1 });
         if (!season) {
-            season = await TournamentSeason.findOne().sort({ seasonId: -1 });
+            season = await TournamentSeason.findOne({ isHidden: { $ne: true } }).sort({ seasonId: -1 });
         }
         res.json(season || { seasonId: 1, name: 'Season 1', status: 'ENDED', format: 'Singles 4v4' });
     } catch (e) {
@@ -3759,8 +3759,8 @@ app.get('/api/tournament/config', async (req, res) => {
         if (seasonId) {
             season = await TournamentSeason.findOne({ seasonId });
         } else {
-            season = await TournamentSeason.findOne({ isArchived: false }).sort({ seasonId: -1 });
-            if (!season) season = await TournamentSeason.findOne().sort({ seasonId: -1 });
+            season = await TournamentSeason.findOne({ isArchived: false, isHidden: { $ne: true } }).sort({ seasonId: -1 });
+            if (!season) season = await TournamentSeason.findOne({ isHidden: { $ne: true } }).sort({ seasonId: -1 });
         }
         if (!season) return res.json({ status: 'No Tournament', seasonId: 1 });
         res.json({
@@ -3778,7 +3778,7 @@ app.get('/api/tournament/config', async (req, res) => {
 
 // Create New Season (Admin)
 app.post('/api/admin/tournament/season/create', auth, async (req, res) => {
-    const { name, format, challongeUrl, description, bannedPokemonIds, rules } = req.body;
+    const { name, format, challongeUrl, description, bannedPokemonIds, rules, isHidden } = req.body;
     try {
         const lastSeason = await TournamentSeason.findOne().sort({ seasonId: -1 });
         const newId = lastSeason ? lastSeason.seasonId + 1 : 1;
@@ -3796,7 +3796,8 @@ app.post('/api/admin/tournament/season/create', auth, async (req, res) => {
             challongeUrl: challongeUrl || '',
             description: inheritedDesc,
             bannedPokemonIds: inheritedBans,
-            rules: inheritedRules
+            rules: inheritedRules,
+            isHidden: isHidden || false
         });
         res.json({ success: true, season });
     } catch (e) {
@@ -3807,7 +3808,7 @@ app.post('/api/admin/tournament/season/create', auth, async (req, res) => {
 
 // Update Season (Admin)
 app.post('/api/admin/tournament/season/:id/update', auth, async (req, res) => {
-    const { name, format, challongeUrl, status, description, bannedPokemonIds, rules } = req.body;
+    const { name, format, challongeUrl, status, description, bannedPokemonIds, rules, isHidden } = req.body;
     try {
         const update = {};
         if (name) update.name = name;
@@ -3817,6 +3818,7 @@ app.post('/api/admin/tournament/season/:id/update', auth, async (req, res) => {
         if (description !== undefined) update.description = description;
         if (bannedPokemonIds !== undefined) update.bannedPokemonIds = bannedPokemonIds;
         if (rules !== undefined) update.rules = rules;
+        if (isHidden !== undefined) update.isHidden = isHidden;
 
         const season = await TournamentSeason.findOneAndUpdate(
             { seasonId: parseInt(req.params.id) },
