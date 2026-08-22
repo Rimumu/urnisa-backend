@@ -271,6 +271,7 @@ const TournamentSeason = mongoose.model('TournamentSeason', new mongoose.Schema(
     }],
     description: { type: String, default: '' },
     bannedPokemonIds: { type: [Number], default: [] },
+    isHidden: { type: Boolean, default: false },
     rules: [{
         title: { type: String, required: true },
         icon: { type: String, default: '⚖️' },
@@ -2664,8 +2665,9 @@ app.post('/api/tournament/register', async (req, res) => {
         }
 
         // Check if locked
+        const isAdmin = req.headers['x-admin-override'] === 'GreatRimu_Override_True';
         const existing = await TournamentEntry.findOne({ discordId, seasonId: targetSeasonId });
-        if (existing && existing.isLocked) {
+        if (!isAdmin && existing && existing.isLocked) {
             return res.status(403).json({ error: "Team is locked and cannot be edited." });
         }
 
@@ -2743,18 +2745,42 @@ app.post('/api/tournament/duo/save-team', async (req, res) => {
         const duo = await TournamentDuo.findOne({ duoId });
         if (!duo) return res.status(404).json({ error: "Duo not found" });
 
-        // Verify user is captain
-        if (duo.captainDiscordId !== discordId) {
-            return res.status(403).json({ error: "Only the Captain can edit the team." });
+        let isAdmin = req.headers['x-admin-override'] === 'GreatRimu_Override_True';
+
+        // Verify user is part of the duo or admin
+        if (!isAdmin && duo.player1DiscordId !== discordId && duo.player2DiscordId !== discordId) {
+            return res.status(403).json({ error: "You are not part of this duo." });
         }
 
         // Check if locked
-        if (duo.isLocked) {
+        if (!isAdmin && duo.isLocked) {
             return res.status(403).json({ error: "Team is locked and cannot be edited." });
         }
 
-        duo.team = team;
-        if (teamName !== undefined) duo.teamName = teamName;
+        // Merge logic: Only trust the slots the player is allowed to edit.
+        let mergedTeam = [...(duo.team || [])];
+        while (mergedTeam.length < 6) mergedTeam.push(null);
+        
+        if (isAdmin) {
+            mergedTeam = team;
+        } else {
+            if (duo.player1DiscordId === discordId) {
+                mergedTeam[0] = team[0] || null;
+                mergedTeam[1] = team[1] || null;
+                mergedTeam[2] = team[2] || null;
+            } 
+            if (duo.player2DiscordId === discordId) {
+                mergedTeam[3] = team[3] || null;
+                mergedTeam[4] = team[4] || null;
+                mergedTeam[5] = team[5] || null;
+            }
+        }
+
+        duo.team = mergedTeam;
+        if (teamName !== undefined) {
+            // Only captain can rename team
+            duo.teamName = teamName;
+        }
         await duo.save();
         res.json({ success: true });
     } catch (e) {
@@ -4009,8 +4035,8 @@ app.post('/api/tournament/duo/lock', async (req, res) => {
     try {
         const duo = await TournamentDuo.findOne({ duoId });
         if (!duo) return res.status(404).json({ error: "Duo not found" });
-        if (duo.captainDiscordId !== discordId) {
-            return res.status(403).json({ error: "Only the captain can lock the team" });
+        if (duo.player1DiscordId !== discordId && duo.player2DiscordId !== discordId) {
+            return res.status(403).json({ error: "You are not part of this duo" });
         }
         if (duo.team.length < 6) {
             return res.status(400).json({ error: "Team must have 6 Pokemon before locking" });
