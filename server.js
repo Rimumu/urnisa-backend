@@ -3948,16 +3948,31 @@ app.get('/api/tournament/duo/by-player', async (req, res) => {
 
 // Create Duo (Admin) - Pair two players
 app.post('/api/admin/tournament/duo/create', auth, async (req, res) => {
-    const { seasonId, player1DiscordId, player1Username, player2DiscordId, player2Username, captainDiscordId } = req.body;
     try {
+        const seasonId = parseInt(req.body.seasonId) || 2;
+        const p1Id = req.body.player1DiscordId || req.body.player1?.discordId;
+        const p1Name = req.body.player1Username || req.body.player1?.username || req.body.player1?.minecraftUsername;
+        const p2Id = req.body.player2DiscordId || req.body.player2?.discordId;
+        const p2Name = req.body.player2Username || req.body.player2?.username || req.body.player2?.minecraftUsername;
+
+        if (!p1Id || !p2Id) {
+            return res.status(400).json({ error: "Missing player information for duo creation" });
+        }
+
+        let capId = req.body.captainDiscordId;
+        if (!capId) {
+            if (req.body.captain === 'player2') capId = p2Id;
+            else capId = p1Id;
+        }
+
         // Check if either player is already in a duo for this season
         const existingDuo = await TournamentDuo.findOne({
             seasonId,
             $or: [
-                { player1DiscordId },
-                { player2DiscordId },
-                { player1DiscordId: player2DiscordId },
-                { player2DiscordId: player1DiscordId }
+                { player1DiscordId: p1Id },
+                { player2DiscordId: p1Id },
+                { player1DiscordId: p2Id },
+                { player2DiscordId: p2Id }
             ]
         });
         if (existingDuo) {
@@ -3968,18 +3983,18 @@ app.post('/api/admin/tournament/duo/create', auth, async (req, res) => {
         const duo = await TournamentDuo.create({
             duoId,
             seasonId,
-            player1DiscordId,
-            player1Username,
-            player2DiscordId,
-            player2Username,
-            captainDiscordId,
+            player1DiscordId: p1Id,
+            player1Username: p1Name,
+            player2DiscordId: p2Id,
+            player2Username: p2Name,
+            captainDiscordId: capId,
             team: [],
             isLocked: false
         });
         res.json({ success: true, duo });
     } catch (e) {
-        console.error(e);
-        res.status(500).json({ error: "Failed to create duo" });
+        console.error("Duo Create Error:", e);
+        res.status(500).json({ error: "Failed to create duo: " + e.message });
     }
 });
 
@@ -3996,7 +4011,8 @@ app.post('/api/admin/tournament/duo/delete', auth, async (req, res) => {
 
 // Update Duo Captain (Admin)
 app.post('/api/admin/tournament/duo/update-captain', auth, async (req, res) => {
-    const { duoId, captainDiscordId } = req.body;
+    const duoId = req.body.duoId;
+    const captainDiscordId = req.body.captainDiscordId || req.body.newCaptainDiscordId;
     try {
         const duo = await TournamentDuo.findOneAndUpdate(
             { duoId },
