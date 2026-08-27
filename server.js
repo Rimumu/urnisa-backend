@@ -141,6 +141,9 @@ const NisathonStats = mongoose.model('NisathonStats', new mongoose.Schema({
     currentBits: { type: Number, default: 0 },
     currentDonations: { type: Number, default: 0 },
     totalNisaballs: { type: Number, default: 0 },
+    nbFromSubs: { type: Number, default: 0 },
+    nbFromBits: { type: Number, default: 0 },
+    nbFromDonations: { type: Number, default: 0 },
     timerEndTime: { type: Date, default: Date.now },
     remainingTimeMs: { type: Number, default: 0 },
     isPaused: { type: Boolean, default: false },
@@ -453,24 +456,36 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
         earnedNisaballs = tVal;
         amountDisplay = `${tLbl} Sub`;
         eventType = 'sub';
-        if (isNewEvent) stats.currentSubs += 1;
+        if (isNewEvent) {
+            stats.currentSubs += 1;
+            stats.nbFromSubs = (stats.nbFromSubs || 0) + earnedNisaballs;
+        }
     }
     else if (type === 'gift') {
         earnedNisaballs = (1 / (stats.subsRate || 2)) * amount; // NB per gift sub
         amountDisplay = `${amount} Gift Sub${amount > 1 ? 's' : ''}`;
-        if (isNewEvent) stats.currentSubs += amount;
+        if (isNewEvent) {
+            stats.currentSubs += amount;
+            stats.nbFromSubs = (stats.nbFromSubs || 0) + earnedNisaballs;
+        }
     }
     else if (['cheer', 'bits'].includes(type)) {
         earnedNisaballs = amount / (stats.bitsRate || 500);
         amountDisplay = `${amount} Bits`;
         eventType = 'bits';
-        if (isNewEvent) stats.currentBits += amount;
+        if (isNewEvent) {
+            stats.currentBits += amount;
+            stats.nbFromBits = (stats.nbFromBits || 0) + earnedNisaballs;
+        }
     }
     else if (['tip', 'donation'].includes(type)) {
         earnedNisaballs = amount / (stats.donationRate || 5);
         amountDisplay = `$${amount.toFixed(2)}`;
         eventType = 'donation';
-        if (isNewEvent) stats.currentDonations += amount;
+        if (isNewEvent) {
+            stats.currentDonations += amount;
+            stats.nbFromDonations = (stats.nbFromDonations || 0) + earnedNisaballs;
+        }
     }
     else if (type === 'tip-myr') {
         earnedNisaballs = myrAmount / 9; // 9 MYR = 1 Nisaball
@@ -478,6 +493,7 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
         eventType = 'donation'; // Keep 'donation' so frontend icons work properly
         if (isNewEvent) {
             stats.currentDonations += amount; // Track as USD
+            stats.nbFromDonations = (stats.nbFromDonations || 0) + earnedNisaballs;
         }
     }
     else if (['nisall', 'nisaball', 'nisaballs', 'code', 'redeem'].includes(type)) {
