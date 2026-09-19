@@ -1157,6 +1157,15 @@ app.get('/api/nisathon/stats', async (req, res) => {
     if (mongoose.connection.readyState !== 1) return res.json({});
     let stats = await NisathonStats.findOne({ key: 'main' });
     if (!stats) stats = await NisathonStats.create({ key: 'main' });
+    
+    // Auto-heal legacy partial breakdown counters if present
+    if (stats.currentSubs > 0 && (!stats.nbFromSubs || stats.nbFromSubs < stats.currentSubs * 0.5)) {
+        stats.nbFromSubs = stats.currentSubs / (stats.subsRate || 1);
+        stats.nbFromBits = stats.currentBits / (stats.bitsRate || 500);
+        stats.nbFromDonations = stats.currentDonations / (stats.donationRate || 5);
+        await stats.save();
+    }
+    
     res.json(stats);
 });
 
