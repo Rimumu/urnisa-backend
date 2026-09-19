@@ -148,6 +148,7 @@ const NisathonStats = mongoose.model('NisathonStats', new mongoose.Schema({
     remainingTimeMs: { type: Number, default: 0 },
     isPaused: { type: Boolean, default: false },
     isEnded: { type: Boolean, default: false }, // New field to track if Nisathon is ended
+    eventListenerActive: { type: Boolean, default: true }, // Field to toggle Nisathon/Return event listener on/off
     subsRate: { type: Number, default: 2 },
     bitsRate: { type: Number, default: 500 },
     donationRate: { type: Number, default: 5 },
@@ -388,10 +389,10 @@ const processBufferedGift = async (sender, data) => {
         // Generate a unique ID for this bulk event
         const providerId = `bulk-gift-${Date.now()}-${sender}`;
 
-        // Process for Nisathon (if stats exist)
+        // Process for Nisathon (if stats exist and event listener is not OFF)
         if (stats) {
-            if (stats.isEnded) {
-                console.log("🛑 Nisathon Ended - Skipping Gift Buffer for Nisathon");
+            if (stats.eventListenerActive === false) {
+                console.log("🛑 Nisathon Event Listener is OFF - Skipping Gift Buffer for Nisathon");
             } else {
                 await processEvent(
                     stats,
@@ -422,8 +423,9 @@ const processBufferedGift = async (sender, data) => {
 // ==========================================
 
 const processEvent = async (stats, type, user, amount, message, providerId, tier = '1000', isManual = false, adminNote = "", myrAmount = 0) => {
-    // If Nisathon is ended, ignore incoming auto events
-    if (stats.isEnded && !isManual) {
+    // If Nisathon event listener is OFF, ignore incoming auto events
+    if (stats.eventListenerActive === false && !isManual) {
+        console.log(`🔇 Nisathon Event Listener is OFF - ignoring ${type} from ${user}`);
         return 0;
     }
 
@@ -456,7 +458,7 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
         earnedNisaballs = tVal;
         amountDisplay = `${tLbl} Sub`;
         eventType = 'sub';
-        if (isNewEvent) {
+        if (isNewEvent && !stats.isEnded) {
             stats.currentSubs += 1;
             stats.nbFromSubs = (stats.nbFromSubs || 0) + earnedNisaballs;
         }
@@ -464,7 +466,7 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
     else if (type === 'gift') {
         earnedNisaballs = (1 / (stats.subsRate || 2)) * amount; // NB per gift sub
         amountDisplay = `${amount} Gift Sub${amount > 1 ? 's' : ''}`;
-        if (isNewEvent) {
+        if (isNewEvent && !stats.isEnded) {
             stats.currentSubs += amount;
             stats.nbFromSubs = (stats.nbFromSubs || 0) + earnedNisaballs;
         }
@@ -473,7 +475,7 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
         earnedNisaballs = amount / (stats.bitsRate || 500);
         amountDisplay = `${amount} Bits`;
         eventType = 'bits';
-        if (isNewEvent) {
+        if (isNewEvent && !stats.isEnded) {
             stats.currentBits += amount;
             stats.nbFromBits = (stats.nbFromBits || 0) + earnedNisaballs;
         }
@@ -482,7 +484,7 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
         earnedNisaballs = amount / (stats.donationRate || 5);
         amountDisplay = `$${amount.toFixed(2)}`;
         eventType = 'donation';
-        if (isNewEvent) {
+        if (isNewEvent && !stats.isEnded) {
             stats.currentDonations += amount;
             stats.nbFromDonations = (stats.nbFromDonations || 0) + earnedNisaballs;
         }
@@ -491,7 +493,7 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
         earnedNisaballs = myrAmount / 9; // 9 MYR = 1 Nisaball
         amountDisplay = `$${amount.toFixed(2)}`; // Show as USD on website
         eventType = 'donation'; // Keep 'donation' so frontend icons work properly
-        if (isNewEvent) {
+        if (isNewEvent && !stats.isEnded) {
             stats.currentDonations += amount; // Track as USD
             stats.nbFromDonations = (stats.nbFromDonations || 0) + earnedNisaballs;
         }
@@ -524,32 +526,45 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
 
     // Update Stats & Timer (ONLY for real Nisathon stream contribution events)
     if (isNewEvent && isNisathonEvent) {
-        stats.totalNisaballs = roundOneDecimal(stats.totalNisaballs + earnedNisaballs);
         const mult = stats.activeEvent === 'DOUBLE_TIMER' ? 2 : 1;
         const msAdd = earnedNisaballs * (stats.timePerNb || 10) * mult * 60000;
 
-        if (earnedNisaballs > 0) {
-            if (!stats.isPaused) {
-                const now = Date.now();
-                const curEnd = new Date(stats.timerEndTime).getTime();
-                stats.timerEndTime = new Date(Math.max(now, curEnd) + msAdd);
-            } else {
-                stats.remainingTimeMs += msAdd;
+        if (stats.isEnded) {
+            // When Nisathon is ended: SOLELY add to the preserved Return Timer!
+            // DO NOT add any NB to user balance or stats.totalNisaballs.
+            stats.remainingTimeMs = (stats.remainingTimeMs || 0) + msAdd;
+            stats.lastActivityTime = new Date().toISOString();
+        } else {
+            stats.totalNisaballs = roundOneDecimal(stats.totalNisaballs + earnedNisaballs);
+            if (earnedNisaballs > 0) {
+                if (!stats.isPaused) {
+                    const now = Date.now();
+                    const curEnd = new Date(stats.timerEndTime).getTime();
+                    stats.timerEndTime = new Date(Math.max(now, curEnd) + msAdd);
+                } else {
+                    stats.remainingTimeMs = (stats.remainingTimeMs || 0) + msAdd;
+                }
             }
         }
     }
 
-    // Save Event
+    // Save Event:
+    // If stats.isEnded, nisaballAmount is saved as 0 so DO NOT add any NB to the user!
+    // But it will still display in the Activity widget overlay because it's a valid NisathonEvent!
+    const savedNisaballAmount = stats.isEnded ? 0 : earnedNisaballs;
+
     const eventData = {
         providerId: providerId || `sim-${Date.now()}`,
         user: user || 'Anonymous',
         type: eventType,
         amountDisplay,
         message,
-        nisaballAmount: earnedNisaballs,
+        nisaballAmount: savedNisaballAmount,
         hidden: !isNisathonEvent ? true : false,
         isNisathon: isNisathonEvent,
-        adminNote: adminNote,
+        adminNote: stats.isEnded 
+            ? (adminNote ? `${adminNote} (Return Timer)` : `(Return Timer +${(earnedNisaballs * (stats.timePerNb || 10)).toFixed(1)}m)`) 
+            : adminNote,
         createdAt: isNewEvent ? new Date() : undefined
     };
     Object.keys(eventData).forEach(k => eventData[k] === undefined && delete eventData[k]);
@@ -560,8 +575,8 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
         { upsert: true, new: true }
     );
 
-    // Wheel Logic (Single Transaction >= 5 NB, ONLY for real Nisathon stream events)
-    if (isNewEvent && earnedNisaballs >= 5 && isNisathonEvent) {
+    // Wheel Logic (Only trigger if Nisathon is NOT ended)
+    if (!stats.isEnded && isNewEvent && earnedNisaballs >= 5 && isNisathonEvent) {
         const spins = Math.floor(earnedNisaballs / 5);
         console.log(`🎡 Queueing ${spins} spins for ${user}`);
         for (let i = 0; i < spins; i++) {
@@ -569,7 +584,13 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
         }
     }
 
-    if (isNewEvent) console.log(`✅ [${isManual ? 'MANUAL' : 'AUTO'}] ${user} | (${eventType}) | +${earnedNisaballs}NB`);
+    if (isNewEvent) {
+        if (stats.isEnded) {
+            console.log(`✅ [RETURN TIMER EVENT] ${user} | (${eventType}) | Added ${(earnedNisaballs * (stats.timePerNb || 10)).toFixed(1)}m to Return Timer (0 NB to user)`);
+        } else {
+            console.log(`✅ [${isManual ? 'MANUAL' : 'AUTO'}] ${user} | (${eventType}) | +${earnedNisaballs}NB`);
+        }
+    }
     return earnedNisaballs;
 };
 
@@ -1248,16 +1269,41 @@ app.post('/api/nisathon/event', auth, async (req, res) => {
     res.json({ success: true });
 });
 
+app.post('/api/nisathon/toggle-listener', auth, async (req, res) => {
+    try {
+        let stats = await NisathonStats.findOne({ key: 'main' });
+        if (!stats) stats = await NisathonStats.create({ key: 'main' });
+
+        if (typeof req.body.active === 'boolean') {
+            stats.eventListenerActive = req.body.active;
+        } else {
+            stats.eventListenerActive = stats.eventListenerActive === false ? true : false;
+        }
+
+        await stats.save();
+        console.log(`🎧 Nisathon Event Listener toggled: ${stats.eventListenerActive ? 'ACTIVE' : 'OFF'}`);
+        res.json({ success: true, eventListenerActive: stats.eventListenerActive });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
 app.post('/api/nisathon/settings', auth, async (req, res) => {
     try {
-        const { subsRate, bitsRate, donationRate, timePerNb } = req.body;
-        await NisathonStats.findOneAndUpdate({ key: 'main' }, {
-            subsRate: subsRate || 2,
-            bitsRate: bitsRate || 500,
-            donationRate: donationRate || 5,
-            timePerNb: timePerNb || 10
-        });
-        res.json({ success: true, message: "Settings Updated" });
+        const { subsRate, bitsRate, donationRate, timePerNb, eventListenerActive } = req.body;
+        const updateData = {};
+        if (subsRate !== undefined) updateData.subsRate = subsRate;
+        if (bitsRate !== undefined) updateData.bitsRate = bitsRate;
+        if (donationRate !== undefined) updateData.donationRate = donationRate;
+        if (timePerNb !== undefined) updateData.timePerNb = timePerNb;
+        if (eventListenerActive !== undefined) updateData.eventListenerActive = eventListenerActive;
+
+        const updated = await NisathonStats.findOneAndUpdate(
+            { key: 'main' },
+            { $set: updateData },
+            { new: true, upsert: true }
+        );
+        res.json({ success: true, message: "Settings Updated", stats: updated });
     } catch (e) {
         res.status(500).json({ error: "Failed to update settings" });
     }
