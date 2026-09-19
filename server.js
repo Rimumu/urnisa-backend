@@ -1287,13 +1287,33 @@ app.post('/api/nisathon/repair', auth, async (req, res) => {
 // NEW: END NISATHON ENDPOINT
 app.post('/api/nisathon/end', auth, async (req, res) => {
     try {
-        const stats = await NisathonStats.findOneAndUpdate(
-            { key: 'main' }, 
-            { isEnded: true, isPaused: true }, 
-            { upsert: true, new: true }
-        );
-        console.log("🛑 Nisathon Ended successfully!");
-        res.json({ success: true, message: "Nisathon Ended", stats });
+        let stats = await NisathonStats.findOne({ key: 'main' });
+        if (!stats) stats = await NisathonStats.create({ key: 'main' });
+
+        const now = Date.now();
+        let remaining = 0;
+
+        if (req.body && req.body.remainingTimeMs !== undefined && Number(req.body.remainingTimeMs) > 0) {
+            remaining = Number(req.body.remainingTimeMs);
+        } else if (stats.isPaused) {
+            remaining = stats.remainingTimeMs || 0;
+        } else {
+            const end = new Date(stats.timerEndTime).getTime();
+            remaining = Math.max(0, end - now);
+        }
+
+        // Safety fallback: if calculation resulted in 0 but previous remainingTimeMs exists, keep it
+        if (remaining <= 0 && (stats.remainingTimeMs || 0) > 0) {
+            remaining = stats.remainingTimeMs;
+        }
+
+        stats.isEnded = true;
+        stats.isPaused = true;
+        stats.remainingTimeMs = remaining;
+        await stats.save();
+
+        console.log(`🛑 Nisathon Ended successfully! Preserved remainingTimeMs: ${remaining}ms`);
+        res.json({ success: true, message: "Nisathon Ended", stats, remainingTimeMs: remaining });
     } catch (e) {
         console.error("❌ Failed to end Nisathon:", e);
         res.status(500).json({ error: "Failed to end Nisathon" });
