@@ -2545,11 +2545,43 @@ app.post('/api/profile', auth, async (req, res) => {
 });
 
 app.get('/api/schedule', async (req, res) => {
-    res.json({ url: (await Setting.findOne({ key: 'schedule_url' }))?.value || DEFAULT_SCHEDULE_URL });
+    const [urlDoc, configDoc] = await Promise.all([
+        Setting.findOne({ key: 'schedule_url' }),
+        Setting.findOne({ key: 'schedule_config' })
+    ]);
+    const cfg = (configDoc && typeof configDoc.value === 'object' && configDoc.value) ? configDoc.value : {};
+    res.json({
+        url: urlDoc?.value || DEFAULT_SCHEDULE_URL,
+        mode: cfg.mode === 'countdown' ? 'countdown' : 'poster',
+        countdownTitle: typeof cfg.countdownTitle === 'string' ? cfg.countdownTitle : '',
+        countdownTarget: typeof cfg.countdownTarget === 'string' ? cfg.countdownTarget : '',
+        countdownBackdropUrl: typeof cfg.countdownBackdropUrl === 'string' ? cfg.countdownBackdropUrl : ''
+    });
 });
 app.post('/api/schedule', auth, async (req, res) => {
-    await Setting.findOneAndUpdate({ key: 'schedule_url' }, { value: req.body.url }, { upsert: true });
-    res.json({ success: true });
+    const body = req.body || {};
+    if (typeof body.url === 'string') {
+        await Setting.findOneAndUpdate({ key: 'schedule_url' }, { value: body.url }, { upsert: true });
+    }
+
+    const existingDoc = await Setting.findOne({ key: 'schedule_config' });
+    const existingCfg = (existingDoc && typeof existingDoc.value === 'object' && existingDoc.value) ? existingDoc.value : {};
+
+    const nextCfg = {
+        mode: body.mode === 'countdown' ? 'countdown' : (body.mode === 'poster' ? 'poster' : (existingCfg.mode === 'countdown' ? 'countdown' : 'poster')),
+        countdownTitle: typeof body.countdownTitle === 'string' ? body.countdownTitle.trim() : (existingCfg.countdownTitle || ''),
+        countdownTarget: typeof body.countdownTarget === 'string' ? body.countdownTarget.trim() : (existingCfg.countdownTarget || ''),
+        countdownBackdropUrl: typeof body.countdownBackdropUrl === 'string' ? body.countdownBackdropUrl.trim() : (existingCfg.countdownBackdropUrl || '')
+    };
+
+    await Setting.findOneAndUpdate({ key: 'schedule_config' }, { value: nextCfg }, { upsert: true });
+    const urlDoc = await Setting.findOne({ key: 'schedule_url' });
+
+    res.json({
+        success: true,
+        url: urlDoc?.value || DEFAULT_SCHEDULE_URL,
+        ...nextCfg
+    });
 });
 
 app.post('/api/stream-status', auth, async (req, res) => {
