@@ -2555,7 +2555,8 @@ app.get('/api/schedule', async (req, res) => {
         mode: cfg.mode === 'countdown' ? 'countdown' : 'poster',
         countdownTitle: typeof cfg.countdownTitle === 'string' ? cfg.countdownTitle : '',
         countdownTarget: typeof cfg.countdownTarget === 'string' ? cfg.countdownTarget : '',
-        countdownBackdropUrl: typeof cfg.countdownBackdropUrl === 'string' ? cfg.countdownBackdropUrl : ''
+        countdownBackdropUrl: typeof cfg.countdownBackdropUrl === 'string' ? cfg.countdownBackdropUrl : '',
+        countdownBackdropFit: cfg.countdownBackdropFit === 'contain' ? 'contain' : 'cover'
     });
 });
 app.post('/api/schedule', auth, async (req, res) => {
@@ -2571,7 +2572,8 @@ app.post('/api/schedule', auth, async (req, res) => {
         mode: body.mode === 'countdown' ? 'countdown' : (body.mode === 'poster' ? 'poster' : (existingCfg.mode === 'countdown' ? 'countdown' : 'poster')),
         countdownTitle: typeof body.countdownTitle === 'string' ? body.countdownTitle.trim() : (existingCfg.countdownTitle || ''),
         countdownTarget: typeof body.countdownTarget === 'string' ? body.countdownTarget.trim() : (existingCfg.countdownTarget || ''),
-        countdownBackdropUrl: typeof body.countdownBackdropUrl === 'string' ? body.countdownBackdropUrl.trim() : (existingCfg.countdownBackdropUrl || '')
+        countdownBackdropUrl: typeof body.countdownBackdropUrl === 'string' ? body.countdownBackdropUrl.trim() : (existingCfg.countdownBackdropUrl || ''),
+        countdownBackdropFit: body.countdownBackdropFit === 'contain' ? 'contain' : (body.countdownBackdropFit === 'cover' ? 'cover' : (existingCfg.countdownBackdropFit === 'contain' ? 'contain' : 'cover'))
     };
 
     await Setting.findOneAndUpdate({ key: 'schedule_config' }, { value: nextCfg }, { upsert: true });
