@@ -238,27 +238,22 @@ const DEFAULT_DRINK_MILESTONES = [
     { count: 5, reward: 'Chat Picks a Silly Voice for 5 Minutes' },
     { count: 10, reward: 'Spicy Truth or Dare' },
     { count: 15, reward: 'Karaoke Round (No Skipping)' },
-    { count: 20, reward: 'Bartender Mystery Mix' },
-    { count: 25, reward: 'Final Boss Toast & Hydration Check' }
+    { count: 20, reward: 'Final Boss Toast & Hydration Check' }
 ];
 
 const DrinkSettings = mongoose.model('DrinkSettings', new mongoose.Schema({
     key: { type: String, default: 'main', unique: true },
-    eventTitle: { type: String, default: 'Drinks with Urnisa' },
-    eventSubtitle: { type: String, default: 'Every sub and donation queues a drink on stream — paced safely with automatic water breaks.' },
+    eventTitle: { type: String, default: 'Shots with Urnisa' },
+    eventSubtitle: { type: String, default: 'Every sub and donation queues whole-number shots on stream — paced safely with automatic water breaks.' },
     subsActive: { type: Boolean, default: false },
     donationsActive: { type: Boolean, default: false },
     bitsActive: { type: Boolean, default: false },
-    subsPerSip: { type: Number, default: 1 },
-    giftSubsForShot: { type: Number, default: 5 },
-    dollarsPerSip: { type: Number, default: 5 },
-    dollarsForShot: { type: Number, default: 20 },
-    bitsPerSip: { type: Number, default: 500 },
-    drinksPerWaterBreak: { type: Number, default: 5 },
-    maxDrinksCap: { type: Number, default: 25 },
-    sipLabel: { type: String, default: 'Sip of Drink' },
-    shotLabel: { type: String, default: 'Full Shot / Big Pour' },
-    mysteryLabel: { type: String, default: 'Mystery Mix' },
+    subsPerShot: { type: Number, default: 1 },
+    dollarsPerShot: { type: Number, default: 5 },
+    myrPerShot: { type: Number, default: 20 },
+    bitsPerShot: { type: Number, default: 500 },
+    shotsPerWaterBreak: { type: Number, default: 4 },
+    shotLabel: { type: String, default: 'Shot' },
     waterLabel: { type: String, default: 'Mandatory Water Break' },
     milestones: {
         type: [{ count: Number, reward: String }],
@@ -268,11 +263,15 @@ const DrinkSettings = mongoose.model('DrinkSettings', new mongoose.Schema({
 
 const DrinkQueueItem = mongoose.model('DrinkQueueItem', new mongoose.Schema({
     user: { type: String, required: true },
-    drinkType: { type: String, enum: ['sip', 'shot', 'mystery', 'water'], default: 'sip' },
+    drinkType: { type: String, enum: ['shot', 'water'], default: 'shot' },
     drinkLabel: { type: String, required: true },
     triggerType: { type: String, default: 'manual' },
     amountDisplay: { type: String, default: '' },
     message: { type: String, default: '' },
+    totalShots: { type: Number, default: 1 },
+    servedShots: { type: Number, default: 0 },
+    waterSwappedShots: { type: Number, default: 0 },
+    skippedShots: { type: Number, default: 0 },
     status: { type: String, enum: ['pending', 'completed', 'water_swapped', 'skipped'], default: 'pending' },
     isTest: { type: Boolean, default: false },
     sourceEventId: { type: String, index: true },
@@ -658,9 +657,27 @@ const processSnakesEvent = async (type, user, amount, providerId, tier = '1000',
     }
 };
 
-// --- Drinking Stream Event Engine (Strictly Isolated from Nisathon & Snakes) ---
+// --- Drinking Stream Event Engine (Shots-Only, Bundled Cards, Isolated from Nisathon & Snakes) ---
 const drinkProcessedCache = new Set();
 const DRINK_CACHE_EXPIRY_MS = 60000;
+
+const getDrinkRemainingShots = (item) => {
+    if (!item || item.drinkType === 'water') return item?.status === 'pending' ? 1 : 0;
+    const total = Math.max(1, Number(item.totalShots) || 1);
+    const resolved = (Number(item.servedShots) || 0) + (Number(item.waterSwappedShots) || 0) + (Number(item.skippedShots) || 0);
+    if (item.status !== 'pending' && resolved === 0) return 0;
+    return Math.max(0, total - resolved);
+};
+
+const getDrinkServedShots = (item) => {
+    if (!item || item.drinkType === 'water') return 0;
+    const explicit = Number(item.servedShots) || 0;
+    if (explicit > 0) return explicit;
+    if (item.status === 'completed' && !(Number(item.waterSwappedShots) || 0) && !(Number(item.skippedShots) || 0)) {
+        return Math.max(1, Number(item.totalShots) || 1);
+    }
+    return 0;
+};
 
 const getOrCreateDrinkSettings = async () => {
     let settings = await DrinkSettings.findOne({ key: 'main' });
@@ -670,7 +687,7 @@ const getOrCreateDrinkSettings = async () => {
     return settings;
 };
 
-const evaluateDrinkTrigger = (settings, payload, currentAlcoholTotal = 0) => {
+const evaluateDrinkTrigger = (settings, payload, currentShotTotal = 0) => {
     const rawType = String(payload.type || '').toLowerCase();
     const amount = Number(payload.amount) || 0;
     const myrAmount = Number(payload.myrAmount) || 0;
@@ -681,13 +698,16 @@ const evaluateDrinkTrigger = (settings, payload, currentAlcoholTotal = 0) => {
     let normalizedType = rawType;
     if (['subscriber', 'sub', 'resub', 'subscription'].includes(rawType)) normalizedType = 'sub';
     else if (rawType === 'gift') normalizedType = 'gift';
-    else if (['tip', 'donation', 'tip-myr'].includes(rawType)) normalizedType = 'donation';
+    else if (rawType === 'tip-myr' || rawType === 'donation_myr') normalizedType = 'donation_myr';
+    else if (['tip', 'donation'].includes(rawType)) normalizedType = 'donation';
     else if (['cheer', 'bits'].includes(rawType)) normalizedType = 'bits';
     else {
         return {
             shouldQueue: false,
             normalizedType,
             amountDisplay: '',
+            shotCount: 0,
+            waterCount: 0,
             items: [],
             reason: `Ignored unsupported event type "${rawType}"`
         };
@@ -700,18 +720,24 @@ const evaluateDrinkTrigger = (settings, payload, currentAlcoholTotal = 0) => {
                     shouldQueue: false,
                     normalizedType,
                     amountDisplay: normalizedType === 'gift' ? `${amount} Gift Sub(s)` : 'Sub',
+                    shotCount: 0,
+                    waterCount: 0,
                     items: [],
-                    reason: 'Subs & Gift Subs drink listener is OFF'
+                    reason: 'Subs & Gift Subs shot listener is OFF'
                 };
             }
-        } else if (normalizedType === 'donation') {
+        } else if (normalizedType === 'donation' || normalizedType === 'donation_myr') {
             if (!settings.donationsActive) {
                 return {
                     shouldQueue: false,
                     normalizedType,
-                    amountDisplay: `$${amount.toFixed(2)}`,
+                    amountDisplay: normalizedType === 'donation_myr'
+                        ? `RM${(myrAmount > 0 ? myrAmount : amount).toFixed(2)}`
+                        : `$${amount.toFixed(2)}`,
+                    shotCount: 0,
+                    waterCount: 0,
                     items: [],
-                    reason: 'Donations drink listener is OFF'
+                    reason: 'Donations shot listener is OFF'
                 };
             }
         } else if (normalizedType === 'bits') {
@@ -720,144 +746,114 @@ const evaluateDrinkTrigger = (settings, payload, currentAlcoholTotal = 0) => {
                     shouldQueue: false,
                     normalizedType,
                     amountDisplay: `${amount} Bits`,
+                    shotCount: 0,
+                    waterCount: 0,
                     items: [],
-                    reason: 'Bits drink listener is OFF'
+                    reason: 'Bits shot listener is OFF'
                 };
             }
         }
     }
 
-    const items = [];
+    const subsPerShot = Math.max(1, Number(settings.subsPerShot) || 1);
+    const dollarsPerShot = Math.max(0.5, Number(settings.dollarsPerShot) || 5);
+    const myrPerShot = Math.max(1, Number(settings.myrPerShot) || 20);
+    const bitsPerShot = Math.max(1, Number(settings.bitsPerShot) || 500);
+
+    let shotCount = 0;
     let amountDisplay = '';
-    const subsPerSip = Math.max(1, Number(settings.subsPerSip) || 1);
-    const giftSubsForShot = Math.max(0, Number(settings.giftSubsForShot) || 0);
-    const dollarsPerSip = Math.max(1, Number(settings.dollarsPerSip) || 5);
-    const dollarsForShot = Math.max(0, Number(settings.dollarsForShot) || 0);
-    const bitsPerSip = Math.max(1, Number(settings.bitsPerSip) || 500);
+    let mathDetail = '';
 
     if (normalizedType === 'sub') {
         if (!isTest && amount === 0) {
-            return { shouldQueue: false, normalizedType, amountDisplay: 'Sub', items: [], reason: 'Zero-amount sub child event skipped' };
+            return { shouldQueue: false, normalizedType, amountDisplay: 'Sub', shotCount: 0, waterCount: 0, items: [], reason: 'Zero-amount sub child event skipped' };
         }
+        let subCredit = Math.max(1, Math.floor(amount));
         if (tier.includes('3000') || tier === '3') {
             amountDisplay = 'Tier 3 Sub';
-            items.push({ drinkType: 'shot', drinkLabel: settings.shotLabel || 'Full Shot / Big Pour' });
+            subCredit = 3;
         } else if (tier.includes('2000') || tier === '2') {
             amountDisplay = 'Tier 2 Sub';
-            const sipCount = subsPerSip <= 1 ? 2 : 1;
-            for (let i = 0; i < sipCount; i++) {
-                items.push({ drinkType: 'sip', drinkLabel: settings.sipLabel || 'Sip of Drink' });
-            }
+            subCredit = 2;
         } else {
             amountDisplay = tier.includes('prime') ? 'Prime Sub' : 'Tier 1 Sub';
-            const count = Math.max(1, amount);
-            const sipCount = Math.floor(count / subsPerSip);
-            for (let i = 0; i < sipCount; i++) {
-                items.push({ drinkType: 'sip', drinkLabel: settings.sipLabel || 'Sip of Drink' });
-            }
         }
+        shotCount = Math.floor(subCredit / subsPerShot);
+        mathDetail = `floor(${subCredit} / ${subsPerShot}) = ${shotCount}`;
     } else if (normalizedType === 'gift') {
         const giftCount = Math.max(1, Math.floor(amount));
         amountDisplay = `${giftCount} Gift Sub${giftCount === 1 ? '' : 's'}`;
-        let rem = giftCount;
-        if (giftSubsForShot > 0 && rem >= giftSubsForShot) {
-            const shots = Math.floor(rem / giftSubsForShot);
-            rem = rem % giftSubsForShot;
-            for (let i = 0; i < shots; i++) {
-                items.push({ drinkType: 'shot', drinkLabel: settings.shotLabel || 'Full Shot / Big Pour' });
-            }
-        }
-        const sips = Math.floor(rem / subsPerSip);
-        for (let i = 0; i < sips; i++) {
-            items.push({ drinkType: 'sip', drinkLabel: settings.sipLabel || 'Sip of Drink' });
-        }
+        shotCount = Math.floor(giftCount / subsPerShot);
+        mathDetail = `floor(${giftCount} / ${subsPerShot}) = ${shotCount}`;
     } else if (normalizedType === 'donation') {
-        const effectiveDollars = rawType === 'tip-myr' && myrAmount > 0 ? myrAmount / 4.4 : amount;
+        const effectiveDollars = Math.max(0, amount);
         amountDisplay = `$${effectiveDollars.toFixed(2)}`;
-        let rem = effectiveDollars;
-        if (dollarsForShot > 0 && rem >= dollarsForShot) {
-            const shots = Math.floor(rem / dollarsForShot);
-            rem = rem - shots * dollarsForShot;
-            for (let i = 0; i < shots; i++) {
-                items.push({ drinkType: 'shot', drinkLabel: settings.shotLabel || 'Full Shot / Big Pour' });
-            }
-        }
-        const sips = Math.floor((rem + 0.0001) / dollarsPerSip);
-        for (let i = 0; i < sips; i++) {
-            items.push({ drinkType: 'sip', drinkLabel: settings.sipLabel || 'Sip of Drink' });
-        }
+        shotCount = Math.floor((effectiveDollars + 1e-6) / dollarsPerShot);
+        mathDetail = `floor($${effectiveDollars.toFixed(2)} / $${dollarsPerShot}) = ${shotCount}`;
+    } else if (normalizedType === 'donation_myr') {
+        const effectiveMyr = Math.max(0, myrAmount > 0 ? myrAmount : amount);
+        amountDisplay = `RM${effectiveMyr.toFixed(2)}`;
+        shotCount = Math.floor((effectiveMyr + 1e-6) / myrPerShot);
+        mathDetail = `floor(RM${effectiveMyr.toFixed(2)} / RM${myrPerShot}) = ${shotCount}`;
     } else if (normalizedType === 'bits') {
         const bitCount = Math.max(0, Math.floor(amount));
         amountDisplay = `${bitCount} Bits`;
-        const sips = Math.floor(bitCount / bitsPerSip);
-        for (let i = 0; i < sips; i++) {
-            items.push({ drinkType: 'sip', drinkLabel: settings.sipLabel || 'Sip of Drink' });
-        }
+        shotCount = Math.floor(bitCount / bitsPerShot);
+        mathDetail = `floor(${bitCount} / ${bitsPerShot}) = ${shotCount}`;
     }
 
-    if (items.length === 0) {
+    if (shotCount <= 0) {
         return {
             shouldQueue: false,
             normalizedType,
             amountDisplay,
+            shotCount: 0,
+            waterCount: 0,
             items: [],
-            reason: `Below minimum drink threshold (${amountDisplay})`
+            reason: `Below 1-shot threshold (${mathDetail || amountDisplay})`
         };
     }
 
-    const MAX_PER_EVENT = 20;
-    const cappedPerEvent = items.slice(0, MAX_PER_EVENT);
-    const maxCap = Math.max(0, Number(settings.maxDrinksCap) || 0);
+    const baseShotLabel = settings.shotLabel || 'Shot';
+    const bundledLabel = shotCount === 1 ? baseShotLabel : `${shotCount}x ${baseShotLabel}s`;
 
-    let finalAlcoholItems = cappedPerEvent;
-    let capNote = '';
-    if (maxCap > 0) {
-        const remainingCap = Math.max(0, maxCap - currentAlcoholTotal);
-        if (remainingCap <= 0) {
-            return {
-                shouldQueue: false,
-                normalizedType,
-                amountDisplay,
-                items: [],
-                reason: `Safety cap (${maxCap} drinks) reached`
-            };
-        }
-        if (finalAlcoholItems.length > remainingCap) {
-            finalAlcoholItems = finalAlcoholItems.slice(0, remainingCap);
-            capNote = ` (trimmed to safety cap ${maxCap})`;
-        }
+    const waterEvery = Math.max(0, Number(settings.shotsPerWaterBreak) || 0);
+    let waterCount = 0;
+    if (waterEvery > 0) {
+        const prevBucket = Math.floor(currentShotTotal / waterEvery);
+        const nextBucket = Math.floor((currentShotTotal + shotCount) / waterEvery);
+        waterCount = Math.max(0, nextBucket - prevBucket);
     }
 
-    const waterEvery = Math.max(0, Number(settings.drinksPerWaterBreak) || 0);
-    const expandedWithWater = [];
-    let runningAlcoholCount = currentAlcoholTotal;
-    for (const item of finalAlcoholItems) {
-        expandedWithWater.push({ ...item, isAutoWater: false });
-        runningAlcoholCount += 1;
-        if (waterEvery > 0 && runningAlcoholCount % waterEvery === 0) {
-            expandedWithWater.push({
-                drinkType: 'water',
-                drinkLabel: settings.waterLabel || 'Mandatory Water Break',
-                isAutoWater: true
-            });
+    const items = [
+        {
+            drinkType: 'shot',
+            drinkLabel: bundledLabel,
+            totalShots: shotCount,
+            isAutoWater: false
         }
+    ];
+
+    for (let w = 0; w < waterCount; w++) {
+        items.push({
+            drinkType: 'water',
+            drinkLabel: settings.waterLabel || 'Mandatory Water Break',
+            totalShots: 1,
+            isAutoWater: true
+        });
     }
 
-    const shotsQueued = expandedWithWater.filter(i => i.drinkType === 'shot').length;
-    const sipsQueued = expandedWithWater.filter(i => i.drinkType === 'sip').length;
-    const waterQueued = expandedWithWater.filter(i => i.drinkType === 'water').length;
-    const parts = [];
-    if (shotsQueued > 0) parts.push(`${shotsQueued} Shot${shotsQueued > 1 ? 's' : ''}`);
-    if (sipsQueued > 0) parts.push(`${sipsQueued} Sip${sipsQueued > 1 ? 's' : ''}`);
-    if (waterQueued > 0) parts.push(`${waterQueued} Auto Water Break${waterQueued > 1 ? 's' : ''}`);
+    const summary = `${shotCount} Shot${shotCount > 1 ? 's' : ''}${waterCount > 0 ? ` + ${waterCount} Auto Water Break${waterCount > 1 ? 's' : ''}` : ''}`;
 
     return {
         shouldQueue: true,
         normalizedType,
         amountDisplay,
-        items: expandedWithWater,
-        reason: `Matched rule${capNote}`,
-        summary: parts.join(' + ')
+        shotCount,
+        waterCount,
+        items,
+        reason: `Matched rule (${mathDetail})`,
+        summary
     };
 };
 
@@ -893,19 +889,24 @@ const processDrinkEvent = async (type, user, amount, message = '', providerId = 
     }
 
     const settings = await getOrCreateDrinkSettings();
-    const currentAlcoholTotal = await DrinkQueueItem.countDocuments({
-        status: { $in: ['pending', 'completed'] },
-        drinkType: { $ne: 'water' }
-    });
+    const activeShotItems = await DrinkQueueItem.find({
+        drinkType: { $ne: 'water' },
+        status: { $in: ['pending', 'completed'] }
+    }).select('totalShots servedShots waterSwappedShots skippedShots status');
+
+    let currentShotTotal = 0;
+    for (const item of activeShotItems) {
+        currentShotTotal += getDrinkServedShots(item) + getDrinkRemainingShots(item);
+    }
 
     const evalResult = evaluateDrinkTrigger(
         settings,
         { type, user, amount, myrAmount, tier, message, isTest, ignoreToggles },
-        currentAlcoholTotal
+        currentShotTotal
     );
 
     if (!evalResult.shouldQueue) {
-        if (isTest || dryRun || ['sub', 'gift', 'donation', 'bits'].includes(evalResult.normalizedType)) {
+        if (isTest || dryRun || ['sub', 'gift', 'donation', 'donation_myr', 'bits'].includes(evalResult.normalizedType)) {
             await recordDrinkDebugLog({
                 source: sourceLabel,
                 triggerType: evalResult.normalizedType,
@@ -944,7 +945,11 @@ const processDrinkEvent = async (type, user, amount, message = '', providerId = 
             drinkLabel: entry.drinkLabel,
             triggerType: entry.isAutoWater ? 'water_auto' : evalResult.normalizedType,
             amountDisplay: entry.isAutoWater ? `Auto check (${user || 'Stream'})` : evalResult.amountDisplay,
-            message: entry.isAutoWater ? 'Drink a glass of water before the next pour.' : (message || ''),
+            message: entry.isAutoWater ? 'Drink a glass of water before the next round of shots.' : (message || ''),
+            totalShots: entry.totalShots || 1,
+            servedShots: 0,
+            waterSwappedShots: 0,
+            skippedShots: 0,
             status: 'pending',
             isTest,
             sourceEventId: idx === 0 ? baseSourceId : `${baseSourceId}#${idx}`
@@ -952,7 +957,7 @@ const processDrinkEvent = async (type, user, amount, message = '', providerId = 
         createdDocs.push(doc);
     }
 
-    console.log(`🍹 [Drinks/${sourceLabel}] ${user || 'Anonymous'} (${evalResult.amountDisplay}) -> ${evalResult.summary}`);
+    console.log(`🥃 [Drinks/${sourceLabel}] ${user || 'Anonymous'} (${evalResult.amountDisplay}) -> ${evalResult.summary}`);
     await recordDrinkDebugLog({
         source: sourceLabel,
         triggerType: evalResult.normalizedType,
@@ -2260,6 +2265,16 @@ app.post('/api/webhooks/sociabuzz', async (req, res) => {
             console.error('❌ [SociaBuzz Webhook] Error routing to Snakes:', snakesErr.message);
         }
 
+        try {
+            if (isMYR) {
+                await processDrinkEvent('tip-myr', name, usdAmount, message, providerId, '1000', { myrAmount: amount });
+            } else {
+                await processDrinkEvent('tip', name, usdAmount, message, providerId);
+            }
+        } catch (drinkErr) {
+            console.error('❌ [SociaBuzz Webhook] Error routing to Drinks:', drinkErr.message);
+        }
+
         res.json({ success: true });
     } catch (err) {
         console.error('❌ [SociaBuzz Webhook] Critical Error processing webhook:', err);
@@ -2866,92 +2881,109 @@ app.post('/api/snakes/simulate-event', auth, async (req, res) => {
     }
 });
 
-// --- Drinking Stream Event Routes ---
+// --- Drinking Stream Event Routes (Shots-Only) ---
+const serializeDrinkQueueItem = (doc) => {
+    const obj = doc.toObject ? doc.toObject() : { ...doc };
+    const total = obj.drinkType === 'water' ? 1 : Math.max(1, Number(obj.totalShots) || 1);
+    const served = getDrinkServedShots(obj);
+    const waterSwapped = Number(obj.waterSwappedShots) || (obj.status === 'water_swapped' && obj.drinkType !== 'water' ? total : 0);
+    const skipped = Number(obj.skippedShots) || (obj.status === 'skipped' && obj.drinkType !== 'water' ? total : 0);
+    const remainingShots = getDrinkRemainingShots(obj);
+    return {
+        ...obj,
+        drinkType: obj.drinkType === 'water' ? 'water' : 'shot',
+        totalShots: total,
+        servedShots: served,
+        waterSwappedShots: waterSwapped,
+        skippedShots: skipped,
+        remainingShots
+    };
+};
+
 app.get('/api/drinks/state', async (req, res) => {
     try {
         const settings = await getOrCreateDrinkSettings();
-        const [pendingQueue, recentHistory, allValidNonWater] = await Promise.all([
+        const [pendingDocs, historyDocs, allShotDocs, completedWaterDocs] = await Promise.all([
             DrinkQueueItem.find({ status: 'pending' }).sort({ createdAt: 1 }).limit(100),
-            DrinkQueueItem.find({ status: { $in: ['completed', 'water_swapped', 'skipped'] } }).sort({ completedAt: -1, createdAt: -1 }).limit(40),
-            DrinkQueueItem.find({ status: { $in: ['pending', 'completed'] }, drinkType: { $ne: 'water' } }).sort({ createdAt: -1 }).limit(1000)
+            DrinkQueueItem.find({
+                $or: [
+                    { status: { $in: ['completed', 'water_swapped', 'skipped'] } },
+                    { servedShots: { $gt: 0 } },
+                    { waterSwappedShots: { $gt: 0 } }
+                ]
+            }).sort({ completedAt: -1, createdAt: -1 }).limit(40),
+            DrinkQueueItem.find({ drinkType: { $ne: 'water' } }).sort({ createdAt: -1 }).limit(1000),
+            DrinkQueueItem.find({ drinkType: 'water', status: 'completed' }).select('_id')
         ]);
 
-        const completedItems = await DrinkQueueItem.find({ status: { $in: ['completed', 'water_swapped'] } }).select('drinkType status');
-        let completedDrinks = 0;
-        let completedSips = 0;
+        const pendingQueue = pendingDocs.map(serializeDrinkQueueItem);
+        const recentHistory = historyDocs.map(serializeDrinkQueueItem);
+
         let completedShots = 0;
-        let completedMystery = 0;
-        let completedWater = 0;
-
-        for (const item of completedItems) {
-            if (item.drinkType === 'water' || item.status === 'water_swapped') {
-                completedWater += 1;
-            } else {
-                completedDrinks += 1;
-                if (item.drinkType === 'shot') completedShots += 1;
-                else if (item.drinkType === 'mystery') completedMystery += 1;
-                else completedSips += 1;
-            }
-        }
-
-        const totalAlcoholQueued = allValidNonWater.length;
-        const waterEvery = Math.max(0, Number(settings.drinksPerWaterBreak) || 0);
-        const pendingWaterBreaks = pendingQueue.filter(i => i.drinkType === 'water').length;
-        const progressToWater = waterEvery > 0 ? (completedDrinks % waterEvery) : 0;
-        const nextWaterIn = waterEvery > 0 ? (pendingWaterBreaks > 0 ? 0 : waterEvery - progressToWater) : 0;
-        const maxDrinksCap = Math.max(0, Number(settings.maxDrinksCap) || 0);
+        let pendingShotsCount = 0;
+        let completedWater = completedWaterDocs.length;
 
         const leaderboardMap = new Map();
-        for (const item of allValidNonWater) {
-            const rawUser = (item.user || 'Anonymous').trim() || 'Anonymous';
-            const key = rawUser.toLowerCase();
-            if (!leaderboardMap.has(key)) {
-                leaderboardMap.set(key, {
-                    user: rawUser,
-                    totalDrinks: 0,
-                    sips: 0,
-                    shots: 0,
-                    mystery: 0,
-                    lastTrigger: item.amountDisplay || ''
-                });
+
+        for (const doc of allShotDocs) {
+            const item = serializeDrinkQueueItem(doc);
+            completedShots += item.servedShots;
+            if (item.status === 'pending') {
+                pendingShotsCount += item.remainingShots;
             }
-            const entry = leaderboardMap.get(key);
-            entry.totalDrinks += 1;
-            if (item.drinkType === 'shot') entry.shots += 1;
-            else if (item.drinkType === 'mystery') entry.mystery += 1;
-            else entry.sips += 1;
+            completedWater += item.waterSwappedShots;
+
+            const activeContribution = item.servedShots + (item.status === 'pending' ? item.remainingShots : 0);
+            if (activeContribution > 0 || item.waterSwappedShots > 0) {
+                const rawUser = (item.user || 'Anonymous').trim() || 'Anonymous';
+                const key = rawUser.toLowerCase();
+                if (!leaderboardMap.has(key)) {
+                    leaderboardMap.set(key, {
+                        user: rawUser,
+                        totalShots: 0,
+                        servedShots: 0,
+                        swappedShots: 0,
+                        lastTrigger: item.amountDisplay || ''
+                    });
+                }
+                const entry = leaderboardMap.get(key);
+                entry.totalShots += activeContribution;
+                entry.servedShots += item.servedShots;
+                entry.swappedShots += item.waterSwappedShots;
+            }
         }
 
+        const pendingWaterBreaks = pendingQueue.filter(i => i.drinkType === 'water').length;
+        const waterEvery = Math.max(0, Number(settings.shotsPerWaterBreak) || 0);
+        const progressToWater = waterEvery > 0 ? (completedShots % waterEvery) : 0;
+        const nextWaterIn = waterEvery > 0 ? (pendingWaterBreaks > 0 ? 0 : waterEvery - progressToWater) : 0;
+
         const leaderboard = Array.from(leaderboardMap.values())
-            .sort((a, b) => (b.totalDrinks - a.totalDrinks) || (b.shots - a.shots))
+            .filter(e => e.totalShots > 0)
+            .sort((a, b) => (b.totalShots - a.totalShots) || (b.servedShots - a.servedShots))
             .slice(0, 20)
             .map((entry, idx) => ({ rank: idx + 1, ...entry }));
 
-        const latestTrigger = allValidNonWater.length > 0 ? allValidNonWater[0] : null;
+        const latestShotDoc = allShotDocs.find(d => d.status !== 'skipped') || null;
 
         res.json({
             settings,
             stats: {
-                pendingCount: pendingQueue.length,
-                pendingDrinksCount: pendingQueue.filter(i => i.drinkType !== 'water').length,
+                pendingCardsCount: pendingQueue.length,
+                pendingShotsCount,
                 pendingWaterBreaks,
-                completedDrinks,
-                completedSips,
                 completedShots,
-                completedMystery,
                 completedWater,
-                totalAlcoholQueued,
+                totalShotsQueued: completedShots + pendingShotsCount,
                 waterEvery,
                 progressToWater,
                 nextWaterIn,
-                waterBreakDue: pendingWaterBreaks > 0,
-                maxDrinksCap,
-                isCapReached: maxDrinksCap > 0 && totalAlcoholQueued >= maxDrinksCap
+                waterBreakDue: pendingWaterBreaks > 0
             },
             pendingQueue,
             recentHistory,
             leaderboard,
-            latestTrigger
+            latestTrigger: latestShotDoc ? serializeDrinkQueueItem(latestShotDoc) : null
         });
     } catch (e) {
         res.status(500).json({ error: e.message });
@@ -2963,23 +2995,19 @@ app.post('/api/drinks/settings', auth, async (req, res) => {
         const body = req.body || {};
         const settings = await getOrCreateDrinkSettings();
 
-        if (typeof body.eventTitle === 'string') settings.eventTitle = body.eventTitle.trim() || 'Drinks with Urnisa';
+        if (typeof body.eventTitle === 'string') settings.eventTitle = body.eventTitle.trim() || 'Shots with Urnisa';
         if (typeof body.eventSubtitle === 'string') settings.eventSubtitle = body.eventSubtitle.trim();
         if (typeof body.subsActive === 'boolean') settings.subsActive = body.subsActive;
         if (typeof body.donationsActive === 'boolean') settings.donationsActive = body.donationsActive;
         if (typeof body.bitsActive === 'boolean') settings.bitsActive = body.bitsActive;
 
-        if (body.subsPerSip !== undefined) settings.subsPerSip = Math.max(1, parseInt(body.subsPerSip, 10) || 1);
-        if (body.giftSubsForShot !== undefined) settings.giftSubsForShot = Math.max(0, parseInt(body.giftSubsForShot, 10) || 0);
-        if (body.dollarsPerSip !== undefined) settings.dollarsPerSip = Math.max(1, parseFloat(body.dollarsPerSip) || 5);
-        if (body.dollarsForShot !== undefined) settings.dollarsForShot = Math.max(0, parseFloat(body.dollarsForShot) || 0);
-        if (body.bitsPerSip !== undefined) settings.bitsPerSip = Math.max(100, parseInt(body.bitsPerSip, 10) || 500);
-        if (body.drinksPerWaterBreak !== undefined) settings.drinksPerWaterBreak = Math.max(0, parseInt(body.drinksPerWaterBreak, 10) || 0);
-        if (body.maxDrinksCap !== undefined) settings.maxDrinksCap = Math.max(0, parseInt(body.maxDrinksCap, 10) || 0);
+        if (body.subsPerShot !== undefined) settings.subsPerShot = Math.max(1, parseInt(body.subsPerShot, 10) || 1);
+        if (body.dollarsPerShot !== undefined) settings.dollarsPerShot = Math.max(0.5, parseFloat(body.dollarsPerShot) || 5);
+        if (body.myrPerShot !== undefined) settings.myrPerShot = Math.max(1, parseFloat(body.myrPerShot) || 20);
+        if (body.bitsPerShot !== undefined) settings.bitsPerShot = Math.max(100, parseInt(body.bitsPerShot, 10) || 500);
+        if (body.shotsPerWaterBreak !== undefined) settings.shotsPerWaterBreak = Math.max(0, parseInt(body.shotsPerWaterBreak, 10) || 0);
 
-        if (typeof body.sipLabel === 'string' && body.sipLabel.trim()) settings.sipLabel = body.sipLabel.trim();
         if (typeof body.shotLabel === 'string' && body.shotLabel.trim()) settings.shotLabel = body.shotLabel.trim();
-        if (typeof body.mysteryLabel === 'string' && body.mysteryLabel.trim()) settings.mysteryLabel = body.mysteryLabel.trim();
         if (typeof body.waterLabel === 'string' && body.waterLabel.trim()) settings.waterLabel = body.waterLabel.trim();
 
         if (Array.isArray(body.milestones)) {
@@ -3016,14 +3044,47 @@ app.post('/api/drinks/queue/:id/action', auth, async (req, res) => {
         const item = await DrinkQueueItem.findById(req.params.id);
         if (!item) return res.status(404).json({ error: 'Queue item not found' });
 
-        if (action === 'complete') item.status = 'completed';
-        else if (action === 'swap_water') item.status = 'water_swapped';
-        else if (action === 'skip') item.status = 'skipped';
-        else return res.status(400).json({ error: 'Invalid action' });
+        if (item.drinkType === 'water') {
+            if (action === 'complete' || action === 'complete_one' || action === 'complete_all') {
+                item.status = 'completed';
+            } else if (action === 'skip' || action === 'skip_all') {
+                item.status = 'skipped';
+            } else {
+                return res.status(400).json({ error: 'Invalid action for water break' });
+            }
+            item.completedAt = new Date();
+            await item.save();
+            return res.json({ success: true, item: serializeDrinkQueueItem(item) });
+        }
 
+        const remaining = getDrinkRemainingShots(item);
+        if (remaining <= 0) {
+            return res.json({ success: true, item: serializeDrinkQueueItem(item) });
+        }
+
+        if (action === 'complete_one') {
+            item.servedShots = (Number(item.servedShots) || 0) + 1;
+        } else if (action === 'complete_all' || action === 'complete') {
+            item.servedShots = (Number(item.servedShots) || 0) + remaining;
+        } else if (action === 'swap_water_one') {
+            item.waterSwappedShots = (Number(item.waterSwappedShots) || 0) + 1;
+        } else if (action === 'swap_water_all' || action === 'swap_water') {
+            item.waterSwappedShots = (Number(item.waterSwappedShots) || 0) + remaining;
+        } else if (action === 'skip' || action === 'skip_all') {
+            item.skippedShots = (Number(item.skippedShots) || 0) + remaining;
+        } else {
+            return res.status(400).json({ error: 'Invalid action' });
+        }
+
+        const leftAfter = getDrinkRemainingShots(item);
+        if (leftAfter <= 0) {
+            if ((item.servedShots || 0) > 0) item.status = 'completed';
+            else if ((item.waterSwappedShots || 0) > 0) item.status = 'water_swapped';
+            else item.status = 'skipped';
+        }
         item.completedAt = new Date();
         await item.save();
-        res.json({ success: true, item });
+        res.json({ success: true, item: serializeDrinkQueueItem(item) });
     } catch (e) {
         res.status(500).json({ error: e.message });
     }
@@ -3031,24 +3092,26 @@ app.post('/api/drinks/queue/:id/action', auth, async (req, res) => {
 
 app.post('/api/drinks/manual', auth, async (req, res) => {
     try {
-        const { user = 'Urnisa', drinkType = 'sip', drinkLabel, message = '' } = req.body || {};
+        const { user = 'Urnisa', drinkType = 'shot', shotCount = 1, drinkLabel, message = '' } = req.body || {};
         const settings = await getOrCreateDrinkSettings();
-        const safeType = ['sip', 'shot', 'mystery', 'water'].includes(drinkType) ? drinkType : 'sip';
-        const fallbackLabel = safeType === 'water'
-            ? settings.waterLabel
-            : safeType === 'shot'
-                ? settings.shotLabel
-                : safeType === 'mystery'
-                    ? settings.mysteryLabel
-                    : settings.sipLabel;
+        const safeType = drinkType === 'water' ? 'water' : 'shot';
+        const safeCount = safeType === 'water' ? 1 : Math.max(1, parseInt(shotCount, 10) || 1);
+        const baseShotLabel = settings.shotLabel || 'Shot';
+        const resolvedLabel = safeType === 'water'
+            ? (settings.waterLabel || 'Mandatory Water Break')
+            : (drinkLabel && String(drinkLabel).trim()) || (safeCount === 1 ? baseShotLabel : `${safeCount}x ${baseShotLabel}s`);
 
         const item = await DrinkQueueItem.create({
             user: (user || 'Admin').trim(),
             drinkType: safeType,
-            drinkLabel: (drinkLabel && String(drinkLabel).trim()) || fallbackLabel,
+            drinkLabel: resolvedLabel,
             triggerType: safeType === 'water' ? 'water_auto' : 'manual',
-            amountDisplay: safeType === 'water' ? 'Manual Water Break' : 'Manual Trigger',
+            amountDisplay: safeType === 'water' ? 'Manual Water Break' : `Manual (${safeCount} Shot${safeCount > 1 ? 's' : ''})`,
             message: String(message || '').trim(),
+            totalShots: safeCount,
+            servedShots: 0,
+            waterSwappedShots: 0,
+            skippedShots: 0,
             status: 'pending',
             isTest: false,
             sourceEventId: `drink-manual-${Date.now()}-${Math.random()}`
@@ -3065,7 +3128,7 @@ app.post('/api/drinks/manual', auth, async (req, res) => {
             isTest: false
         });
 
-        res.json({ success: true, item });
+        res.json({ success: true, item: serializeDrinkQueueItem(item) });
     } catch (e) {
         res.status(500).json({ error: e.message });
     }
@@ -3077,8 +3140,9 @@ app.post('/api/drinks/simulate', auth, async (req, res) => {
             type = 'sub',
             user = 'TestBartender',
             amount = 1,
+            myrAmount = 0,
             tier = '1000',
-            message = 'Test drink event!',
+            message = 'Test shot event!',
             dryRun = false,
             ignoreToggles = false
         } = req.body || {};
@@ -3090,7 +3154,12 @@ app.post('/api/drinks/simulate', auth, async (req, res) => {
             message,
             `drink-test-${Date.now()}-${Math.random()}`,
             tier,
-            { isTest: true, dryRun: Boolean(dryRun), ignoreToggles: Boolean(ignoreToggles) }
+            {
+                isTest: true,
+                dryRun: Boolean(dryRun),
+                ignoreToggles: Boolean(ignoreToggles),
+                myrAmount: Number(myrAmount) || (type === 'tip-myr' ? Number(amount) || 0 : 0)
+            }
         );
 
         res.json({ success: true, dryRun: Boolean(dryRun), result });
