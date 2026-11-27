@@ -1400,7 +1400,9 @@ const syncSessionFallback = async (channelId, stats) => {
             if (stats) await processEvent(stats, 'tip', lastTip.name, lastTip.amount, lastTip.message, `session-tip-${lastTip.name}-${lastTip.amount}`);
             await processSnakesEvent('tip', lastTip.name, lastTip.amount, `session-tip-${lastTip.name}-${lastTip.amount}`);
             try {
-                await processDrinkEvent('tip', lastTip.name, lastTip.amount, lastTip.message || '', `session-tip-${lastTip.name}-${lastTip.amount}`);
+                await processDrinkEvent('tip', lastTip.name, lastTip.amount, lastTip.message || '', `session-tip-${lastTip.name}-${lastTip.amount}`, '1000', {
+                    currency: lastTip.currency || 'USD'
+                });
             } catch (drinkErr) {
                 console.error('[Drinks] Non-fatal session tip sync error:', drinkErr.message);
             }
@@ -2882,24 +2884,7 @@ app.post('/api/snakes/simulate-event', auth, async (req, res) => {
     }
 });
 
-// --- Drinking Stream Event Routes (Shots-Only) ---
-const serializeDrinkQueueItem = (doc) => {
-    const obj = doc.toObject ? doc.toObject() : { ...doc };
-    const total = obj.drinkType === 'water' ? 1 : Math.max(1, Number(obj.totalShots) || 1);
-    const served = getDrinkServedShots(obj);
-    const waterSwapped = Number(obj.waterSwappedShots) || (obj.status === 'water_swapped' && obj.drinkType !== 'water' ? total : 0);
-    const skipped = Number(obj.skippedShots) || (obj.status === 'skipped' && obj.drinkType !== 'water' ? total : 0);
-    const remainingShots = getDrinkRemainingShots(obj);
-    return {
-        ...obj,
-        drinkType: obj.drinkType === 'water' ? 'water' : 'shot',
-        totalShots: total,
-        servedShots: served,
-        waterSwappedShots: waterSwapped,
-        skippedShots: skipped,
-        remainingShots
-    };
-};
+// --- Drinking Stream Event Routes (Donations-Only GBP + Spin Wheel) ---
 
 app.get('/api/drinks/state', async (req, res) => {
     try {
