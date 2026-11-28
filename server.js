@@ -3321,6 +3321,15 @@ app.post('/api/drinks/reset', auth, async (req, res) => {
     }
 });
 
+app.post('/api/drinks/wheel/clear', auth, async (req, res) => {
+    try {
+        const result = await DrinkSpinHistory.deleteMany({});
+        res.json({ success: true, deletedCount: result.deletedCount || 0 });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
 // --- Standalone Countdown Routes ---
 app.get('/api/countdown/stats', async (req, res) => {
     if (mongoose.connection.readyState !== 1) return res.json({});
