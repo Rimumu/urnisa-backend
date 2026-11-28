@@ -2947,6 +2947,7 @@ app.get('/api/drinks/state', async (req, res) => {
         const recentHistory = historyDocs.map(serializeDrinkQueueItem);
 
         let completedShots = 0;
+        let skippedShots = 0;
         let pendingShotsCount = 0;
 
         const leaderboardMap = new Map();
@@ -2954,6 +2955,7 @@ app.get('/api/drinks/state', async (req, res) => {
         for (const doc of allShotDocs) {
             const item = serializeDrinkQueueItem(doc);
             completedShots += item.servedShots;
+            skippedShots += item.skippedShots;
             if (item.status === 'pending') {
                 pendingShotsCount += item.remainingShots;
             }
@@ -3030,6 +3032,7 @@ app.get('/api/drinks/state', async (req, res) => {
                 pendingCardsCount: pendingQueue.length,
                 pendingShotsCount,
                 completedShots,
+                skippedShots,
                 totalShotsQueued: completedShots + pendingShotsCount,
                 shotsPerSpin,
                 unlockedSpins,
@@ -3107,6 +3110,8 @@ app.post('/api/drinks/queue/:id/action', auth, async (req, res) => {
             item.servedShots = (Number(item.servedShots) || 0) + 1;
         } else if (action === 'complete_all' || action === 'complete') {
             item.servedShots = (Number(item.servedShots) || 0) + remaining;
+        } else if (action === 'skip_one') {
+            item.skippedShots = (Number(item.skippedShots) || 0) + 1;
         } else if (action === 'skip' || action === 'skip_all') {
             item.skippedShots = (Number(item.skippedShots) || 0) + remaining;
         } else {
