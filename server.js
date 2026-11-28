@@ -1028,7 +1028,7 @@ const processEvent = async (stats, type, user, amount, message, providerId, tier
     let eventType = type;
 
     if (['subscriber', 'sub', 'resub', 'subscription'].includes(type)) {
-        if (!isManual && ((message || '').includes('gift') || amount === 0)) {
+        if (!isManual && amount === 0) {
             return 0;
         }
 
@@ -1180,11 +1180,6 @@ const processBufferedGift = async (sender, data) => {
             }
         }
         await processSnakesEvent('gift', sender, data.count, providerId, data.tier, false, data.avatar);
-        try {
-            await processDrinkEvent('gift', sender, data.count, `Gifted ${data.count} subs`, providerId, data.tier);
-        } catch (drinkErr) {
-            console.error('[Drinks] Non-fatal gift buffer error:', drinkErr.message);
-        }
     } catch (e) {
         console.error('Gift Buffer Error:', e);
     }
@@ -1356,7 +1351,7 @@ const fetchAndProcess = async (channelId, _label, stats, limit = 25, offset = 0)
             timeout: 10000
         });
 
-        if (!activities || activities.length === 0) return [];
+        if (!activities || activities.length === 0) return offset === 0 ? null : [];
 
         if (offset === 0) {
             activities.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
@@ -1405,7 +1400,7 @@ const fetchAndProcess = async (channelId, _label, stats, limit = 25, offset = 0)
         }
         return activities;
     } catch {
-        return [];
+        return offset === 0 ? null : [];
     }
 };
 
@@ -1428,11 +1423,6 @@ const syncSessionFallback = async (channelId, stats) => {
             }
             if (stats) await processEvent(stats, type, username, 1, '', `session-sub-${username}`, lastSub.tier);
             await processSnakesEvent(type, username, 1, `session-sub-${username}`, lastSub.tier, false, lastSub.avatar);
-            try {
-                await processDrinkEvent(type, username, 1, '', `session-sub-${username}`, lastSub.tier);
-            } catch (drinkErr) {
-                console.error('[Drinks] Non-fatal session sub sync error:', drinkErr.message);
-            }
             changes = true;
         }
 
@@ -1454,11 +1444,6 @@ const syncSessionFallback = async (channelId, stats) => {
         if (lastCheer) {
             if (stats) await processEvent(stats, 'cheer', lastCheer.name, lastCheer.amount, lastCheer.message, `session-cheer-${lastCheer.name}-${lastCheer.amount}`);
             await processSnakesEvent('cheer', lastCheer.name, lastCheer.amount, `session-cheer-${lastCheer.name}-${lastCheer.amount}`);
-            try {
-                await processDrinkEvent('cheer', lastCheer.name, lastCheer.amount, lastCheer.message || '', `session-cheer-${lastCheer.name}-${lastCheer.amount}`);
-            } catch (drinkErr) {
-                console.error('[Drinks] Non-fatal session cheer sync error:', drinkErr.message);
-            }
             changes = true;
         }
 
@@ -1480,7 +1465,7 @@ const runSync = async (forceDeep = false) => {
         if (resolvedId) {
             const limit = forceDeep ? 100 : 25;
             const c1 = await fetchAndProcess(resolvedId, 'AUTO-ID', stats, limit);
-            if (!c1 && forceDeep) await syncSessionFallback(resolvedId, stats);
+            if (c1 === null && forceDeep) await syncSessionFallback(resolvedId, stats);
             if ((c1 || forceDeep) && stats) await stats.save();
         }
     } catch (e) {
