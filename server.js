@@ -264,6 +264,7 @@ const DrinkQueueItem = mongoose.model('DrinkQueueItem', new mongoose.Schema({
     drinkLabel: { type: String, required: true },
     triggerType: { type: String, default: 'manual' },
     amountDisplay: { type: String, default: '' },
+    gbpAmount: { type: Number, default: 0 },
     message: { type: String, default: '' },
     totalShots: { type: Number, default: 1 },
     servedShots: { type: Number, default: 0 },
@@ -732,33 +733,72 @@ const formatDrinkOriginalAmount = (amount, currency) => {
     return `${amount.toFixed(2)} ${cur}`;
 };
 
-const getDrinkRemainingShots = (item) => {
-    if (!item) return 0;
-    const total = Math.max(1, Number(item.totalShots) || 1);
-    const resolved = (Number(item.servedShots) || 0) + (Number(item.skippedShots) || 0);
-    if (item.status !== 'pending' && resolved === 0) return 0;
-    return Math.max(0, total - resolved);
+const parseDrinkShotCountFromText = (drinkLabel = '', amountDisplay = '') => {
+    const labelStr = String(drinkLabel || '');
+    const xMatch = labelStr.match(/(\d+)\s*x\b/i);
+    if (xMatch) return Math.max(0, parseInt(xMatch[1], 10) || 0);
+    const wordsMatch = labelStr.match(/\b(\d+)\s+shots?\b/i);
+    if (wordsMatch) return Math.max(0, parseInt(wordsMatch[1], 10) || 0);
+    const amtMatch = String(amountDisplay || '').match(/\((\d+)\s+shots?\)/i);
+    if (amtMatch) return Math.max(0, parseInt(amtMatch[1], 10) || 0);
+    return 0;
+};
+
+const getDrinkTotalShots = (item) => {
+    if (!item) return 1;
+    const explicit = Number(item.totalShots) || 0;
+    const parsed = parseDrinkShotCountFromText(item.drinkLabel, item.amountDisplay);
+    return Math.max(1, explicit, parsed);
 };
 
 const getDrinkServedShots = (item) => {
     if (!item) return 0;
-    const explicit = Number(item.servedShots) || 0;
-    if (explicit > 0) return explicit;
-    if (item.status === 'completed' && !(Number(item.skippedShots) || 0)) {
-        return Math.max(1, Number(item.totalShots) || 1);
+    const total = getDrinkTotalShots(item);
+    const skipped = Math.max(0, Number(item.skippedShots) || 0);
+    if (item.status === 'completed' && skipped === 0) {
+        return total;
+    }
+    const explicit = Math.max(0, Number(item.servedShots) || 0);
+    if (explicit > 0) return Math.min(total, explicit);
+    return 0;
+};
+
+const getDrinkRemainingShots = (item) => {
+    if (!item) return 0;
+    const total = getDrinkTotalShots(item);
+    const resolved = getDrinkServedShots(item) + Math.max(0, Number(item.skippedShots) || 0);
+    if (item.status !== 'pending' && resolved === 0) return 0;
+    return Math.max(0, total - resolved);
+};
+
+const getDrinkGbpAmount = (item) => {
+    if (!item) return 0;
+    const explicit = Number(item.gbpAmount);
+    if (Number.isFinite(explicit) && explicit > 0) {
+        return Math.round(explicit * 100) / 100;
+    }
+    const display = String(item.amountDisplay || '');
+    const gbpMatch = display.match(/£\s*([\d,]+(?:\.\d+)?)/i);
+    if (gbpMatch) {
+        const parsed = parseFloat(gbpMatch[1].replace(/,/g, ''));
+        if (Number.isFinite(parsed) && parsed > 0) {
+            return Math.round(parsed * 100) / 100;
+        }
     }
     return 0;
 };
 
 const serializeDrinkQueueItem = (doc) => {
     const obj = doc.toObject ? doc.toObject() : { ...doc };
-    const totalShots = Math.max(1, Number(obj.totalShots) || 1);
+    const totalShots = getDrinkTotalShots(obj);
     const servedShots = getDrinkServedShots(obj);
     const skippedShots = Number(obj.skippedShots) || (obj.status === 'skipped' && servedShots === 0 ? totalShots : 0);
     const remainingShots = obj.status === 'pending' ? Math.max(0, totalShots - servedShots - skippedShots) : 0;
+    const gbpAmount = getDrinkGbpAmount(obj);
     return {
         ...obj,
         drinkType: 'shot',
+        gbpAmount,
         totalShots,
         servedShots,
         skippedShots,
@@ -943,6 +983,7 @@ const processDrinkEvent = async (type, user, amount, message = '', providerId = 
             drinkLabel: entry.drinkLabel,
             triggerType: evalResult.normalizedType,
             amountDisplay: evalResult.amountDisplay,
+            gbpAmount: Math.round((Number(evalResult.gbpAmount) || 0) * 100) / 100,
             message: message || '',
             totalShots: entry.totalShots || 1,
             servedShots: 0,
@@ -2898,7 +2939,7 @@ app.get('/api/drinks/state', async (req, res) => {
                     { servedShots: { $gt: 0 } }
                 ]
             }).sort({ completedAt: -1, createdAt: -1 }).limit(40),
-            DrinkQueueItem.find({ drinkType: 'shot' }).sort({ createdAt: -1 }).limit(1000),
+            DrinkQueueItem.find({ drinkType: 'shot' }).sort({ createdAt: -1 }).limit(5000),
             DrinkSpinHistory.find().sort({ startedAt: -1 }).limit(50)
         ]);
 
@@ -2926,12 +2967,14 @@ app.get('/api/drinks/state', async (req, res) => {
                         user: rawUser,
                         totalShots: 0,
                         servedShots: 0,
+                        totalGbp: 0,
                         lastTrigger: item.amountDisplay || ''
                     });
                 }
                 const entry = leaderboardMap.get(key);
                 entry.totalShots += activeContribution;
                 entry.servedShots += item.servedShots;
+                entry.totalGbp = Math.round((entry.totalGbp + (item.gbpAmount || 0)) * 100) / 100;
             }
         }
 
@@ -2972,9 +3015,13 @@ app.get('/api/drinks/state', async (req, res) => {
 
         const leaderboard = Array.from(leaderboardMap.values())
             .filter(e => e.totalShots > 0)
-            .sort((a, b) => (b.totalShots - a.totalShots) || (b.servedShots - a.servedShots))
+            .sort((a, b) => (b.totalShots - a.totalShots) || (b.servedShots - a.servedShots) || (b.totalGbp - a.totalGbp))
             .slice(0, 20)
-            .map((entry, idx) => ({ rank: idx + 1, ...entry }));
+            .map((entry, idx) => ({
+                rank: idx + 1,
+                ...entry,
+                lastTrigger: entry.totalGbp > 0 ? `£${entry.totalGbp.toFixed(2)} GBP` : entry.lastTrigger
+            }));
 
         const latestShotDoc = allShotDocs.find(d => d.status !== 'skipped') || null;
 
@@ -3051,6 +3098,7 @@ app.post('/api/drinks/queue/:id/action', auth, async (req, res) => {
         const item = await DrinkQueueItem.findById(req.params.id);
         if (!item) return res.status(404).json({ error: 'Queue item not found' });
 
+        item.totalShots = getDrinkTotalShots(item);
         const remaining = getDrinkRemainingShots(item);
         if (remaining <= 0) {
             return res.json({ success: true, item: serializeDrinkQueueItem(item) });
