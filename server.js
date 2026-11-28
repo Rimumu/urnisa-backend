@@ -2958,8 +2958,7 @@ app.get('/api/drinks/state', async (req, res) => {
                 pendingShotsCount += item.remainingShots;
             }
 
-            const activeContribution = item.servedShots + (item.status === 'pending' ? item.remainingShots : 0);
-            if (activeContribution > 0) {
+            if (item.totalShots > 0 || item.gbpAmount > 0) {
                 const rawUser = (item.user || 'Anonymous').trim() || 'Anonymous';
                 const key = rawUser.toLowerCase();
                 if (!leaderboardMap.has(key)) {
@@ -2972,7 +2971,7 @@ app.get('/api/drinks/state', async (req, res) => {
                     });
                 }
                 const entry = leaderboardMap.get(key);
-                entry.totalShots += activeContribution;
+                entry.totalShots += item.totalShots;
                 entry.servedShots += item.servedShots;
                 entry.totalGbp = Math.round((entry.totalGbp + (item.gbpAmount || 0)) * 100) / 100;
             }
